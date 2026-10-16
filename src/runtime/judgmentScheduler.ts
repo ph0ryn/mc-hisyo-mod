@@ -4,17 +4,21 @@ import type { StoredEvent } from "../events/eventLog.js";
 import type { ResponseHook } from "../hooks/responseHooks.js";
 import { sameWorldBinding, type WorldBinding } from "../protocol/bridge.js";
 import { RpcError } from "../transport/rpcPeer.js";
+import { ActivePlayClock } from "./activePlayClock.js";
 import { JudgmentQueue, type JudgmentBatch } from "./judgmentQueue.js";
 import { startPiSession, type PiSessionOptions } from "./piSession.js";
 
 export interface JudgmentSchedulerOptions extends Omit<PiSessionOptions, "world"> {
   maxPendingBytes?: number;
+  /** Monotonic milliseconds, shared by lifecycle changes and poll samples. */
+  monotonicNow?: () => number;
 }
 
 type Session = Awaited<ReturnType<typeof startPiSession>>;
 interface WorldJudgments {
   binding: WorldBinding;
   queue: JudgmentQueue;
+  clock: ActivePlayClock;
   startup: Promise<void>;
   session?: Session;
   onFault?: (error: Error) => void;
@@ -29,6 +33,7 @@ function asError(error: unknown): Error {
 /** Single world/session owner and synchronous intake; not yet activated by the CLI. */
 export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
   readonly #options: JudgmentSchedulerOptions;
+  readonly #now: () => number;
   readonly #releaseIntake: () => void;
   #world: WorldJudgments | undefined;
   // Includes startup and confirmed child termination of every retired context.
@@ -48,6 +53,7 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
       model: structuredClone(options.model),
       prefixArgs: [...(options.prefixArgs ?? [])],
     };
+    this.#now = options.monotonicNow ?? (() => performance.now());
     const bridge = options.bridge;
     this.#releaseIntake = bridge.handlePlayerMessages(this.#message);
     bridge.on("attach", this.#attached);
@@ -80,6 +86,7 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
     const world: WorldJudgments = {
       binding: { ...attached.binding },
       queue: new JudgmentQueue(attached.binding, this.#options.maxPendingBytes),
+      clock: new ActivePlayClock(),
       // Even admission failure must retain the predecessor's pending termination.
       startup: this.#retirement,
       batch: undefined,
@@ -87,6 +94,7 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
     };
     this.#world = world;
     try {
+      world.clock.setPlaying(!attached.paused, this.#now());
       world.queue.enqueueStart();
     } catch (error) {
       this.#fail(asError(error));
@@ -121,8 +129,37 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
 
   readonly #status = (attached: AttachedWorld) => {
     const world = this.#world;
-    if (world && sameWorldBinding(world.binding, attached.binding)) this.#pump(world);
+    if (!world || !this.#current(world) || !sameWorldBinding(world.binding, attached.binding))
+      return;
+    try {
+      world.clock.setPlaying(!attached.paused, this.#now());
+      this.#pump(world);
+    } catch (error) {
+      this.#fail(asError(error));
+    }
   };
+
+  /** Runtime sampling inlet; false means no reservation, not a new timer or retry. */
+  poll(binding: WorldBinding): boolean {
+    const world = this.#world;
+    if (
+      !world ||
+      !this.#current(world) ||
+      !sameWorldBinding(world.binding, binding) ||
+      this.#options.bridge.readyWorld!.paused
+    )
+      return false;
+    try {
+      if (!world.clock.poll(this.#now())) return false;
+      // Reuse the single pending flag without displacing player or hook reasons.
+      world.queue.enqueuePoll();
+      this.#pump(world);
+      return true;
+    } catch (error) {
+      this.#fail(asError(error));
+      return false;
+    }
+  }
 
   readonly #message = (binding: WorldBinding, text: string): undefined => {
     if (this.#failure) throw new RpcError(-32004, this.#failure.message);

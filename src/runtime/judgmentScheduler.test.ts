@@ -97,6 +97,7 @@ class SessionStub extends EventEmitter<{ fault: [error: Error] }> {
 beforeEach(() => vi.mocked(startPiSession).mockReset());
 
 function fixture(config: { ready?: boolean; paused?: boolean; maxPendingBytes?: number } = {}) {
+  let now = 0;
   const bridge = new BridgeStub();
   if (config.ready !== false) bridge.attach(world, config.paused);
   const sessions: SessionStub[] = [];
@@ -110,6 +111,7 @@ function fixture(config: { ready?: boolean; paused?: boolean; maxPendingBytes?: 
     // Nominal concrete dependencies are never constructed by these unit tests.
     bridge: bridge as unknown as DirectorBridge,
     dataDirectory: "/unused",
+    monotonicNow: () => now,
     executable: "never-launched",
     bundledExtension: "/unused/directorBridge.mjs",
     prefixArgs: ["original"],
@@ -143,6 +145,9 @@ function fixture(config: { ready?: boolean; paused?: boolean; maxPendingBytes?: 
     options,
     faults,
     expectedCloseError: undefined as Error | undefined,
+    at(value: number) {
+      now = value;
+    },
     get session() {
       return sessions[0]!;
     },
@@ -526,6 +531,144 @@ test("reports an undersized initial batch after the caller can subscribe", async
   await tick();
   expect(f.faults).toEqual([expect.any(JudgmentQueueFullError)]);
   expect(startPiSession).not.toHaveBeenCalled();
+});
+
+test("poll waits for active 60 seconds and does not replay missed intervals", async () => {
+  const f = fixture();
+  await tick();
+  f.session.settle();
+  await tick();
+  f.at(59_999);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.at(60_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  expect(f.session.batches()[1]).toMatchObject({ worldStart: false, poll: true });
+  f.session.settle();
+  await tick();
+  f.at(270_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.session.settle();
+  await tick();
+  expect(f.session.judge).toHaveBeenCalledTimes(3);
+});
+
+test("busy polling coalesces with all pending player and hook reasons", async () => {
+  const f = fixture();
+  await tick();
+  f.at(60_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  f.bridge.message("player first");
+  f.bridge.emit("observation", stored(1), [hook("important")]);
+  f.at(120_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  expect(f.session.judge).toHaveBeenCalledTimes(1);
+  f.session.settle();
+  await tick();
+  expect(f.session.batches()[1]).toMatchObject({
+    poll: true,
+    playerMessages: ["player first"],
+    hooks: [{ id: "important", eventIds: [1] }],
+  });
+  f.session.settle();
+  await tick();
+  expect(f.session.judge).toHaveBeenCalledTimes(2);
+});
+
+test("paused time is excluded and pending poll waits for occupied settlement on resume", async () => {
+  const f = fixture();
+  await tick();
+  f.at(25_000);
+  f.bridge.pause(true);
+  f.at(1_000_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.bridge.pause(false);
+  f.at(1_034_999);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.at(1_035_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  f.bridge.pause(true);
+  f.session.settle({ status: "settled", aborted: true });
+  await tick();
+  expect(f.session.judge).toHaveBeenCalledTimes(1);
+  f.at(2_000_000);
+  f.bridge.pause(false);
+  expect(f.session.batches()[1]).toMatchObject({ poll: true });
+});
+
+test("initial pause and duplicate attach do not count paused time or reset active time", async () => {
+  const f = fixture({ paused: true });
+  await tick();
+  f.at(600_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.bridge.pause(false);
+  f.at(630_000);
+  f.bridge.emit("attach", f.bridge.readyWorld);
+  f.at(660_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  f.session.settle();
+  await tick();
+  expect(f.session.batches()[1]).toMatchObject({ poll: true });
+});
+
+test("replacement resets elapsed and refuses late poll and status from the old binding", async () => {
+  const f = fixture();
+  await tick();
+  f.at(59_000);
+  f.bridge.detach();
+  expect(f.scheduler.poll(world)).toBe(false);
+  const replacement = { ...world, worldSessionId: "replacement" };
+  f.at(1_000_000);
+  f.bridge.attach(replacement);
+  await tick();
+  f.at(1_001_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.bridge.emit("status", { binding: world, paused: true, supportedEvents: [] });
+  expect(f.scheduler.poll(replacement)).toBe(false);
+  f.at(1_060_000);
+  expect(f.scheduler.poll(replacement)).toBe(true);
+  f.sessions[1]!.settle();
+  await tick();
+  expect(f.sessions[1]!.batches()[1]).toMatchObject({ binding: replacement, poll: true });
+});
+
+test("poll before ready, after fault or after close cannot admit late work", async () => {
+  const f = fixture({ ready: false });
+  f.at(60_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  f.bridge.attach();
+  await tick();
+  f.at(120_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  f.session.emit("fault", new Error("failed owner"));
+  f.at(180_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  await f.scheduler.close();
+  expect(f.scheduler.poll(world)).toBe(false);
+  expect(f.session.judge).toHaveBeenCalledTimes(1);
+});
+
+test("close alone discards pending poll and rejects subsequent timer callbacks", async () => {
+  const f = fixture();
+  await tick();
+  f.at(60_000);
+  expect(f.scheduler.poll(world)).toBe(true);
+  const closing = f.scheduler.close();
+  f.at(120_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  await closing;
+  expect(f.session.judge).toHaveBeenCalledTimes(1);
+});
+
+test("invalid monotonic time fails scheduling explicitly and prevents new polls", async () => {
+  const f = fixture();
+  await tick();
+  f.at(-1);
+  expect(f.scheduler.poll(world)).toBe(false);
+  expect(f.faults).toEqual([expect.objectContaining({ message: "Invalid monotonic time" })]);
+  f.at(60_000);
+  expect(f.scheduler.poll(world)).toBe(false);
+  expect(f.session.close).toHaveBeenCalled();
 });
 
 test("the Pi envelope budget accommodates an admitted quote-heavy judgment", async () => {

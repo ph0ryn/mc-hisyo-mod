@@ -1,7 +1,7 @@
 # ポーリングと応答hook
 
-保留キューと開始・チャット・一致hookのsingle-flight実行制御はcheckpoint実装済み。
-既定batchのPi通信容量回帰はunit testで修正を確認した。タイマー・CLI / Modへの配線は未完了。[実装状況](<development.md>)を参照。
+保留キュー、開始・チャット・一致hook・pollのsingle-flight実行制御と純粋なactive-play計時はcheckpoint実装済み。
+既定batchのPi通信容量回帰はunit testで修正を確認した。タイマー資源・CLI / Modへの配線は未完了。[実装状況](<development.md>)を参照。
 
 ## AIを起動する入口
 
@@ -24,9 +24,20 @@
   → 発言・hook変更・無言で終了
 ```
 
-初期検証ではプレイ中60秒程度を仮置きする。計測済みの最適値ではない。
-CLIがプレイ中の経過時間を管理し、ポーズ中・切断中は新しい定期判断を止める。
-定期判断の予約は1件にまとめ、復帰後に過去の回数分を実行しない。
+プレイ中60秒を初期値とする。計測済みの最適値ではない。
+[ActivePlayClock](<../src/runtime/activePlayClock.ts>)はタイマーを持たず、単調増加するミリ秒値だけを受け取る。
+`setPlaying(playing, nowMs)`で状態変更直前までの経過を加算し、`poll(nowMs)`はactiveな累計が60秒に達した場合だけ`true`を返す。
+ポーズ前の端数は保持するが、ポーズ中の経過は除外する。同時刻の再sampleは許し、非有限・負数・逆行する時刻は明示エラーにする。
+遅れたsampleも1予約にまとめ、超過分は持ち越さず、そのsampleから次の60秒を数える。復帰後に過去の回数分を実行しない。
+ポーズ直前に既に60秒へ達していた場合は復帰後のsampleで1回だけ予約できる。
+
+schedulerはreadyのworldごとに時計を作り、attach時点から非pauseの時間だけを計る。退出・切断・worldSession変更では時計と揮発予約を破棄する。
+`poll(binding)`は現在のbinding・非pause・未故障・未closeを確認してから時刻をsampleし、期限到達時は既存queueのpoll flagへまとめる。
+戻り値`true`は予約の受付・集約であり実行完了ではない。未到達・古いbinding・停止中は`false`、計時や受付の失敗は`fault`で明示して停止する。
+プレイヤー入力・hookは同じ次回batchに保持し、pollだけのために別slotや割込みを作らない。
+時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
+**定期的にこの入口を呼ぶタイマーとその破棄はruntimeの今後の配線であり、まだ動作しない。**
+
 pause・退出・切断は実行中のbindingも直ちに無効化する。CLIはPiへabortを要求し、
 `agent_settled`を確認するまでslotを解放しない。停止待ちの間に復帰しても判断を重ねない。
 
@@ -112,7 +123,7 @@ DB保存・hook登録や照合は検証しない。single-flightは次のschedul
 ## 実行制御checkpoint
 
 [JudgmentScheduler](<../src/runtime/judgmentScheduler.ts>)はready済みworldから開始理由を1回取り込み、
-チャットと一致hookのbatchをPi session所有者へ順番に渡す。通常観測は保存だけを行う。
+チャット・一致hook・期限到達pollのbatchをPi session所有者へ順番に渡す。通常観測は保存だけを行う。
 pause中も入力は保持するが判断を開始しない。pause解除がsettledより先でも、slotを重ねず次回へ進む。
 `not_started`は取得済みbatchを保持し、開始後のsettledは取消済みでも消費する。曖昧な失敗は再送しない。
 
@@ -128,14 +139,16 @@ hook受付時点でrawイベントは保存済みなので、容量超過でも`
 [隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
 ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
 実際の取消・子プロセス終了の旧境界suiteは削除済み。stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
-26ケースが成功し、既知のquote-heavy通信容量回帰も修正した。同じ17件の入力・順序・raw容量のassertionを維持し、
+既存26ケースを維持し、手動時刻によるpoll・pause・再接続・停止の8ケースを加えた34ケースが成功した。
+[clock unit](<../src/runtime/activePlayClock.test.ts>)の10ケースはactive時間・遅延集約・不正時刻を確認する。
+既知のquote-heavy通信容量回帰も修正済みで、同じ17件の入力・順序・raw容量のassertionを維持し、
 保留JSON 544,215 bytesがpromptで1,088,312 bytesになるケースをproductionと同じPi専用codecへ渡している。
 [純粋なframing unit test](<../src/pi/piFraming.test.ts>)では、既定上限ちょうど1 MiBの受付済みbatch、
 user echoと代表的な`agent_end`の受信、有限上限の境界・超過拒否、global codecの1 MiB維持も確認する。
 Pi送受信だけを2 MiB + 256 bytesへ分離し、キューの1 MiBと過負荷停止方針は変更していない。
 任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
 Pi側上限超過は引き続き明示失敗で停止する。これらのunit結果だけでscheduler全体の完成とは扱わない。
-active-play timer、CLI / Mod接続、実Piでのscheduler受入は未実装・未実施である。
+active-play計時とpoll入口だけでは全体は動作しない。定期timer資源、CLI / Mod接続は未実装、実Piでのscheduler受入は未実施である。
 
 ## 推論設定
 
