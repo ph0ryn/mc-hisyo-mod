@@ -36,6 +36,7 @@ export interface AttachedWorld {
   supportedEvents: readonly string[];
   paused: boolean;
 }
+type PlayerMessageHandler = (binding: WorldBinding, text: string) => undefined;
 interface Connection {
   peer: RpcPeer;
   role: BridgeRole | undefined;
@@ -56,7 +57,6 @@ export class DirectorBridge extends EventEmitter<{
   agentReady: [];
   runInvalidated: [binding: RunBinding, reason: string];
   observation: [stored: StoredEvent, hooks: ResponseHook[]];
-  playerMessage: [binding: WorldBinding, text: string];
   peerClosed: [role: BridgeRole | undefined, reason: Error];
   fault: [error: Error];
 }> {
@@ -66,6 +66,7 @@ export class DirectorBridge extends EventEmitter<{
   #game: Connection | undefined;
   #agent: Connection | undefined;
   #world: AttachedWorld | undefined;
+  #playerMessageIntake: { accept: PlayerMessageHandler } | undefined;
   // Invalidated runs still occupy the single-flight slot until the owner observes settled.
   #run: { binding: RunBinding; valid: boolean } | undefined;
   #closing = false;
@@ -98,8 +99,23 @@ export class DirectorBridge extends EventEmitter<{
     return this.#world ? structuredClone(this.#world) : undefined;
   }
 
+  get readyWorld(): AttachedWorld | undefined {
+    return !this.#closing && this.#game?.ready ? this.currentWorld : undefined;
+  }
+
   get isAgentReady(): boolean {
     return this.#agent?.ready === true;
+  }
+
+  /** Retain input synchronously before returning, or throw RpcError to refuse it. */
+  handlePlayerMessages(accept: PlayerMessageHandler): () => void {
+    if (this.#closing) throw new Error("Bridge closed");
+    if (this.#playerMessageIntake) throw new Error("Player-message intake already registered");
+    const intake = { accept };
+    this.#playerMessageIntake = intake;
+    return () => {
+      if (this.#playerMessageIntake === intake) this.#playerMessageIntake = undefined;
+    };
   }
 
   close(): Promise<void> {
@@ -108,6 +124,7 @@ export class DirectorBridge extends EventEmitter<{
 
   async #close(): Promise<void> {
     this.#closing = true;
+    this.#playerMessageIntake = undefined;
     // listen() retains its own startup error; disposal must wait for either outcome.
     if (this.#starting) await Promise.allSettled([this.#starting]);
     for (const connection of this.#connections)
@@ -286,7 +303,9 @@ export class DirectorBridge extends EventEmitter<{
     this.#register(connection, "game.player_message", "game", PlayerMessageSchema, (params) => {
       const world = this.#requireWorld(params);
       if (!params.text.trim()) throw new RpcError(-32602, "Player message is blank");
-      this.emit("playerMessage", world.binding, params.text);
+      if (this.#closing || !connection.ready || !this.#playerMessageIntake)
+        throw new RpcError(-32003, "Director is not accepting player messages");
+      this.#playerMessageIntake.accept(world.binding, params.text);
       return { accepted: true };
     });
     this.#register(connection, "director.hooks.add", "agent", HookAddSchema, (params) => {

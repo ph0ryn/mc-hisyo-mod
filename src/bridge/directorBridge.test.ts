@@ -12,7 +12,7 @@ import { gameEventDefinitions } from "../protocol/gameEvent.js";
 import type { GameSnapshot } from "../protocol/gameSnapshot.js";
 import { openDatabase } from "../storage/database.js";
 import { defaultMaxFrameBytes, encodeJsonLine } from "../transport/jsonLines.js";
-import { RpcPeer } from "../transport/rpcPeer.js";
+import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -100,6 +100,157 @@ describe("authenticated director bridge over real TCP", () => {
     ).rejects.toMatchObject({ code: -32002 });
     expect((await f.attach(game)).worldSessionId).toEqual(expect.any(String));
   });
+
+  test("exposes ready world snapshots only after ready and clears them on detach or close", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    expect(f.bridge.readyWorld).toBeUndefined();
+    const world = (await game.call("game.attach", attachParams)) as WorldBinding;
+    expect(f.bridge.currentWorld?.binding).toEqual(world);
+    expect(f.bridge.readyWorld).toBeUndefined();
+    const atAttach: unknown[] = [];
+    f.bridge.once("attach", () => atAttach.push(f.bridge.readyWorld));
+    await game.call("game.ready", world);
+    const expected = { binding: world, supportedEvents: ["block_broken"], paused: false };
+    expect(atAttach).toEqual([expected]);
+    const copy = f.bridge.readyWorld!;
+    copy.paused = true;
+    copy.binding = { ...world, worldId: "local-mutation" };
+    expect(f.bridge.readyWorld).toEqual(expected);
+    await game.call("game.status", { ...world, paused: true });
+    expect(f.bridge.readyWorld).toEqual({ ...expected, paused: true });
+    await game.call("game.detach", world);
+    expect(f.bridge.readyWorld).toBeUndefined();
+    await f.attach(game);
+    expect(f.bridge.readyWorld).toBeDefined();
+    const closing = f.bridge.close();
+    expect(f.bridge.readyWorld).toBeUndefined();
+    await closing;
+    expect(f.bridge.readyWorld).toBeUndefined();
+  });
+
+  test("refuses chats without an intake instead of ACK-dropping them in bridge-only mode", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    const world = await f.attach(game);
+    await expect(
+      game.call("game.player_message", { ...world, text: "hello" }),
+    ).rejects.toMatchObject({
+      code: -32003,
+      message: "Director is not accepting player messages",
+    });
+    expect(game.isClosed).toBe(false);
+    expect(await game.call("game.event", observation(world))).toEqual({ stored: 1 });
+    expect(f.eventLog.search(scope).events).toHaveLength(1);
+  });
+
+  test("admits chats synchronously in arrival order, including duplicates and paused input", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    const world = await f.attach(game);
+    const admitted: Array<{ binding: WorldBinding; text: string }> = [];
+    f.bridge.handlePlayerMessages((binding, text) => {
+      admitted.push({ binding, text });
+    });
+    const texts = ["first", "same", "same"];
+    expect(
+      await Promise.all(texts.map((text) => game.call("game.player_message", { ...world, text }))),
+    ).toEqual(texts.map(() => ({ accepted: true })));
+    expect(admitted).toEqual(texts.map((text) => ({ binding: world, text })));
+    await game.call("game.status", { ...world, paused: true });
+    expect(await game.call("game.player_message", { ...world, text: "while paused" })).toEqual({
+      accepted: true,
+    });
+    expect(admitted.at(-1)).toEqual({ binding: world, text: "while paused" });
+  });
+
+  test("requires ready and current binding, valid text and game role before admission", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    const world = (await game.call("game.attach", attachParams)) as WorldBinding;
+    const admitted: string[] = [];
+    f.bridge.handlePlayerMessages((_binding, text) => {
+      admitted.push(text);
+    });
+    await expect(
+      game.call("game.player_message", { ...world, text: "not ready" }),
+    ).rejects.toMatchObject({ code: -32003 });
+    await game.call("game.ready", world);
+    await expect(
+      game.call("game.player_message", { ...world, text: " \n\t" }),
+    ).rejects.toMatchObject({ code: -32602 });
+    const agent = await f.connect("agent");
+    await expect(
+      agent.call("game.player_message", { ...world, text: "wrong role" }),
+    ).rejects.toMatchObject({ code: -32010 });
+    await game.call("game.detach", world);
+    const next = await f.attach(game);
+    await expect(
+      game.call("game.player_message", { ...world, text: "stale" }),
+    ).rejects.toMatchObject({ code: -32001 });
+    expect(admitted).toEqual([]);
+    expect(await game.call("game.player_message", { ...next, text: "current" })).toEqual({
+      accepted: true,
+    });
+    expect(admitted).toEqual(["current"]);
+  });
+
+  test("owns one intake and prevents old disposers from removing a later registration", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    const world = await f.attach(game);
+    const admit = () => undefined;
+    const dispose = f.bridge.handlePlayerMessages(admit);
+    expect(() => f.bridge.handlePlayerMessages(admit)).toThrow("already registered");
+    dispose();
+    const disposeNext = f.bridge.handlePlayerMessages(admit);
+    dispose();
+    expect(await game.call("game.player_message", { ...world, text: "still registered" })).toEqual({
+      accepted: true,
+    });
+    disposeNext();
+    await expect(
+      game.call("game.player_message", { ...world, text: "disposed" }),
+    ).rejects.toMatchObject({ code: -32003 });
+    const closing = f.bridge.close();
+    expect(() => f.bridge.handlePlayerMessages(admit)).toThrow("Bridge closed");
+    await closing;
+  });
+
+  test("returns explicit refusal from a retained intake without reverting to accepted ACKs", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    const world = await f.attach(game);
+    f.bridge.handlePlayerMessages(() => {
+      throw new RpcError(-32004, "Director stopped: judgment queue capacity exceeded");
+    });
+    for (const text of ["overflowing input", "later input"]) {
+      await expect(game.call("game.player_message", { ...world, text })).rejects.toMatchObject({
+        code: -32004,
+        message: "Director stopped: judgment queue capacity exceeded",
+      });
+    }
+    expect(game.isClosed).toBe(false);
+  });
+
+  test.each(["absent", "refusing"])(
+    "a rejected chat notification with %s intake closes before later observations",
+    async (mode) => {
+      const f = await fixture();
+      const game = await f.connect("game");
+      const world = await f.attach(game);
+      if (mode === "refusing")
+        f.bridge.handlePlayerMessages(() => {
+          throw new RpcError(-32004, "Director stopped");
+        });
+      const closed = once(game, "close");
+      game.notify("game.player_message", { ...world, text: "no ACK channel" });
+      game.notify("game.event", observation(world));
+      await expect(game.call("game.status", { ...world, paused: false })).rejects.toThrow();
+      await closed;
+      expect(f.eventLog.search(scope).events).toEqual([]);
+    },
+  );
 
   test("persists every observation before hook delivery and exposes only advertised capabilities", async () => {
     const f = await fixture();

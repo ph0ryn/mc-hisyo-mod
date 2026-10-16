@@ -154,7 +154,12 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
   起動ごとの256-bit tokenを呼出側が用意し、bridgeは定時間比較する。
   tokenを知る信頼済みプロセス間の境界であり、token所持者同士の役割偽装を防ぐものではない。
 - attachで新しいsessionを発行する。`game.ready`まではattach完了を通知せず、runを開始しない。
+  後から接続するruntimeは`readyWorld`を参照する。`currentWorld`はready前のattach済みworldも含む。
   agentも`director.ready`が必要。両者のbind ACK後、現在のbindingを再確認してからrun開始を返す。
+- チャットはrequestで送り、受付結果を確認する。`handlePlayerMessages`で排他的な同期受付を登録し、
+  入力を保持して正常終了した場合だけ`accepted: true`を返す。判断の開始・完了を意味しない。
+  gameが未ready、受付未登録・解除後・bridge終了中は`-32003`で拒否する。bridge-onlyでも成功扱いにして捨てない。
+  pause中の受付は可能だが、判断実行の可否はruntimeが制御する。拒否されたnotificationは接続を閉じる。
 - pause・detach・切断でrunを即時無効化し、Modへ`game.run.clear`を通知する。
   clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。
 - 判断はsingle-flight。無効化してもslotを保持し、呼出側が`agent_settled`を確認して`finishRun`するまで次を開始しない。
