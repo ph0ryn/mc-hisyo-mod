@@ -3,6 +3,8 @@ import { Check } from "typebox/value";
 
 const identifier = Type.String({ minLength: 1, maxLength: 128 });
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
+const blockPosition = Type.Tuple([Type.Integer(), Type.Integer(), Type.Integer()]);
+const positiveCount = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const position = Type.Tuple([Type.Number(), Type.Number(), Type.Number()]);
 const nullableIdentifier = Type.Union([identifier, Type.Null()]);
 const strict = { additionalProperties: false } as const;
@@ -470,5 +472,119 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
       strict,
     ),
     filterFields: ["advancementId", "criterion", "afterDone"],
+  },
+  {
+    name: "block_placed",
+    description:
+      "Successful native BlockItem placement game-event seam, with actual placed position/state and item; not every block mutation or multi-block cell.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { blockId: identifier, itemId: identifier, position: blockPosition },
+      strict,
+    ),
+    filterFields: ["blockId", "itemId"],
+  },
+  {
+    name: "item_picked_up",
+    description:
+      "Successful native item-entity pickup consumed this entity quantity, not guaranteed net inventory gain (infinite-materials overflow can be discarded).",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        itemId: identifier,
+        count: positiveCount,
+        remainingCount: counter,
+        entityId: identifier,
+        entityPosition: position,
+        infiniteMaterials: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: ["itemId", "count", "remainingCount", "entityId", "infiniteMaterials"],
+  },
+  {
+    name: "item_dropped",
+    description:
+      "LivingEntity.drop inserted an item entity successfully; not construction/non-null return or every death/modded spawn. Native spread/trace arguments are copied unchanged.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        itemId: identifier,
+        count: positiveCount,
+        entityId: identifier,
+        entityPosition: position,
+        spread: Type.Boolean(),
+        trace: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: ["itemId", "count", "entityId", "spread", "trace"],
+  },
+  {
+    name: "grid_result_taken",
+    description:
+      "Grid ResultSlot native credited take amount, not a complete recipe, ingredients, yield or net inventory gain; alternate result-slot classes are not covered. Menu ID is null when this slot is not in the current menu.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        itemId: identifier,
+        count: positiveCount,
+        menuId: Type.Union([counter, Type.Null()]),
+        slot: counter,
+      },
+      strict,
+    ),
+    filterFields: ["itemId", "count", "menuId", "slot"],
+  },
+  {
+    name: "furnace_result_taken",
+    description:
+      "FurnaceResultSlot credited player extraction on normal/quick and empty-hotbar SWAP paths, not unseen smelting production or hopper extraction. Furnace position and menu ID remain null when unknown.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        itemId: identifier,
+        count: positiveCount,
+        menuId: Type.Union([counter, Type.Null()]),
+        slot: counter,
+        furnacePosition: Type.Union([blockPosition, Type.Null()]),
+      },
+      strict,
+    ),
+    filterFields: ["itemId", "count", "menuId", "slot"],
+  },
+  {
+    name: "block_use_attempted",
+    description:
+      "Server-reached block-use callback before spectator/cooldown/native commit, not success or every click/packet; earlier checks/listeners may suppress it. loadedBlockId is only an immediate loaded-state observation, null when unknown.",
+    observation: "attempt",
+    dataSchema: Type.Object(
+      {
+        hand,
+        itemId: identifier,
+        count: counter,
+        blockPosition,
+        hitPosition: position,
+        face: Type.Union([
+          Type.Literal("down"),
+          Type.Literal("up"),
+          Type.Literal("north"),
+          Type.Literal("south"),
+          Type.Literal("west"),
+          Type.Literal("east"),
+        ]),
+        loadedBlockId: nullableIdentifier,
+      },
+      strict,
+    ),
+    filterFields: ["hand", "itemId", "count", "face", "loadedBlockId"],
+  },
+  {
+    name: "item_use_attempted",
+    description:
+      "Server-reached item-use callback before spectator/cooldown/native commit, not success or every click/packet; earlier checks/listeners may suppress it. Held empty air/count zero is valid.",
+    observation: "attempt",
+    dataSchema: Type.Object({ hand, itemId: identifier, count: counter }, strict),
+    filterFields: ["hand", "itemId", "count"],
   },
 ];

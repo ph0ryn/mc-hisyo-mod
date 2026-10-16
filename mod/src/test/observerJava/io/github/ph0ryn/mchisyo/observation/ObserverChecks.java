@@ -39,6 +39,7 @@ public final class ObserverChecks {
         policiesRejectInvalidValues();
         equipmentDeltasAreSampledAndCopied(fixtures);
         sampledWorldAndOutcomeEdges(fixtures);
+        nativeItemOutcomeEdges(fixtures);
         roundTripsAllSharedFacts(fixtures);
         System.out.println("ObserverChecks: " + checks + " assertions passed (pure Java; no Minecraft launch)");
     }
@@ -292,8 +293,30 @@ public final class ObserverChecks {
         tracker.clear(); equal(true, tracker.worldSampleDue(PLAYER, next), "binding clear world baseline");
     }
 
+    private static void nativeItemOutcomeEdges(JsonArray fixtures) {
+        equal(3, SnapshotDeltaTracker.consumedAmount(true, 5, 2), "partial entity consumption");
+        equal(5, SnapshotDeltaTracker.consumedAmount(true, 5, 0), "full consumption before native count restoration");
+        equal(0, SnapshotDeltaTracker.consumedAmount(false, 5, 0), "failed add not pickup");
+        equal(0, SnapshotDeltaTracker.consumedAmount(true, 5, 5), "no consumption");
+        equal(0, SnapshotDeltaTracker.consumedAmount(true, 5, 6), "growth not pickup");
+        equal(0, SnapshotDeltaTracker.consumedAmount(true, -1, 0), "negative original rejected");
+        equal(0, SnapshotDeltaTracker.consumedAmount(true, 5, -1), "negative remainder rejected");
+        equal(0, SnapshotDeltaTracker.consumedAmount(true, 0, 0), "empty pickup rejected");
+        equal(Integer.MAX_VALUE, SnapshotDeltaTracker.consumedAmount(true, Integer.MAX_VALUE, 0), "no amount overflow");
+        equal(0, SnapshotDeltaTracker.successfulCount(false, 2), "failed insertion not drop");
+        equal(0, SnapshotDeltaTracker.successfulCount(true, 0), "reset native credit not double counted");
+        equal(0, SnapshotDeltaTracker.successfulCount(true, -1), "negative credit rejected");
+        equal(2, SnapshotDeltaTracker.successfulCount(true, 2), "positive committed native count");
+        equal(fixture(fixtures, "item_picked_up").getAsJsonObject("data").get("count").getAsInt(),
+                SnapshotDeltaTracker.consumedAmount(true, 5, 2), "shared partial-pickup count");
+        equal(fixture(fixtures, "grid_result_taken").getAsJsonObject("data").get("count").getAsInt(),
+                SnapshotDeltaTracker.successfulCount(true, 4), "shared grid credited take count");
+        equal(fixture(fixtures, "furnace_result_taken").getAsJsonObject("data").get("count").getAsInt(),
+                SnapshotDeltaTracker.successfulCount(true, 2), "shared furnace/SWAP positive take count");
+    }
+
     private static void roundTripsAllSharedFacts(JsonArray fixtures) {
-        equal(22, fixtures.size(), "all shared fixture kinds");
+        equal(29, fixtures.size(), "all shared fixture kinds");
         for (var element : fixtures) {
             JsonObject fixture = element.getAsJsonObject();
             List<Double> position = new ArrayList<>();

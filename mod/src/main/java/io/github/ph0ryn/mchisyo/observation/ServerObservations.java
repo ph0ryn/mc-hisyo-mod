@@ -15,7 +15,10 @@ import net.fabricmc.fabric.api.entity.event.v1.effect.ServerMobEffectEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
+import net.fabricmc.fabric.api.event.player.UseItemCallback;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
@@ -25,7 +28,12 @@ import net.minecraft.world.damagesource.DamageSource;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.inventory.Slot;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -44,7 +52,8 @@ public final class ServerObservations {
             "player_died", "player_respawned", "player_connection_changed", "living_damage_processed",
             "entity_use_attempted", "status_effects_sampled", "status_effect_changed", "equipment_slot_changed",
             "nearby_sampled", "structures_sampled", "weather_changed", "day_clock_phase_changed",
-            "advancement_criterion_granted", "advancement_completed");
+            "advancement_criterion_granted", "advancement_completed", "block_placed", "item_picked_up",
+            "item_dropped", "grid_result_taken", "furnace_result_taken", "block_use_attempted", "item_use_attempted");
 
     private static volatile ServerObservations active;
     private static final Gson JSON = new Gson();
@@ -89,6 +98,29 @@ public final class ServerObservations {
                         "blockId", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString(),
                         "position", List.of(pos.getX(), pos.getY(), pos.getZ())));
             }
+        });
+        UseItemCallback.EVENT.register((player, level, hand) -> {
+            if (player instanceof ServerPlayer serverPlayer && scoped(serverPlayer)) {
+                emit(serverPlayer, "item_use_attempted", usedItem(serverPlayer, hand));
+            }
+            return InteractionResult.PASS;
+        });
+        UseBlockCallback.EVENT.register((player, level, hand, hit) -> {
+            if (player instanceof ServerPlayer serverPlayer && scoped(serverPlayer)) {
+                Map<String, Object> data = usedItem(serverPlayer, hand);
+                BlockPos pos = hit.getBlockPos();
+                data.put("blockPosition", blockPosition(pos));
+                data.put("hitPosition", position(hit.getLocation()));
+                data.put("face", hit.getDirection().getName());
+                String loadedBlockId = null;
+                if (!serverPlayer.level().isOutsideBuildHeight(pos)) {
+                    var chunk = serverPlayer.level().getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+                    if (chunk != null) loadedBlockId = BuiltInRegistries.BLOCK.getKey(chunk.getBlockState(pos).getBlock()).toString();
+                }
+                data.put("loadedBlockId", loadedBlockId);
+                emit(serverPlayer, "block_use_attempted", data);
+            }
+            return InteractionResult.PASS;
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             requireServerThread(server);
@@ -227,6 +259,67 @@ public final class ServerObservations {
         data.put("damageTaken", damageTaken);
         data.put("blocked", blocked);
         emit(player, "living_damage_processed", data);
+    }
+
+    /** Called only after the native placement game-event invocation has completed. */
+    public static void blockPlaced(BlockItem item, BlockPos pos, GameEvent.Context context) {
+        ServerObservations observations = active;
+        if (observations == null || !(context.sourceEntity() instanceof ServerPlayer player)
+                || !observations.scoped(player)) return;
+        observations.emit(player, "block_placed", Map.of(
+                "blockId", BuiltInRegistries.BLOCK.getKey(context.affectedState().getBlock()).toString(),
+                "itemId", BuiltInRegistries.ITEM.getKey(item).toString(), "position", blockPosition(pos)));
+    }
+
+    public static void itemPickedUp(ServerPlayer player, ItemEntity entity, String itemId,
+            int before, int remaining, boolean succeeded) {
+        ServerObservations observations = active;
+        if (observations == null || !observations.scoped(player)) return;
+        int count = SnapshotDeltaTracker.consumedAmount(succeeded, before, remaining);
+        if (count == 0) return;
+        observations.emit(player, "item_picked_up", Map.of("itemId", itemId, "count", count,
+                "remainingCount", remaining, "entityId", entity.getUUID().toString(),
+                "entityPosition", position(entity.position()), "infiniteMaterials", player.hasInfiniteMaterials()));
+    }
+
+    public static void itemDropped(LivingEntity source, Entity entity, boolean succeeded, boolean spread, boolean trace) {
+        ServerObservations observations = active;
+        if (observations == null || !(source instanceof ServerPlayer player) || !observations.scoped(player)
+                || !(entity instanceof ItemEntity dropped)) return;
+        PlayerSnapshot.Item item = item(dropped.getItem());
+        int count = SnapshotDeltaTracker.successfulCount(succeeded, item.count());
+        if (count == 0) return;
+        observations.emit(player, "item_dropped", Map.of("itemId", item.itemId(), "count", count,
+                "entityId", entity.getUUID().toString(), "entityPosition", position(entity.position()),
+                "spread", spread, "trace", trace));
+    }
+
+    public static void resultTaken(ServerPlayer player, Slot slot, ItemStack output, int nativeCount, boolean furnace) {
+        ServerObservations observations = active;
+        if (observations == null || !observations.scoped(player)) return;
+        int count = SnapshotDeltaTracker.successfulCount(true, nativeCount);
+        if (count == 0) return;
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("itemId", BuiltInRegistries.ITEM.getKey(output.getItem()).toString());
+        data.put("count", count);
+        data.put("menuId", player.containerMenu.slots.contains(slot) ? player.containerMenu.containerId : null);
+        data.put("slot", slot.index);
+        if (furnace) data.put("furnacePosition", slot.container instanceof BlockEntity blockEntity
+                ? blockPosition(blockEntity.getBlockPos()) : null);
+        observations.emit(player, furnace ? "furnace_result_taken" : "grid_result_taken", data);
+    }
+
+    private static Map<String, Object> usedItem(ServerPlayer player, InteractionHand hand) {
+        PlayerSnapshot.Item held = item(player.getItemInHand(hand));
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("hand", hand == InteractionHand.MAIN_HAND ? "main_hand" : "off_hand");
+        data.put("itemId", held.itemId());
+        data.put("count", held.count());
+        return data;
+    }
+
+    private static List<Integer> blockPosition(BlockPos pos) {
+        return List.of(pos.getX(), pos.getY(), pos.getZ());
     }
 
     private boolean scoped(ServerPlayer player) {
