@@ -146,7 +146,7 @@ export default function directorBridge(pi: ExtensionAPI): void {
   );
   tool(
     "get_recent_events",
-    "Search game and Director activity history for this world/player across sessions. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches; inspect gap flags. Requests/matches do not prove provider execution.",
+    "Search game and Director activity history for this world/player across sessions. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches. Gap flags cover admitted sequence holes only; CLI attachment boundaries mark unknown pre-ready, terminal and disconnected coverage, even when hasKnownGaps is false. Requests/matches do not prove provider execution.",
     eventArgs,
     "director.events.get",
   );

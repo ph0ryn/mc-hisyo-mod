@@ -46,6 +46,31 @@ function definition(
 
 export const directorActivityCatalog = new EventCatalog([
   definition(
+    "session_attached",
+    "CLI accepted game.ready for this attachment, not a native JOIN or world start. Pre-ready/pre-attachment observations are unknown.",
+    { beforeAttachment: Type.Literal("unknown") },
+    ["beforeAttachment"],
+  ),
+  definition(
+    "status_reported",
+    "Validated game.status paused report for the current attachment; initial false is a baseline report, not a change. No inferred state between reports.",
+    { paused: Type.Boolean() },
+    ["paused"],
+  ),
+  definition(
+    "session_detached",
+    "CLI retired an active attachment, not proof of native LEAVE. The terminal tail after the last admitted observation and disconnected observations are unknown, not numbered sequence gaps.",
+    {
+      reason: Type.Union([
+        Type.Literal("game_detached"),
+        Type.Literal("link_closed"),
+        Type.Literal("bridge_shutdown"),
+      ]),
+      afterLastObservation: Type.Literal("unknown"),
+    },
+    ["reason", "afterLastObservation"],
+  ),
+  definition(
     "player_input",
     "Valid /ai text received by the CLI; not proof of a model response.",
     { text },

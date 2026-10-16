@@ -79,6 +79,7 @@ export class DirectorBridge extends EventEmitter<{
   // Invalidated runs still occupy the single-flight slot until the owner observes settled.
   #run: { binding: RunBinding; valid: boolean } | undefined;
   #closing = false;
+  #storageFailed = false;
   #starting: Promise<unknown[]> | undefined;
   #shutdown: Promise<void> | undefined;
 
@@ -115,7 +116,9 @@ export class DirectorBridge extends EventEmitter<{
   }
 
   get readyWorld(): AttachedWorld | undefined {
-    return !this.#closing && this.#game?.ready ? this.currentWorld : undefined;
+    return !this.#closing && !this.#storageFailed && this.#game?.ready
+      ? this.currentWorld
+      : undefined;
   }
 
   get isAgentReady(): boolean {
@@ -155,7 +158,14 @@ export class DirectorBridge extends EventEmitter<{
     const world = this.#world;
     const game = this.#game;
     const agent = this.#agent;
-    if (!world || world.paused || !game?.ready || !agent?.ready)
+    if (
+      this.#closing ||
+      this.#storageFailed ||
+      !world ||
+      world.paused ||
+      !game?.ready ||
+      !agent?.ready
+    )
       throw new Error("Game and agent are not ready for judgment");
     const binding = Object.freeze({ ...world.binding, runId: randomUUID() });
     const run = { binding, valid: true };
@@ -211,7 +221,12 @@ export class DirectorBridge extends EventEmitter<{
   }
 
   #requireWorld(binding: WorldBinding): AttachedWorld {
-    if (!this.#world || !sameWorldBinding(this.#world.binding, binding))
+    if (
+      this.#closing ||
+      this.#storageFailed ||
+      !this.#world ||
+      !sameWorldBinding(this.#world.binding, binding)
+    )
       throw new RpcError(-32001, "Inactive or stale world binding");
     return this.#world;
   }
@@ -240,8 +255,8 @@ export class DirectorBridge extends EventEmitter<{
       clearTimeout(timer);
       this.#connections.delete(connection);
       if (this.#game === connection) {
+        this.#detach(this.#closing ? "bridge_shutdown" : "link_closed");
         this.#game = undefined;
-        this.#detach();
       }
       if (this.#agent === connection) {
         this.#agent = undefined;
@@ -291,6 +306,11 @@ export class DirectorBridge extends EventEmitter<{
     this.#register(connection, "game.ready", "game", WorldBindingSchema, (params) => {
       this.#requireWorld(params);
       if (connection.ready) throw new RpcError(-32002, "Game already ready");
+      this.#storage(() =>
+        this.#options.eventLog.appendActivity(
+          activity(params, "director.session_attached", { beforeAttachment: "unknown" }),
+        ),
+      );
       connection.ready = true;
       this.emit("attach", this.currentWorld!);
       return { ready: true };
@@ -302,8 +322,15 @@ export class DirectorBridge extends EventEmitter<{
     });
     this.#register(connection, "game.status", "game", GameStatusSchema, (params) => {
       const world = this.#requireWorld(params);
+      if (!connection.ready) throw new RpcError(-32003, "Game is not ready");
       world.paused = params.paused;
+      this.#storage(() =>
+        this.#options.eventLog.appendActivity(
+          activity(world.binding, "director.status_reported", { paused: params.paused }),
+        ),
+      );
       if (params.paused) this.invalidateRun("paused");
+      this.#requireWorld(params); // Clearing a run can synchronously close the game link.
       this.emit("status", this.currentWorld!);
       return { paused: params.paused };
     });
@@ -430,6 +457,13 @@ export class DirectorBridge extends EventEmitter<{
     connection.peer.handle(method, (params) => {
       if (connection.role !== role)
         throw new RpcError(-32010, "Unauthenticated or forbidden bridge role");
+      if (
+        this.#closing ||
+        this.#storageFailed ||
+        connection.peer.isClosed ||
+        (role === "game" ? this.#game : this.#agent) !== connection
+      )
+        throw new RpcError(-32003, "Bridge connection is inactive");
       if (!Check(schema, params)) throw new RpcError(-32602, "Invalid method parameters");
       return handler(params);
     });
@@ -450,24 +484,42 @@ export class DirectorBridge extends EventEmitter<{
       throw new RpcError(-32602, "Unsupported event capability");
   }
 
-  #detach(): void {
+  #detach(reason = "game_detached"): void {
     const world = this.#world;
     if (!world) return;
+    const attached = this.#game?.ready === true;
     this.#world = undefined;
     if (this.#game) this.#game.ready = false;
     this.invalidateRun("world_detached");
     this.emit("detach", world.binding);
+    if (attached && !this.#storageFailed) {
+      try {
+        this.#storage(() =>
+          this.#options.eventLog.appendActivity(
+            activity(world.binding, "director.session_detached", {
+              reason,
+              afterLastObservation: "unknown",
+            }),
+          ),
+        );
+      } catch {
+        // #storage reported the fatal failure; retirement and peer cleanup must finish.
+      }
+    }
   }
 
   #storage<T>(operation: () => T): T {
     try {
       return operation();
     } catch (error) {
-      this.invalidateRun("storage_failed");
-      this.emit(
-        "fault",
-        error instanceof Error ? error : new Error("History storage failed", { cause: error }),
-      );
+      if (!this.#storageFailed) {
+        this.#storageFailed = true;
+        this.invalidateRun("storage_failed");
+        this.emit(
+          "fault",
+          error instanceof Error ? error : new Error("History storage failed", { cause: error }),
+        );
+      }
       throw error;
     }
   }
