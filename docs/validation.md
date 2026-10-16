@@ -16,6 +16,17 @@
 - ページング上限、重複・逆順拒否、連番欠損とfilterをまたぐ欠損通知。
 - 未対応のdatabase schema versionでの停止。
 
+### ローカルTCP codec
+
+[実TCPテスト](<../tests/rpcPeer.test.ts>)で次を確認した。CLI・Pi・Modの接続試験ではない。
+
+- 双方向要求、順序が入れ替わる応答、通知の受信順。
+- TCPで分割されたUTF-8、多フレーム同時受信、壊れたJSONへの明示エラー。
+- 切断・timeoutでの未完了要求の失敗、副作用の自動再送がないこと。
+- 途中EOF、フレーム上限、要求数上限、不明response ID、不正UTF-8の拒否。
+- 不正notificationの後で後続観測を続行しないこと。
+- 結果未返却や結果上限超過を空データの成功扱いにしないこと。
+
 ### Fabricビルド
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11を固定し、

@@ -6,6 +6,7 @@
 - 独立したFabricプロジェクトをJava 21でビルドする。
 - イベントと応答hookをSQLiteへ保存し、worldId / playerId単位で再読込する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
+- JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
 
 **ゲームとPiを接続するDirector本体はまだ未実装。**
 CLIはヘルプと引数検証だけを提供し、Modは空のクライアント初期化処理だけを持つ。
@@ -22,6 +23,9 @@ pnpm install --frozen-lockfile
 pnpm run verify
 node dist/cli.mjs --help
 ```
+
+任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerを使う。
+実モデルやユーザー設定は使用しない。[Pi境界検証](<piFeasibility.md>)に条件と制限をまとめる。
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
@@ -86,7 +90,8 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 
 ## 次の段階
 
-共有fixtureを用いたJava DTO検証、ローカルJSON-RPC、Pi拡張の接続、
+codecはまだCLIへ配線していない。[通信codecの契約](<protocol.md#実装済みの通信codec>)を基に、
+共有fixtureによるJava DTO検証、認証hello、world / run binding、Pi拡張の接続、
 実observer、単一実行scheduler、pause・切断・再開の順に接続する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。

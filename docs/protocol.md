@@ -44,13 +44,13 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 CLIからModへの要求例。
 
 ```json
-{"jsonrpc":"2.0","id":"game-19","method":"game.state.get","params":{"worldSessionId":"w1","query":{"inventory":true}}}
+{"jsonrpc":"2.0","id":"game-19","method":"game.state.get","params":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","query":{"inventory":true}}}
 ```
 
 Modからの応答例。
 
 ```json
-{"jsonrpc":"2.0","id":"game-19","result":{"worldSessionId":"w1","tick":12040,"inventory":[{"itemId":"minecraft:cobblestone","count":7}]}}
+{"jsonrpc":"2.0","id":"game-19","result":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","tick":12040,"inventory":[{"itemId":"minecraft:cobblestone","count":7}]}}
 ```
 
 Modからのイベント通知例。
@@ -63,6 +63,30 @@ Modからのイベント通知例。
 共通schemaとイベント定義は[gameEvent.ts](<../src/protocol/gameEvent.ts>)、
 共有fixtureは[blockBroken.json](<../tests/fixtures/protocol/blockBroken.json>)を参照。
 Modは収集できるイベントの部分集合だけを通知し、CLIのschema一覧を収集実績と混同しない。
+
+## 実装済みの通信codec
+
+[JSON-RPC schema](<../src/protocol/jsonRpc.ts>)、[JSONL framing](<../src/transport/jsonLines.ts>)、
+[RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
+[実TCPテスト](<../tests/rpcPeer.test.ts>)で確認する。認証やDirector本体にはまだ配線していない。
+
+- JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
+- UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
+- フレーム上限はLFを除き**1 MiB**。上限超過、不正UTF-8、途中のままEOFになったframeは接続を閉じる。
+- 送信待ちバイト列は**4 MiB**、未完了requestは送受信各**64件**、非同期notification処理も64件まで。
+  送信待ちの上限超過は接続を閉じ、request数の超過は明示的なエラーにする。
+- handlerの同期部分は受信順に呼ぶ。非同期の完了順は保証せず、応答はIDで対応付ける。
+- requestの既定timeoutは**5秒**。timeoutや切断でpeerを閉じ、そのpeerの全pending requestを失敗させる。
+  遅れて完了したhandlerの応答は送らず、要求を再送しない。
+- JSON parse失敗は`-32700`、不正なrequestやbatchは`-32600`、不明なmethodは`-32601`。
+  不明・不正なnotification、handler失敗のnotification、重複した未完了request ID、
+  不明なresponse ID、不正なresponseは接続を閉じる。
+- request handlerの例外、結果未返却、結果frameの上限超過は`-32603`で失敗する。
+  業務上の明示エラーは`RpcError`のcode / message / dataを返す。
+
+上限値は開発用の仮値であり、実ゲームでのイベント量測定は未実施。
+切断で既に実行された副作用を取り消せるわけではない。
+認証・役割・world / run bindingと、ゲームスレッド上の再検証はこのcodecの所有者側で実装する。
 
 ## 主な通信メソッド
 
