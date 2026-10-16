@@ -11,7 +11,7 @@ export interface PiLaunchOptions {
   args: readonly string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  model: { provider: string; id: string };
+  model: { provider: string; id: string; api: string };
   /** Known bundled extension, authenticated and ready on the owning bridge. */
   isAgentReady: () => boolean;
   requestTimeoutMs?: number;
@@ -261,7 +261,11 @@ class PiRpcClient extends EventEmitter {
       (model) =>
         model.provider === this.#options.model.provider && model.id === this.#options.model.id,
     );
-    if (matching.length !== 1 || !physicalModelApis.has(matching[0]!.api))
+    if (
+      matching.length !== 1 ||
+      !physicalModelApis.has(matching[0]!.api) ||
+      matching[0]!.api !== this.#options.model.api
+    )
       throw new Error("Configured Pi model or API is unavailable");
     const available = await this.#request("get_available_thinking_levels");
     if (slot.cancelled) return;

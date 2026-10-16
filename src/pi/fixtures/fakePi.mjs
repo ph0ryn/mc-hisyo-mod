@@ -1,9 +1,16 @@
 // Local executable fixture: actual stdio pipes, no SDK, providers or user configuration.
 import { appendFileSync, readFileSync, watch } from "node:fs";
+import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 
-const config = JSON.parse(process.env.MC_HISYO_FAKE ?? "{}");
-const log = (record) => appendFileSync(process.env.MC_HISYO_CAPTURE, `${JSON.stringify(record)}\n`);
+const fixtureIndex = process.argv.indexOf("--fixture");
+const config = JSON.parse(
+  fixtureIndex < 0
+    ? (process.env.MC_HISYO_FAKE ?? "{}")
+    : readFileSync(process.argv[fixtureIndex + 1], "utf8"),
+);
+const log = (record) =>
+  appendFileSync(config.capture ?? process.env.MC_HISYO_CAPTURE, `${JSON.stringify(record)}\n`);
 if (process.argv.includes("--version")) {
   if (config.version === "hang") {
     process.on("SIGTERM", () => {});
@@ -11,6 +18,47 @@ if (process.argv.includes("--version")) {
   } else {
     console.log(config.version ?? "1.2.0");
     process.exit(0);
+  }
+}
+let agent;
+let releaseBind;
+if (config.bridge) {
+  const args = process.argv.slice(2);
+  const value = (name) => args[args.indexOf(name) + 1];
+  log({
+    launch: {
+      args,
+      keys: Object.keys(process.env),
+      cwd: process.cwd(),
+      home: process.env.HOME,
+      session: value("--session"),
+      settings: JSON.parse(
+        readFileSync(`${process.env.PI_CODING_AGENT_DIR}/settings.json`, "utf8"),
+      ),
+    },
+  });
+  if (config.bridge !== "missing") {
+    const bootstrap = JSON.parse(process.env.MC_HISYO_BRIDGE);
+    agent = createConnection({ host: bootstrap.host, port: bootstrap.port });
+    const write = (record) => agent.write(`${JSON.stringify({ jsonrpc: "2.0", ...record })}\n`);
+    agent.on("connect", () =>
+      write({
+        id: "hello",
+        method: "bridge.hello",
+        params: { protocolVersion: 1, role: "agent", token: bootstrap.token },
+      }),
+    );
+    createInterface({ input: agent }).on("line", (line) => {
+      const record = JSON.parse(line);
+      log({ bridge: record });
+      if (record.id === "hello" && !record.error)
+        write({ id: "ready", method: "director.ready", params: {} });
+      if (record.method === "director.run.bind") {
+        const acknowledge = () => write({ id: record.id, result: record.params });
+        if (config.delayBind) releaseBind = acknowledge;
+        else acknowledge();
+      }
+    });
   }
 }
 const mode = config.mode ?? "manual";
@@ -47,11 +95,17 @@ const response = (request, data) => ({
 const ack = () => emit(response(prompt, { disposition: config.disposition ?? "started" }));
 const settled = () => emit({ type: "agent_settled", aborted, ...config.terminal });
 let consumed = 0;
-const control = watch(process.env.MC_HISYO_CONTROL, () => {
-  const commands = readFileSync(process.env.MC_HISYO_CONTROL, "utf8").slice(consumed);
+const controlPath = config.control ?? process.env.MC_HISYO_CONTROL;
+const control = watch(controlPath, () => {
+  const commands = readFileSync(controlPath, "utf8").slice(consumed);
   consumed += commands.length;
   for (const command of commands.trim().split("\n")) {
     if (command === "settle") settled();
+    if (command === "disconnect-agent") agent?.destroy();
+    if (command === "release-bind") {
+      releaseBind?.();
+      releaseBind = undefined;
+    }
     if (command === "ack") {
       if (mode === "preflight") {
         active = true;
@@ -153,6 +207,7 @@ input.on("close", () => {
   log({ eof: true });
   if (mode !== "ignore-stop") {
     control.close();
+    agent?.destroy();
     process.exitCode = 0;
   }
 });

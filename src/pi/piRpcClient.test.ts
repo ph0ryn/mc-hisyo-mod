@@ -30,7 +30,7 @@ async function fixture(
       MC_HISYO_CONTROL: control,
       MC_HISYO_FAKE: JSON.stringify(fake),
     },
-    model: { provider: "local", id: "director" },
+    model: { provider: "local", id: "director", api: "openai-completions" },
     isAgentReady: ready,
     requestTimeoutMs: 1_000,
     judgmentTimeoutMs: 2_000,

@@ -98,6 +98,10 @@ export class DirectorBridge extends EventEmitter<{
     return this.#world ? structuredClone(this.#world) : undefined;
   }
 
+  get isAgentReady(): boolean {
+    return this.#agent?.ready === true;
+  }
+
   close(): Promise<void> {
     return (this.#shutdown ??= this.#close());
   }

@@ -283,7 +283,7 @@ async function fixture(api, options = {}) {
       args,
       cwd: join(folder, "cwd"),
       env,
-      model: { provider: "scratch-local", id: options.expectedModel ?? "dummy-model" },
+      model: { provider: "scratch-local", id: options.expectedModel ?? "dummy-model", api },
       isAgentReady: () => agentReady,
     });
     driver.on("fault", () => bridge.invalidateRun("Pi stdio driver failed"));
