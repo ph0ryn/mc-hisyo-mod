@@ -118,6 +118,24 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 preflight中のidle abortが後から始まる判断を止めない失敗を実パイプで再現し、started ACK後の再abortで修正した。
 これは取消RPCの完了であり、実行終了の代用ではない。ownerによるbinding無効化と異常終了待機は別の責務。
 
+### 隔離Pi session所有者
+
+[隣接するVitestテスト](<../src/runtime/piSession.test.ts>)の21ケースを通常の`verify`へ含める。
+実子プロセスの偽Piと認証付きTCPを使い、実Piやproviderは起動しない。
+
+- 起動引数・環境・settings・7 Tool・privateな会話pathとmode、同じscopeの再開と別scopeの分離。
+- 二重所有の拒否、EOF / SIGTERMを無視する子の終了待ち中もleaseを保持し、終了後だけ別所有者へ渡すこと。
+- 設定と異なる許可済みAPIへのすり替えを、prompt送信前に拒否すること。
+- pauseによる無効化とabortの順序、game側／agent側bind ACK待ち・metadata検査中の取消、実settledまでのsingle-flight。
+- idle agent切断、detach、開始済みか不明な失敗、ready / version失敗での終了・再起動。
+- unsafeなmode、symlink、hardlink、foreign cwdの会話を変更せず拒否すること。
+- 起動中に呼出側のworld bindingが変わっても、所有者のsnapshotが変わらないこと。
+
+同期callbackからの`close()`再入で二重cleanupと`EBADF`になる失敗を再現し、
+無効化・取消より前に同じshutdown promiseを公開して修正した。
+OSがSIGKILL後も終了を返さない条件は再現していない。終了確認失敗時にleaseと予約を残す分岐はコードレビューで確認した。
+CLI schedulerやFabricへの配線試験ではない。
+
 ### Production Pi拡張
 
 `pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
@@ -130,19 +148,21 @@ bootstrap不正と認証失敗はreadyにならず、後続promptでもモデル
 必須状態の初回／Tool後の欠損、古いbinding、pause、detach、切断、timeoutは、abortして後続のモデル呼出し・表示を止める。
 停止後に意図的に再送したpromptも、引退済み拡張は拒否する。
 
-同じsuiteのstdio driver検証も3 APIで行い、合計27ケースが成功した。
+同じsuiteのstdio driverと隔離session所有者も3 APIで検証し、合計30ケースが成功した。
 実Piのmetadataを通った後の2回の判断と、model不一致／実際のthinkingがlowの場合のprovider呼出しゼロを確認する。
+実際に保存した会話を同じworld / playerで再開し、別playerには混ざらず、pause中はproviderを呼ばないことも確認する。
+`!`と`$`を含むdummy keyが変化せずHTTP認証へ届き、一時snapshotが会話へ永続化されないことを検証する。
 
 一時HOME・設定・会話・作業ディレクトリ、dummy keyと偽providerだけを使い、実モデルには接続しない。
-これは拡張とdriverの接続検証であり、隔離session所有者・CLI scheduler・Fabric adapterの受け入れ完了ではない。
+これは拡張・driver・隔離session所有者の接続検証であり、CLI scheduler・Fabric adapterの受け入れ完了ではない。
 
 ## 接続実装で確定する事項
 
 - アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。
 - 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
 - Modが実際に広告するイベント部分集合と、baseline以外の状態queryを追加する際の取得範囲。
-- Pi会話の保存先・再開方法、ワールドUUIDの保存方法。履歴と接続情報の配置は確定済み。
-- ポーリングはactive play中60秒を仮値とし、優先順位、要求タイムアウト、フレームサイズを接続検証で決める。
+- ワールドUUIDの保存方法。Pi会話はprivateなworld / player別scopeで再開し、履歴と接続情報の配置も確定済み。
+- ポーリングはactive play中60秒を仮値とし、優先順位、処理待ち入力の上限時の扱い、要求タイムアウト、フレームサイズを接続検証で決める。
 - ゲームのランチャー環境での接続先読込と、CLI起動環境でのPiのPATH解決。
 
 レシピ専用機構や目標管理state machineは作らない。

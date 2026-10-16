@@ -13,8 +13,9 @@
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
 - ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
+- 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
 
-**隔離したPi sessionの起動管理、scheduler、CLIとModへの配線はまだ未実装。**
+**scheduler、CLIとModへの配線はまだ未実装。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
 Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
@@ -32,7 +33,7 @@ node dist/cli.mjs --help
 ```
 
 任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerで、独立した境界probeを実行する。
-`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Tool・context・stdio driverを検証する。
+`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Tool・context・stdio driver・隔離sessionの再開を検証する。
 どちらも一時HOME・会話・設定とloopbackを使い、実モデルやユーザー設定は使用しない。
 [Pi境界検証](<piFeasibility.md>)と[production拡張の検証](<validation.md#production-pi拡張>)に条件と制限をまとめる。
 通常の`verify`はPiを起動しない。Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
@@ -96,7 +97,26 @@ compaction無効・非実行中・空queueを確認する。不一致はprompt�
 
 引数・環境変数・作業場所・ready判定は信頼されたsession所有者が渡す。
 このdriverだけでは、settings、cache warming、組込Tool、拡張・resourceの自動探索を隔離しない。
-その起動policyとschedulerを接続するまでは通常CLIを有効にしない。[通信境界](<protocol.md#pi-stdio>)を参照。
+起動policyは次のsession所有者が担う。schedulerを接続するまでは通常CLIを有効にしない。[通信境界](<protocol.md#pi-stdio>)を参照。
+
+## Pi session所有者（CLI未配線）
+
+[session所有者](<../src/runtime/piSession.ts>)は、信頼されたPi実行file、bundled拡張、明示的なmodel設定を受け取る。
+world / playerの組をhash化したprivateディレクトリへ会話を保存し、同じscopeだけで再開する。
+既存会話は所有者・regular file・`0600`・link数1と、headerの保存cwdを検査し、不一致を修復せず拒否する。
+
+- scopeごとに空の`0700`作業ディレクトリを保持し、明示的なsession pathでPiを起動する。最近の会話を自動探索しない。
+- 起動ごとにHOME・agent設定・一時領域を新設し、子の終了確認後に削除する。親の環境変数はPATH以外を引き継がない。
+- 自動resource探索、context file、組込OS Tool、compaction、cache warmingを無効にし、bundled拡張と7 game Toolだけを明示する。
+- credentialは専用環境変数で渡す。設定fileは固定の変数参照だけを保持し、keyを引数へ出さない。
+- モデル定義はPiの組込catalogを消さない。毎判断で正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
+- scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
+- pauseはbinding無効化後に取消し、実settledまで予約を保つ。detach・agent切断・開始済みか不明な失敗では子を終了する。
+  終了を確認できなければleaseと予約を残し、別の所有者へ渡さない。
+
+これはPiの起動・Tool policyであり、OSやネットワークのsandboxではない。`--offline`も推論先へのHTTPを禁止しない。
+ファイル読取・コマンド実行の権限は未決定で、有効化していない。
+[隣接するVitestテスト](<../src/runtime/piSession.test.ts>)は実子プロセスと認証付きTCPで境界を確認する。
 
 ## イベントの追加
 
@@ -146,8 +166,9 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 
 ## 次の段階
 
-bridge-only CLI、Pi拡張、stdio driverは実装済み。[通信の契約](<protocol.md>)を基に、
-隔離sessionの起動管理と単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
+bridge-only CLI、Pi拡張、stdio driver、隔離sessionの起動管理は実装済み。[通信の契約](<protocol.md>)を基に、
+単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
+schedulerの処理待ち入力が上限へ達した場合の方針は、黙示的な破棄を避けるため実装前に確定する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
 OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。

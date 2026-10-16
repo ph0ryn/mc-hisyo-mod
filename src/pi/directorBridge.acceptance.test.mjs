@@ -17,6 +17,7 @@ import { gameEventDefinitions } from "../protocol/gameEvent.js";
 import { openDatabase } from "../storage/database.js";
 import { JsonLineDecoder } from "../transport/jsonLines.js";
 import { RpcPeer } from "../transport/rpcPeer.js";
+import { startPiSession } from "../runtime/piSession.js";
 import { sendProviderResponse } from "./fixtures/localProvider.mjs";
 import { startPiRpcClient } from "./piRpcClient.js";
 
@@ -43,9 +44,11 @@ function texts(value) {
 }
 
 async function fixture(api, options = {}) {
-  const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
-  assert.equal(version.status, 0, `Pi preflight failed: ${version.error ?? version.stderr}`);
-  assert.equal(version.stdout.trim(), "1.2.0");
+  if (!options.session) {
+    const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
+    assert.equal(version.status, 0, `Pi preflight failed: ${version.error ?? version.stderr}`);
+    assert.equal(version.stdout.trim(), "1.2.0");
+  }
   const folder = mkdtempSync(join(tmpdir(), "mc-hisyo-built-pi-"));
   for (const name of ["home", "cwd", "agent", "sessions", "tmp"])
     mkdirSync(join(folder, name), { mode: 0o700 });
@@ -68,6 +71,7 @@ async function fixture(api, options = {}) {
   let server;
   let child;
   let driver;
+  let session;
   let closed;
   let httpError;
   let stderr = "";
@@ -76,6 +80,10 @@ async function fixture(api, options = {}) {
   // Register before acquiring handles so a failed setup cannot leak listeners or SQLite.
   onTestFinished(async () => {
     let exit;
+    if (session) {
+      await session.close();
+      stderr = session.diagnostics;
+    }
     if (driver) {
       await driver.close();
       stderr = driver.diagnostics;
@@ -161,6 +169,11 @@ async function fixture(api, options = {}) {
             ? "/v1/responses"
             : "/v1/chat/completions",
       );
+      if (options.session)
+        assert.equal(
+          req.headers[api === "anthropic-messages" ? "x-api-key" : "authorization"],
+          `${api === "anthropic-messages" ? "" : "Bearer "}!inert-$local-key`,
+        );
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -277,7 +290,35 @@ async function fixture(api, options = {}) {
     "--api-key",
     "dummy-local-key",
   ];
-  if (options.driver) {
+  async function startSession(binding = world) {
+    session = await startPiSession({
+      dataDirectory: join(folder, "data"),
+      bridge,
+      world: binding,
+      connection: { ...address, protocolVersion: 1, token, pid: process.pid },
+      executable: "pi",
+      bundledExtension: extension,
+      model: {
+        provider: "scratch-local",
+        id: "dummy-model",
+        api,
+        baseUrl: `${origin}${api === "anthropic-messages" ? "" : "/v1"}`,
+        apiKey: "!inert-$local-key",
+        definition: {
+          name: "Local dummy only",
+          reasoning: true,
+          input: ["text"],
+          contextWindow: 32768,
+          maxTokens: 1024,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      },
+    });
+    return session;
+  }
+  if (options.session) {
+    await startSession();
+  } else if (options.driver) {
     driver = await startPiRpcClient({
       executable: "pi",
       args,
@@ -319,7 +360,8 @@ async function fixture(api, options = {}) {
     assert.equal(ack.disposition, "started", "Prompt ACK is not completion");
     return settled;
   }
-  async function run() {
+  async function run(message = "Inspect current play and decide.") {
+    if (session) return session.judge(message);
     const run = await bridge.beginRun();
     try {
       return driver ? await driver.run("Inspect current play and decide.") : await prompt();
@@ -334,6 +376,10 @@ async function fixture(api, options = {}) {
   return {
     ready,
     driver,
+    get session() {
+      return session;
+    },
+    startSession,
     get agentReady() {
       return agentReady;
     },
@@ -353,6 +399,58 @@ async function fixture(api, options = {}) {
 }
 
 for (const api of apis) {
+  test(`${api}: isolated owner resumes real Pi only within the world/player scope`, async () => {
+    const f = await fixture(api, { session: true, plan: () => [] });
+    const firstPath = f.session.sessionPath;
+    const sentinel = "remember-private-world-player-7b81";
+    expect(await f.run(sentinel)).toEqual({ status: "settled", aborted: false });
+    expect(f.requests).toHaveLength(1);
+    expect(readFileSync(firstPath, "utf8")).toContain(sentinel);
+    const saved = readFileSync(firstPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(texts(saved).filter((text) => text.startsWith("CURRENT_GAME_STATE\n"))).toEqual([]);
+    await f.session.close();
+    await f.game.call("game.detach", f.world);
+    const reattached = await f.game.call("game.attach", {
+      ...scope,
+      supportedEvents: ["block_broken"],
+      paused: false,
+    });
+    await f.game.call("game.ready", reattached);
+    await f.startSession(reattached);
+    expect(f.session.sessionPath).toBe(firstPath);
+    await f.game.call("game.status", { ...reattached, paused: true });
+    await expect(f.run("Do not run paused")).rejects.toThrow();
+    expect(f.session.isRetired).toBe(false);
+    expect(f.requests).toHaveLength(1);
+    await f.game.call("game.status", { ...reattached, paused: false });
+    expect(await f.run("Continue this conversation")).toEqual({
+      status: "settled",
+      aborted: false,
+    });
+    expect(texts(f.requests[1])).toContain(sentinel);
+    const current = texts(f.requests[1]).filter((text) => text.startsWith("CURRENT_GAME_STATE\n"));
+    expect(current).toHaveLength(1);
+    expect(JSON.parse(current[0].slice("CURRENT_GAME_STATE\n".length)).tick).toBe(122);
+    expect(f.stateRequests[1].runId).not.toBe(f.stateRequests[0].runId);
+    await f.session.close();
+    await f.game.call("game.detach", reattached);
+    const other = await f.game.call("game.attach", {
+      ...scope,
+      playerId: "other-player",
+      supportedEvents: [],
+      paused: false,
+    });
+    await f.game.call("game.ready", other);
+    await f.startSession(other);
+    expect(f.session.sessionPath).not.toBe(firstPath);
+    expect(await f.run("Separate player")).toEqual({ status: "settled", aborted: false });
+    expect(JSON.stringify(f.requests[2])).not.toContain(sentinel);
+    expect(f.displays).toEqual([]);
+  });
+
   test(`${api}: stdio driver gates actual Pi and completes two scoped judgments`, async () => {
     const f = await fixture(api, { driver: true });
     await f.ready;

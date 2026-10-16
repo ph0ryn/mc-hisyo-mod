@@ -1,7 +1,7 @@
 # 通信プロトコル
 
-codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driverは実装済み。
-隔離Pi sessionの起動管理・schedulerとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
+codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driver、隔離Pi sessionの起動管理は実装済み。
+schedulerとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
 [実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
@@ -26,6 +26,7 @@ ACKや`agent_end`、abort ACK、EOFは判断完了ではない。
 slotは本物のsettledと取消RPCが揃うまで保持する。状態が不明なら子プロセスを引退・終了し、完了を捏造しない。
 
 各判断の前に`get_available_models`、`get_available_thinking_levels`、`get_state`を検査する。
+指定provider / IDが一意で、許可済みかつ設定どおりのphysical APIを持ち、実選択と一致し、mediumでidleな状態を要求する。
 これらはTool集合の証明にはならず、認証済みのbundled拡張のreadyが別途必要。
 OS Toolや自動探索を無効化する起動policyも、stdioだけでは証明できない。
 
@@ -145,7 +146,8 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 [DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
 [実TCPテスト](<../src/bridge/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済み。
-run無効化通知をPi stdioのabortへ渡すhost driver配線は未実装。Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
+[Pi session所有者](<../src/runtime/piSession.ts>)がrun無効化通知をstdioのabortへ渡す。CLI schedulerとModへの配線は未実装。
+Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 
 - loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。
 - helloは`protocolVersion: 1`、`role: "game" | "agent"`、43文字のbase64url tokenを厳密に検証する。
