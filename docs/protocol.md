@@ -1,7 +1,7 @@
 # 通信プロトコル
 
-codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張は実装済み。
-CLIのPi stdio driver・schedulerとModへの配線は未完了。以下は通信契約と、全体接続時の起動案。
+codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driverは実装済み。
+隔離Pi sessionの起動管理・schedulerとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
 [実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
@@ -12,6 +12,26 @@ CLIのPi stdio driver・schedulerとModへの配線は未完了。以下は通�
 
 Node.jsの`node:net`とJavaの`Socket`で双方向通信を実装できるため、初期案はTCPとする。
 Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形式を混同しない。
+
+## Pi stdio
+
+[driver](<../src/pi/piRpcClient.ts>)はPi 1.2.0の標準RPCだけを扱う。bridgeのJSON-RPC handlerは流用しない。
+コマンドは`{id, type, ...}`、応答は`{id, type: "response", command, success, data? / error?}`で、
+短い文字列IDとcommandの両方を照合する。`prompt`へ`streamingBehavior`は指定せず、ACKの`disposition: "started"`を要求する。
+`handled` / `queued`、失敗応答、不明なID・commandは再利用を禁止する。
+
+送信前から終端を捕捉し、ACK前の`agent_settled`も保持する。
+ACKや`agent_end`、abort ACK、EOFは判断完了ではない。
+書込後の取消はabortとqueue確認を行い、prompt開始前にabortが空振りした場合はstarted ACK後に再abortする。
+slotは本物のsettledと取消RPCが揃うまで保持する。状態が不明なら子プロセスを引退・終了し、完了を捏造しない。
+
+各判断の前に`get_available_models`、`get_available_thinking_levels`、`get_state`を検査する。
+これらはTool集合の証明にはならず、認証済みのbundled拡張のreadyが別途必要。
+OS Toolや自動探索を無効化する起動policyも、stdioだけでは証明できない。
+
+フレーム上限は改行を除き1 MiB、UTF-8は不正byteを拒否する。送信待ち4 MiB、未完了request 64件を上限とする。
+既定の期限は要求5秒、判断5分、終了の各段階1秒。version検査も期限付きで強制終了する。
+backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの診断に限り、assistant本文とともにゲーム表示しない。
 
 ## 接続手順
 

@@ -102,6 +102,22 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 詳細・実行方法・保証の制限は[Pi境界検証](<piFeasibility.md>)を参照。
 **production bundle、任意Pi version / provider、実モデル、実ゲームを検証したものではない。**
 
+### Pi stdio driver
+
+[隣接するVitestテスト](<../src/pi/piRpcClient.test.ts>)は通常の`verify`へ含める。
+ローカルの[偽実行file](<../src/pi/fixtures/fakePi.mjs>)との実stdin / stdoutを使い、Piやproviderは起動しない。
+47ケースで次を検証する。
+
+- exact version、認証ready、指定model / physical API、mediumの対応・実選択、compaction・実行状態・queueのgate。
+- ACK / `agent_end`だけでは解放しない単一slot、ACK前のsettled、分割UTF-8・複数frameの一括受信、次回の再検査。
+- 書込前取消の`not_started`、abort ACK後も未settledな状態、prompt preflightをまたぐ再abort。
+- 書込後のACK欠落・未settled・切断では開始済みの可能性を保持し、引退した子プロセスを再利用しない。
+- 不正JSON・UTF-8・batch・過大frame・途中EOF・相関違反・失敗応答・重複／不正終端を拒否する。
+- queue残存、要求・判断・version検査のtimeout、EOFとSIGTERMを無視する子へのSIGKILL、診断の容量制限。
+
+preflight中のidle abortが後から始まる判断を止めない失敗を実パイプで再現し、started ACK後の再abortで修正した。
+これは取消RPCの完了であり、実行終了の代用ではない。ownerによるbinding無効化と異常終了待機は別の責務。
+
 ### Production Pi拡張
 
 `pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
@@ -114,8 +130,11 @@ bootstrap不正と認証失敗はreadyにならず、後続promptでもモデル
 必須状態の初回／Tool後の欠損、古いbinding、pause、detach、切断、timeoutは、abortして後続のモデル呼出し・表示を止める。
 停止後に意図的に再送したpromptも、引退済み拡張は拒否する。
 
+同じsuiteのstdio driver検証も3 APIで行い、合計27ケースが成功した。
+実Piのmetadataを通った後の2回の判断と、model不一致／実際のthinkingがlowの場合のprovider呼出しゼロを確認する。
+
 一時HOME・設定・会話・作業ディレクトリ、dummy keyと偽providerだけを使い、実モデルには接続しない。
-これはビルドした拡張の接続検証であり、CLIのPi stdio driver・schedulerやFabric adapterの受け入れ完了ではない。
+これは拡張とdriverの接続検証であり、隔離session所有者・CLI scheduler・Fabric adapterの受け入れ完了ではない。
 
 ## 接続実装で確定する事項
 

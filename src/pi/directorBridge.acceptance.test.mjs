@@ -18,6 +18,7 @@ import { openDatabase } from "../storage/database.js";
 import { JsonLineDecoder } from "../transport/jsonLines.js";
 import { RpcPeer } from "../transport/rpcPeer.js";
 import { sendProviderResponse } from "./fixtures/localProvider.mjs";
+import { startPiRpcClient } from "./piRpcClient.js";
 
 const tools = [
   "get_game_state",
@@ -66,6 +67,7 @@ async function fixture(api, options = {}) {
   let game;
   let server;
   let child;
+  let driver;
   let closed;
   let httpError;
   let stderr = "";
@@ -74,6 +76,10 @@ async function fixture(api, options = {}) {
   // Register before acquiring handles so a failed setup cannot leak listeners or SQLite.
   onTestFinished(async () => {
     let exit;
+    if (driver) {
+      await driver.close();
+      stderr = driver.diagnostics;
+    }
     if (child) {
       child.stdin.end();
       const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
@@ -102,6 +108,9 @@ async function fixture(api, options = {}) {
   let agentReady = false;
   bridge.on("agentReady", () => {
     agentReady = true;
+  });
+  bridge.on("peerClosed", (role) => {
+    if (role === "agent") agentReady = false;
   });
   const address = await bridge.listen();
   const socket = createConnection(address);
@@ -239,53 +248,62 @@ async function fixture(api, options = {}) {
   const ready = once(bridge, "agentReady", { signal: AbortSignal.timeout(3_000) });
   // Observe rejection immediately even when an intentionally denied startup is tested later.
   void ready.catch(() => {});
-  child = spawn(
-    "pi",
-    [
-      "--mode",
-      "rpc",
-      "--offline",
-      "--no-extensions",
-      "--extension",
-      extension,
-      "--no-mcp",
-      "--no-skills",
-      "--no-prompt-templates",
-      "--no-themes",
-      "--no-context-files",
-      "--append-system-prompt",
-      "",
-      "--system-prompt",
-      promptPath,
-      "--no-approve",
-      "--no-builtin-tools",
-      "--tools",
-      tools.join(","),
-      "--session-dir",
-      join(folder, "sessions"),
-      "--model",
-      "scratch-local/dummy-model",
-      "--thinking",
-      "medium",
-      "--api-key",
-      "dummy-local-key",
-    ],
-    { cwd: join(folder, "cwd"), env, stdio: ["pipe", "pipe", "pipe"] },
-  );
-  closed = new Promise((resolve) =>
-    child.once("close", (code, signal) => resolve({ code, signal })),
-  );
-  const decoder = new JsonLineDecoder();
-  child.stdout.on("data", (chunk) =>
-    decoder.push(chunk, (line) => {
-      records.push(JSON.parse(line));
-      for (const waiter of waiters) waiter();
-    }),
-  );
-  child.stdout.on("end", () => decoder.finish());
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
-  });
+  const args = [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    extension,
+    "--no-mcp",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--append-system-prompt",
+    "",
+    "--system-prompt",
+    promptPath,
+    "--no-approve",
+    "--no-builtin-tools",
+    "--tools",
+    tools.join(","),
+    "--session-dir",
+    join(folder, "sessions"),
+    "--model",
+    "scratch-local/dummy-model",
+    "--thinking",
+    options.thinking ?? "medium",
+    "--api-key",
+    "dummy-local-key",
+  ];
+  if (options.driver) {
+    driver = await startPiRpcClient({
+      executable: "pi",
+      args,
+      cwd: join(folder, "cwd"),
+      env,
+      model: { provider: "scratch-local", id: options.expectedModel ?? "dummy-model" },
+      isAgentReady: () => agentReady,
+    });
+    driver.on("fault", () => bridge.invalidateRun("Pi stdio driver failed"));
+  } else {
+    child = spawn("pi", args, { cwd: join(folder, "cwd"), env, stdio: ["pipe", "pipe", "pipe"] });
+    closed = new Promise((resolve) =>
+      child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+    const decoder = new JsonLineDecoder();
+    child.stdout.on("data", (chunk) =>
+      decoder.push(chunk, (line) => {
+        records.push(JSON.parse(line));
+        for (const waiter of waiters) waiter();
+      }),
+    );
+    child.stdout.on("end", () => decoder.finish());
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+  }
   async function rpc(type, data = {}) {
     const id = `request-${++nextId}`;
     const response = waitFor((r) => r.type === "response" && r.id === id);
@@ -303,12 +321,19 @@ async function fixture(api, options = {}) {
   }
   async function run() {
     const run = await bridge.beginRun();
-    const result = await prompt();
-    bridge.finishRun(run);
-    return result;
+    try {
+      return driver ? await driver.run("Inspect current play and decide.") : await prompt();
+    } catch (error) {
+      // Unknown-started failures are not a reusable bridge slot until the child is terminated.
+      if (driver) await driver.close();
+      throw error;
+    } finally {
+      bridge.finishRun(run);
+    }
   }
   return {
     ready,
+    driver,
     get agentReady() {
       return agentReady;
     },
@@ -328,6 +353,35 @@ async function fixture(api, options = {}) {
 }
 
 for (const api of apis) {
+  test(`${api}: stdio driver gates actual Pi and completes two scoped judgments`, async () => {
+    const f = await fixture(api, { driver: true });
+    await f.ready;
+    expect(await f.run()).toEqual({ status: "settled", aborted: false });
+    expect(f.requests).toHaveLength(2);
+    expect(f.displays).toEqual(["explicit display"]);
+    expect(await f.run()).toEqual({ status: "settled", aborted: false });
+    expect(f.requests).toHaveLength(3);
+    expect(f.stateRequests).toHaveLength(3);
+    expect(f.stateRequests[2].runId).not.toBe(f.stateRequests[0].runId);
+    expect(f.displays).toHaveLength(1);
+    expect(f.driver.isRetired).toBe(false);
+  });
+
+  for (const [gate, options] of Object.entries({
+    model: { expectedModel: "wrong-model" },
+    medium: { thinking: "low" },
+  })) {
+    test(`${api}: stdio driver ${gate} refusal makes zero provider calls`, async () => {
+      const f = await fixture(api, { driver: true, ...options });
+      await f.ready;
+      await expect(f.run()).rejects.toMatchObject({ mayHaveStarted: false });
+      expect(f.requests).toHaveLength(0);
+      expect(f.stateRequests).toHaveLength(0);
+      expect(f.displays).toHaveLength(0);
+      expect(f.driver.isRetired).toBe(true);
+    });
+  }
+
   test(`${api}: built tools and fresh transient state, explicit display only, then another bound run`, async () => {
     const f = await fixture(api);
     await f.ready;

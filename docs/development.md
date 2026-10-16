@@ -12,8 +12,9 @@
 - 必須の[現在状態snapshot](<gameState.md>)を検証し、空の状態、欠損field、未対応queryを拒否する。
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
 - ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
+- Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 
-**CLIからのPi起動、stdio driver、scheduler、Modへの配線はまだ未実装。**
+**隔離したPi sessionの起動管理、scheduler、CLIとModへの配線はまだ未実装。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
 Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
@@ -31,7 +32,7 @@ node dist/cli.mjs --help
 ```
 
 任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerで、独立した境界probeを実行する。
-`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Toolとcontextを検証する。
+`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Tool・context・stdio driverを検証する。
 どちらも一時HOME・会話・設定とloopbackを使い、実モデルやユーザー設定は使用しない。
 [Pi境界検証](<piFeasibility.md>)と[production拡張の検証](<validation.md#production-pi拡張>)に条件と制限をまとめる。
 通常の`verify`はPiを起動しない。Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
@@ -79,6 +80,23 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
 [ビルド済みCLIのsubprocessテスト](<../src/cli.test.ts>)は、一時保存先と偽gameの実TCP接続を使う。
 ModやPiの起動、ゲーム内の動作確認ではない。
+
+## Pi stdio driver（CLI未配線）
+
+[driver](<../src/pi/piRpcClient.ts>)は、実行fileのPi 1.2.0を検査した後にstdio子プロセスを起動する。
+各判断の前に、認証済み拡張のready、指定provider / modelとphysical API、mediumの対応と実際の選択、
+compaction無効・非実行中・空queueを確認する。不一致はpromptを送らず失敗にする。
+
+- `run`は単一実行。prompt ACKや`agent_end`ではslotを解放せず、`agent_settled`と取消RPCの完了を待つ。
+- 書込前の取消だけは`not_started`を返す。書込後の失敗は開始済みの可能性を残し、子プロセスを再利用しない。
+- 取消前に所有者がbridge bindingを無効化する。abort ACKを終了とは扱わず、prompt preflight中の取消も再abortで止める。
+- `isRetired`は再利用禁止を示し、終了済みの保証ではない。異常時のslot解放前には`close()`で子プロセスの終了を待つ。
+- `close()`は取消を期限付きで待ち、EOF、SIGTERM、SIGKILLへ段階的に移る。これを成功したsettledとは扱わない。
+- stdoutのassistant本文とstderrの診断は、ゲーム表示へ転送しない。
+
+引数・環境変数・作業場所・ready判定は信頼されたsession所有者が渡す。
+このdriverだけでは、settings、cache warming、組込Tool、拡張・resourceの自動探索を隔離しない。
+その起動policyとschedulerを接続するまでは通常CLIを有効にしない。[通信境界](<protocol.md#pi-stdio>)を参照。
 
 ## イベントの追加
 
@@ -128,8 +146,8 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 
 ## 次の段階
 
-bridge-only CLIの起動・終了とprivate接続情報公開は実装済み。[通信の契約](<protocol.md>)を基に、
-Pi拡張と単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
+bridge-only CLI、Pi拡張、stdio driverは実装済み。[通信の契約](<protocol.md>)を基に、
+隔離sessionの起動管理と単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
 OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。
