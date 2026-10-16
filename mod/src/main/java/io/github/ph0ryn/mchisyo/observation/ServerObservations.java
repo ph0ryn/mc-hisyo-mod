@@ -189,8 +189,7 @@ public final class ServerObservations {
         for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
             inventory.add(item(player.getInventory().getItem(slot)));
         }
-        String biomeId = player.level().getBiome(player.blockPosition()).unwrapKey()
-                .map(key -> key.identifier().toString()).orElse(null);
+        String biomeId = ServerGameState.biomeId(player.level(), player.blockPosition());
         return new PlayerSnapshot(player.level().dimension().identifier().toString(), position(player.position()), biomeId,
                 player.level().getGameTime(), System.currentTimeMillis(), inventory, player.getHealth(),
                 player.getFoodData().getFoodLevel(), player.getFoodData().getSaturationLevel(),
