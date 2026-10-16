@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
+import { sendProviderResponse } from "./localProvider.mjs";
 
 // Optional real-PATH-Pi boundary test; never contacts a real model provider.
 const extensionPath = fileURLToPath(new URL("./directorProbe.mjs", import.meta.url));
@@ -89,132 +90,17 @@ async function run(scenario, api) {
           path: req.url,
           tools: body.tools?.map((tool) => tool.function?.name ?? tool.name),
         });
-        res.writeHead(200, { "content-type": "text/event-stream" });
-        const toolArgs = JSON.stringify({ text: "local dummy only" });
-        const text = "Local probe complete.";
-        const send = (type, data) =>
-          res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
-        if (api === "openai-completions") {
-          assert.equal(req.url, "/provider/v1/chat/completions");
-          const base = {
-            id: `chatcmpl-${providerCount}`,
-            object: "chat.completion.chunk",
-            created: 1,
-            model: "dummy-model",
-          };
-          const event = (delta, finish_reason = null) =>
-            res.write(
-              `data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason }] })}\n\n`,
-            );
-          event({ role: "assistant" });
-          if (providerCount === 1) {
-            event({
-              tool_calls: [
-                {
-                  index: 0,
-                  id: "call_stub",
-                  type: "function",
-                  function: { name: "send_message", arguments: toolArgs },
-                },
-              ],
-            });
-            event({}, "tool_calls");
-          } else {
-            event({ content: text });
-            event({}, "stop");
-          }
-          res.end("data: [DONE]\n\n");
-        } else if (api === "openai-responses") {
-          assert.equal(req.url, "/provider/v1/responses");
-          const response = {
-            id: `resp_${providerCount}`,
-            status: "in_progress",
-            model: "dummy-model",
-            output: [],
-          };
-          send("response.created", { response });
-          const item =
+        if (api === "openai-completions") assert.equal(req.url, "/provider/v1/chat/completions");
+        else if (api === "openai-responses") assert.equal(req.url, "/provider/v1/responses");
+        else assert.ok(req.url.startsWith("/provider/v1/messages"));
+        sendProviderResponse(res, {
+          api,
+          toolCalls:
             providerCount === 1
-              ? {
-                  type: "function_call",
-                  id: "fc_stub",
-                  call_id: "call_stub",
-                  name: "send_message",
-                  arguments: toolArgs,
-                  status: "completed",
-                }
-              : {
-                  type: "message",
-                  id: "msg_stub",
-                  role: "assistant",
-                  status: "completed",
-                  content: [{ type: "output_text", text, annotations: [] }],
-                };
-          send("response.output_item.added", {
-            output_index: 0,
-            item: { ...item, arguments: "", content: [] },
-          });
-          if (providerCount === 1)
-            send("response.function_call_arguments.delta", {
-              output_index: 0,
-              item_id: item.id,
-              delta: toolArgs,
-            });
-          else
-            send("response.output_text.delta", {
-              output_index: 0,
-              item_id: item.id,
-              content_index: 0,
-              delta: text,
-            });
-          send("response.output_item.done", { output_index: 0, item });
-          send("response.completed", {
-            response: {
-              ...response,
-              status: "completed",
-              output: [item],
-              usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 },
-            },
-          });
-          res.end();
-        } else {
-          assert.ok(req.url.startsWith("/provider/v1/messages"));
-          send("message_start", {
-            message: {
-              id: `msg_${providerCount}`,
-              type: "message",
-              role: "assistant",
-              model: "dummy-model",
-              content: [],
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 10, output_tokens: 0 },
-            },
-          });
-          if (providerCount === 1) {
-            send("content_block_start", {
-              index: 0,
-              content_block: { type: "tool_use", id: "call_stub", name: "send_message", input: {} },
-            });
-            send("content_block_delta", {
-              index: 0,
-              delta: { type: "input_json_delta", partial_json: toolArgs },
-            });
-          } else {
-            send("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
-            send("content_block_delta", { index: 0, delta: { type: "text_delta", text } });
-          }
-          send("content_block_stop", { index: 0 });
-          send("message_delta", {
-            delta: {
-              stop_reason: providerCount === 1 ? "tool_use" : "end_turn",
-              stop_sequence: null,
-            },
-            usage: { output_tokens: 1 },
-          });
-          send("message_stop", {});
-          res.end();
-        }
+              ? [{ id: "call_stub", name: "send_message", arguments: { text: "local dummy only" } }]
+              : [],
+          text: "Local probe complete.",
+        });
         return;
       }
       if (req.url === "/state") {
