@@ -50,7 +50,7 @@
 - 明示的な`biomeId: null`、不完全なblock coverage、entityの打切りflagは値を変えず返す。
 - 未対応queryはModへ要求を転送する前に拒否する。
 - 729 blocks / 64 entities、上限長の文字列、大きな数値を持つ応答を実TCPで返す。
-  多バイト文字・JSON escape、最大長のbindingと`RpcPeer`が生成する数値request IDで1 MiB frame内と確認する。
+  多バイト文字・JSON escape、最大長のbindingと`RpcPeer`が生成する短い10進数字列のrequest IDで1 MiB frame内と確認する。
   codec自体は任意長の文字列IDも許すが、それらを含む全応答のframe適合を保証するテストではない。
 
 不完全なstateと未知のqueryを通してしまう**19件の失敗**を再現してから修正した。

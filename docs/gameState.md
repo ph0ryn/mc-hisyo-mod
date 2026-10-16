@@ -65,6 +65,6 @@ biomeもchunk取得の待機や生成を伴わない経路を使い、取得で�
 
 半径と件数は初期のcontext・frame予算で、実ゲームの性能計測による最適値ではない。
 上限件数の配列・上限長の文字列・大きな数値について、多バイト文字とJSON escapeを含む応答をテストする。
-同梱の`RpcPeer`が生成する数値request IDで、最大長のbindingを含めても1 MiB frameへ収まることを確認する。
+同梱の`RpcPeer`が生成する短い10進数字列のrequest IDで、最大長のbindingを含めても1 MiB frameへ収まることを確認する。
 blockのstate propertyやblock entityのNBTは含めず、可視面だけに制限するものでもない。
 未知の情報をどうプレイヤーへ伝えるかは、[Directorの方針](<concept.md>)と区別して扱う。
