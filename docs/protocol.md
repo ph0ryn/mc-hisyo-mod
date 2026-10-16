@@ -1,7 +1,7 @@
 # 通信プロトコル
 
-codec、認証・bindingを扱うbridge、bridge-only CLIの起動・終了は実装済み。
-Mod・Piへの配線は未完了。以下は通信契約と、Piを含む接続時の起動案。
+codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張は実装済み。
+CLIのPi stdio driver・schedulerとModへの配線は未完了。以下は通信契約と、全体接続時の起動案。
 [実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
@@ -35,6 +35,16 @@ Mod側、Piの起動、判断開始は未配線。
 `worldId`と`playerId`が永続化scope、`worldSessionId`と判断ごとの`runId`が実行bindingとなる。
 実行開始時の識別子をTool要求にも引き継ぎ、CLIとゲームスレッドの両方で現在の接続と一致することを確認する。
 古い実行の要求を、新しく接続したワールド向けに付け替えない。
+
+## Pi拡張のbootstrap
+
+hostは子プロセスの`MC_HISYO_BRIDGE`へ、`protocolVersion: 1`、`host: "127.0.0.1"`、`port`、`token`だけを含むJSONを渡す。
+接続情報ファイルの`pid`など、追加キーは渡さない。bootstrap不正や認証失敗は拡張を引退させ、後続promptも拒否する。
+
+[Pi拡張](<../src/pi/directorBridge.ts>)は`session_start`中にbind handlerを登録してから接続・認証する。
+RPC mode、対応physical API、正確な7 Toolを確認してreadyを送る。ready ACKを待つ間にもhostからbindが届き得る。
+開始したrunは`agent_settled`だけでslotとbindingを解放する。Pi stdioのprompt ACKや`agent_end`は完了ではない。
+peer切断と必須snapshotの取得・検証失敗は、同期abort、binding破棄、接続の引退で判断を止める。
 
 ## CLIの接続情報ファイル
 
@@ -114,7 +124,8 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 ## 実装済みの認証・binding bridge
 
 [DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
-[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済みで、Piのabortはまだ接続していない。
+[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済み。
+run無効化通知をPi stdioのabortへ渡すhost driver配線は未実装。Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 
 - loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。
 - helloは`protocolVersion: 1`、`role: "game" | "agent"`、43文字のbase64url tokenを厳密に検証する。

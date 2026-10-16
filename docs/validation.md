@@ -102,6 +102,21 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 詳細・実行方法・保証の制限は[Pi境界検証](<piFeasibility.md>)を参照。
 **production bundle、任意Pi version / provider、実モデル、実ゲームを検証したものではない。**
 
+### Production Pi拡張
+
+`pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
+[隣接するVitestテスト](<../src/pi/directorBridge.acceptance.test.mjs>)は認証付きTCP bridge、SQLite、偽game、loopback偽providerを使う。
+開発依存のPiはAPI型の検査用で、実行時はPATHのPiを正確なバージョン検査後に使う。
+
+3 physical APIすべてで7 Toolの実行、イベント検索、hook CRUD、scope注入の拒否、明示的な表示だけがgameへ届くことを確認する。
+各モデル呼出しの直前にsnapshotを取得し直し、古い状態と一時contextが会話へ残らないこと、settled後の別runも検証する。
+bootstrap不正と認証失敗はreadyにならず、後続promptでもモデル・gameを呼ばない。
+必須状態の初回／Tool後の欠損、古いbinding、pause、detach、切断、timeoutは、abortして後続のモデル呼出し・表示を止める。
+停止後に意図的に再送したpromptも、引退済み拡張は拒否する。
+
+一時HOME・設定・会話・作業ディレクトリ、dummy keyと偽providerだけを使い、実モデルには接続しない。
+これはビルドした拡張の接続検証であり、CLIのPi stdio driver・schedulerやFabric adapterの受け入れ完了ではない。
+
 ## 接続実装で確定する事項
 
 - アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。

@@ -15,7 +15,8 @@ export default defineConfig({
     environment: "node",
   },
   pack: {
-    entry: ["src/cli.ts"],
+    entry: { cli: "src/cli.ts", directorBridge: "src/pi/directorBridge.ts" },
+    deps: { neverBundle: [/^typebox(?:\/.*)?$/] },
     format: "esm",
     platform: "node",
     target: "node24",

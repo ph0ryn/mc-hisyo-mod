@@ -16,7 +16,11 @@ Tool実行後の再判断も対象とし、過去のスナップショットを�
 位置は座標だけでなく、周辺の地形、ブロック、エンティティなど判断に必要な情報を含める。
 状態には取得時点のtickや時刻を付け、現在値と過去の観測を区別する。
 bridgeは[必須snapshot](<gameState.md>)のschemaを検証する。範囲外・未ロード・打切りと、field自体の欠損を混同しない。
-Piへの注入と、取得失敗時に判断を停止する連携はまだ未接続。
+[Pi拡張](<../src/pi/directorBridge.ts>)は毎回`game.state.get`を待ち、`CURRENT_GAME_STATE`として新しい一時message配列へ注入する。
+この必須snapshotは会話へ永続化せず、Tool呼出し後の再判断でも取得し直す。
+欠損・古いbinding・pause・切断・timeoutでの取得失敗は、binding破棄、同期abort、bridge切断で判断を止める。
+引退済み拡張は後続promptも拒否する。例外を投げるだけ、またはidle中にabortするだけでは停止保証にならない。
+CLIのPi起動、起動理由・最近の発言の供給、Mod collectorとの接続は未実装。
 
 ## Toolで参照するイベント履歴
 

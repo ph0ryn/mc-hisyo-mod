@@ -11,8 +11,9 @@
 - 認証付きloopback bridgeで、role・ready・world / run binding・古い応答の拒否を実TCPで検証する。
 - 必須の[現在状態snapshot](<gameState.md>)を検証し、空の状態、欠損field、未対応queryを拒否する。
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
+- ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
 
-**Piの起動・接続、scheduler、Modへの配線はまだ未実装。**
+**CLIからのPi起動、stdio driver、scheduler、Modへの配線はまだ未実装。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
 Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
@@ -29,8 +30,11 @@ pnpm run verify
 node dist/cli.mjs --help
 ```
 
-任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerを使う。
-実モデルやユーザー設定は使用しない。[Pi境界検証](<piFeasibility.md>)に条件と制限をまとめる。
+任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerで、独立した境界probeを実行する。
+`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Toolとcontextを検証する。
+どちらも一時HOME・会話・設定とloopbackを使い、実モデルやユーザー設定は使用しない。
+[Pi境界検証](<piFeasibility.md>)と[production拡張の検証](<validation.md#production-pi拡張>)に条件と制限をまとめる。
+通常の`verify`はPiを起動しない。Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。

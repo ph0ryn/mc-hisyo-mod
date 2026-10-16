@@ -1,22 +1,22 @@
 # Tool一覧と呼び出し
 
-以下は接続実装時のTool案で、実装済み一覧ではない。[現在の実装状況](<development.md>)を参照。
-LLMへ公開するToolはPi拡張で登録する。
+次の7 Toolを[Pi拡張](<../src/pi/directorBridge.ts>)に実装した。ビルド成果物を実Piと偽gameへ接続して検証する。
+CLIからのPi起動と実Modの接続は未実装。[現在の実装状況](<development.md>)を参照。
 CLIがPiのTool実行イベントを見て後から結果を注入する方式にはせず、拡張の`execute()`が実処理を待ち、その結果をPiへ返す。
 
-| Tool案 | 引数の概要 | 実処理 |
+| Tool | 引数の概要 | 実処理 |
 | --- | --- | --- |
 | `send_message` | `text` | Modへ表示を要求し、表示完了を待つ |
 | `add_response_hook` | `event`, `filter?`, `instruction` | CLIで登録・保存し、hook IDを返す |
 | `remove_response_hook` | `id` | CLIで削除 |
 | `list_response_hooks` | `after?`, `limit?` | CLIの登録内容をページングして返す |
 | `list_event_types` | なし | 接続Modが収集するイベント、確度、schema、filterフィールドを返す |
-| `get_recent_events` | `event?`, `filter?`, `since?`, `after?`, `through?`, `limit?` | CLIのイベント履歴を検索 |
+| `get_recent_events` | `query: { event?, filter?, since?, after?, through?, limit? }` | CLIのイベント履歴を検索 |
 | `get_game_state` | `query: {}` | Modから必須baselineのsnapshotを取得 |
 
 bridgeの`game.state.get`は[version 1の必須snapshot](<gameState.md>)を検証する。
 所持数と装備、位置・時刻・体力、範囲限定の周辺を返す契約で、未知のqueryキーは拒否する。
-Modの状態取得とPiのTool登録はまだ未接続。任意のNBT・Mod環境の取得は未対応。
+PiのToolからbridgeへの接続は実装済み。Modの状態取得と、任意のNBT・Mod環境の取得は未対応。
 必要資材の計算と、現在の所持数との比較はLLMが行う。
 レシピ専用Toolは作らず、静的なゲームファイルの参照と、実行中の状態・イベント検索を分ける。
 OS上の読取Toolの具体的な権限は未確定であり、暗黙に有効にはしない。
@@ -30,7 +30,8 @@ hook一覧のbridge側実装は`director.hooks.list`の`query`で`after?`と`lim
 IDの辞書順で読み、登録順ではない。`nextCursor`を次の`after`へ渡す。
 cursorのhookを削除しても続きを読めるが、変更中の一覧はsnapshotではない。
 16,000文字までの指示を含む大量hookでも、1フレームへ全件を詰め込まない。
-PiのTool登録と、このbridge呼出しへの変換はまだ未実装。
+Pi拡張は一覧の引数をbridgeの`query`へ変換する。
+全Toolの引数は未知キーを拒否し、world / player / session / runは信頼済みbindingから付ける。
 
 `send_message`を呼んだ場合にだけプレイヤーへ発言を表示する。
 内部で状態確認やhook変更をしただけなら、無言で終了できる。
