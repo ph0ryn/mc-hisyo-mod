@@ -3,7 +3,8 @@ import { EventEmitter } from "node:events";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { createPiJsonLineDecoder, encodePiJsonLine, maxPiJudgmentBytes } from "./piFraming.js";
-import { physicalModelApis, supportedPiVersion } from "./piPolicy.js";
+import { checkNativePiModel, type NativePiModelSelector } from "./nativePiModel.js";
+import { supportedPiVersion } from "./piPolicy.js";
 
 export interface PiLaunchOptions {
   executable: string;
@@ -11,7 +12,7 @@ export interface PiLaunchOptions {
   args: readonly string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  model: { provider: string; id: string; api: string };
+  model: NativePiModelSelector;
   /** Known bundled extension, authenticated and ready on the owning bridge. */
   isAgentReady: () => boolean;
   requestTimeoutMs?: number;
@@ -30,17 +31,6 @@ export class PiRunError extends Error {
   }
 }
 
-const modelSchema = Type.Object({ provider: Type.String(), id: Type.String(), api: Type.String() });
-const modelsSchema = Type.Object({ models: Type.Array(modelSchema) });
-const levelsSchema = Type.Object({ levels: Type.Array(Type.String()) });
-const stateSchema = Type.Object({
-  model: modelSchema,
-  thinkingLevel: Type.Literal("medium"),
-  isStreaming: Type.Literal(false),
-  isCompacting: Type.Literal(false),
-  autoCompactionEnabled: Type.Literal(false),
-  pendingMessageCount: Type.Literal(0),
-});
 const responseSchema = Type.Union([
   Type.Object({
     type: Type.Literal("response"),
@@ -133,6 +123,7 @@ class PiRpcClient extends EventEmitter {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #options: PiLaunchOptions;
   #nextId = 0;
+  #modelApi: string | undefined;
   #run: JudgmentSlot | undefined;
   #failure: Error | undefined;
   #stopping = false;
@@ -185,6 +176,22 @@ class PiRpcClient extends EventEmitter {
   /** Bounded stderr only; never automatically display it or stdout prose in game. */
   get diagnostics(): string {
     return this.#stderr.toString("utf8");
+  }
+
+  /** The session owner's existing readiness deadline also bounds the startup RPC gate. */
+  async initialize(signal: AbortSignal): Promise<void> {
+    const abort = () => this.#fail(new Error("Pi readiness aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      signal.throwIfAborted();
+      await this.#gate();
+      signal.throwIfAborted();
+    } catch (error) {
+      this.#fail(error);
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
   }
 
   run(message: string, signal?: AbortSignal): Promise<PiJudgment> {
@@ -247,41 +254,20 @@ class PiRpcClient extends EventEmitter {
     }
   }
 
-  async #gate(slot: JudgmentSlot): Promise<void> {
-    const ready = () => {
-      if (this.#failure) throw this.#failure;
-      if (!this.#options.isAgentReady()) throw new Error("Authenticated Pi extension is not ready");
-    };
-    ready();
-    const catalog = await this.#request("get_available_models");
-    if (slot.cancelled) return;
-    ready();
-    if (!Check(modelsSchema, catalog)) throw new Error("Invalid Pi model catalog");
-    const matching = catalog.models.filter(
-      (model) =>
-        model.provider === this.#options.model.provider && model.id === this.#options.model.id,
+  async #gate(slot?: JudgmentSlot): Promise<void> {
+    const api = await checkNativePiModel(
+      this.#options.model,
+      (command) => this.#request(command),
+      () => {
+        if (slot?.cancelled) return false;
+        if (this.#failure) throw this.#failure;
+        if (!this.#options.isAgentReady())
+          throw new Error("Authenticated Pi extension is not ready");
+        return true;
+      },
+      this.#modelApi,
     );
-    if (
-      matching.length !== 1 ||
-      !physicalModelApis.has(matching[0]!.api) ||
-      matching[0]!.api !== this.#options.model.api
-    )
-      throw new Error("Configured Pi model or API is unavailable");
-    const available = await this.#request("get_available_thinking_levels");
-    if (slot.cancelled) return;
-    ready();
-    if (!Check(levelsSchema, available) || !available.levels.includes("medium"))
-      throw new Error("Pi model does not support medium thinking");
-    const state = await this.#request("get_state");
-    if (slot.cancelled) return;
-    ready();
-    if (
-      !Check(stateSchema, state) ||
-      state.model.provider !== this.#options.model.provider ||
-      state.model.id !== this.#options.model.id ||
-      state.model.api !== matching[0]!.api
-    )
-      throw new Error("Pi model, thinking, compaction or queue state is not ready");
+    if (api !== undefined) this.#modelApi = api;
   }
 
   #cancel(slot: JudgmentSlot): void {
