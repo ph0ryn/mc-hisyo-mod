@@ -1,3 +1,4 @@
+import { referenceTools, validReferenceResult } from "../protocol/gameReferences.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { once } from "node:events";
 import { createConnection } from "node:net";
@@ -65,7 +66,7 @@ export default function directorBridge(pi: ExtensionAPI): void {
       throw new Error("Director requires RPC mode and a validated physical model API");
     const actual = pi.getActiveTools().toSorted();
     if (JSON.stringify(actual) !== JSON.stringify(directorToolNames.toSorted()))
-      throw new Error("Director requires exactly its seven game tools");
+      throw new Error("Director requires exactly its ten game tools");
   }
 
   async function request(
@@ -112,6 +113,17 @@ export default function directorBridge(pi: ExtensionAPI): void {
         if (method === "game.state.get") result = await getState(ctx, signal);
         else {
           result = await request(captured, method, payload(args), signal);
+          const reference = referenceTools.find((tool) => tool.method === method);
+          if (reference) {
+            if (
+              !validReferenceResult(reference, result) ||
+              !sameRunBinding(result as RunBinding, captured)
+            ) {
+              retire(ctx);
+              throw new Error("Invalid game reference result or binding");
+            }
+            result = (result as { reference: unknown }).reference;
+          }
           if (method === "game.message.send") {
             if (!Check(SendMessageResultSchema, result) || !sameRunBinding(result, captured)) {
               retire(ctx);
@@ -169,6 +181,9 @@ export default function directorBridge(pi: ExtensionAPI): void {
     "director.hooks.list",
     (query) => ({ query }),
   );
+
+  for (const reference of referenceTools)
+    tool(reference.name, reference.description, reference.args, reference.method);
 
   // Register every guard before parsing bootstrap: a failed idle startup must also deny later prompts.
   pi.on("session_start", async (_event, ctx) => {

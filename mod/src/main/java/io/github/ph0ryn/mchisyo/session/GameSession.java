@@ -4,6 +4,7 @@ import com.google.gson.*;
 import io.github.ph0ryn.mchisyo.observation.ObservedEvent;
 import io.github.ph0ryn.mchisyo.protocol.RunBinding;
 import io.github.ph0ryn.mchisyo.protocol.WorldBinding;
+import io.github.ph0ryn.mchisyo.reference.PackagedReferences;
 import io.github.ph0ryn.mchisyo.transport.RpcError;
 import io.github.ph0ryn.mchisyo.transport.RpcPeer;
 import java.util.*;
@@ -15,6 +16,7 @@ public final class GameSession implements AutoCloseable {
         CompletionStage<Void> initialize();
         CompletionStage<JsonObject> snapshot(Capture capture);
         CompletionStage<Void> display(Capture capture, String text);
+        CompletionStage<JsonObject> reference(Capture capture, String method, JsonObject query);
     }
     public final class Capture {
         private final Object identity;
@@ -74,6 +76,19 @@ public final class GameSession implements AutoCloseable {
             Capture capture = capture(binding);
             return game.display(capture, text).thenApply(ignored -> {
                 capture.requireCurrent(); JsonObject result = binding.toJson(); result.addProperty("displayed", true); return result;
+            });
+        });
+        for (String method : List.of("game.files.list", "game.files.read", "game.files.search")) peer.handle(method, params -> {
+            RunBinding binding = binding(params, Set.of("query"));
+            JsonElement value = params.getAsJsonObject().get("query");
+            if (value == null || !value.isJsonObject()) throw invalid();
+            JsonObject query = value.getAsJsonObject().deepCopy();
+            PackagedReferences.validate(method, query);
+            Capture capture = capture(binding); capture.requireCurrent();
+            return game.reference(capture, method, query).thenApply(reference -> {
+                capture.requireCurrent();
+                if (reference == null) throw new IllegalStateException("Missing reference result");
+                JsonObject result = binding.toJson(); result.add("reference", reference); PackagedReferences.budget(result); capture.requireCurrent(); return result;
             });
         });
         peer.closed().thenAccept(reason -> invalidate());

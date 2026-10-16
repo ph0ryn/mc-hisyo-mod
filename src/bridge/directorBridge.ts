@@ -1,3 +1,4 @@
+import { referenceTools, validReferenceResult } from "../protocol/gameReferences.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import { createServer, type AddressInfo, type Socket } from "node:net";
@@ -411,6 +412,11 @@ export class DirectorBridge extends EventEmitter<{
         ],
       };
     });
+    for (const reference of referenceTools) {
+      this.#register(connection, reference.method, "agent", reference.request, (params) =>
+        this.#forward(reference.method, params, reference.result),
+      );
+    }
     this.#register(connection, "game.state.get", "agent", GameStateRequestSchema, (params) =>
       this.#forward("game.state.get", params, GameStateResultSchema),
     );
@@ -475,14 +481,19 @@ export class DirectorBridge extends EventEmitter<{
   async #forward(
     method: string,
     params: RunBinding & Record<string, unknown>,
-    schema: typeof GameStateResultSchema | typeof SendMessageResultSchema,
+    schema: TSchema,
   ): Promise<unknown> {
     this.#requireRun(params);
     // Capture literal request data before awaiting; never retarget a delayed display fact.
     const captured = structuredClone(params);
     const result = await this.#game!.peer.call(method, captured);
     if (method !== "game.message.send") this.#requireRun(captured);
-    if (!Check(schema, result) || !sameRunBinding(result, captured))
+    if (
+      !Check(schema, result) ||
+      !sameRunBinding(result as RunBinding, captured) ||
+      (method.startsWith("game.files.") &&
+        !validReferenceResult({ method, result: schema }, result))
+    )
       throw new RpcError(-32603, "Invalid game result or binding");
     if (method === "game.message.send")
       this.#storage(() =>
