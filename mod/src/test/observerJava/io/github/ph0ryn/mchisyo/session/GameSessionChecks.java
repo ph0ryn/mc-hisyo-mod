@@ -36,6 +36,12 @@ public final class GameSessionChecks {
             queue.add(() -> { try { capture.requireCurrent(); JsonObject copy = json("{\"version\":1}"); afterRead.run(); result.complete(copy); } catch (RuntimeException e) { result.completeExceptionally(e); } });
             return result;
         }
+        int references;
+        public CompletionStage<JsonObject> reference(GameSession.Capture capture, String method, JsonObject query) {
+            capture.requireCurrent(); CompletableFuture<JsonObject> result = new CompletableFuture<>();
+            queue.add(() -> { try { capture.requireCurrent(); references++; afterRead.run(); result.complete(json("{\"kind\":\"roots\",\"roots\":[],\"nextCursor\":null}")); } catch (RuntimeException error) { result.completeExceptionally(error); } });
+            return result;
+        }
         public CompletionStage<Void> display(GameSession.Capture capture, String text) {
             CompletableFuture<Void> result = new CompletableFuture<>();
             queue.add(() -> { try { capture.requireCurrent(); displayed++; result.complete(null); } catch (RuntimeException e) { result.completeExceptionally(e); } });
@@ -84,6 +90,31 @@ public final class GameSessionChecks {
         JsonObject readyReply = json("{\"jsonrpc\":\"2.0\",\"id\":\"3\",\"result\":{\"ready\":true}}"); peer.receive((readyReply+"\n").getBytes(StandardCharsets.UTF_8));
         started.toCompletableFuture().join(); check(session.isReady());
         receive(peer, "game.run.bind", RUN.toJson(), 20); check(wire.last().get("result").equals(RUN.toJson()));
+        JsonObject referenceRequest = RUN.toJson(); referenceRequest.add("query", json("{}"));
+        receive(peer, "game.files.list", referenceRequest, 301); check(game.references == 0); game.queue.remove().run();
+        check(game.references == 1); check(wire.last().getAsJsonObject("result").get("runId").getAsString().equals(RUN.runId()));
+        receive(peer, "game.files.list", referenceRequest, 302); session.pause(true); game.queue.remove().run();
+        check(game.references == 1); check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+        session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 303);
+        game.afterRead = () -> session.pause(true); receive(peer, "game.files.list", referenceRequest, 304); game.queue.remove().run();
+        check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001); game.afterRead = () -> {};
+        session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 305);
+        JsonObject invalidReference = RUN.toJson(); invalidReference.add("query", json("{\"root\":\"minecraft:0\",\"path\":\"../SECRET\"}"));
+        receive(peer, "game.files.read", invalidReference, 306); check(game.queue.isEmpty()); check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602);
+        for (String method : List.of("game.files.list", "game.files.read", "game.files.search")) {
+            JsonObject request = RUN.toJson();
+            request.add("query", method.endsWith("list") ? json("{}") : method.endsWith("read") ? json("{\"root\":\"minecraft:0\",\"path\":\"x.json\"}") : json("{\"root\":\"minecraft:0\",\"path\":\"\",\"text\":\"needle\"}"));
+            int readCount = game.references;
+            receive(peer, method, request, 310); check(game.queue.size() == 1);
+            receive(peer, "game.run.clear", RUN.toJson(), 311); receive(peer, "game.run.bind", RUN.toJson(), 312);
+            game.queue.remove().run(); check(game.references == readCount);
+            check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001); check(game.queue.isEmpty());
+            game.afterRead = () -> session.pause(true); receive(peer, method, request, 313); game.queue.remove().run();
+            check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+            game.afterRead = () -> {}; session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 314);
+            request.addProperty("host", "/SECRET"); receive(peer, method, request, 315);
+            check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602); check(game.queue.isEmpty());
+        }
         CompletionStage<Void> accepted = session.playerMessage("日本語");
         check(wire.last().get("method").getAsString().equals("game.player_message"));
         check(wire.last().getAsJsonObject("params").get("worldSessionId").getAsString().equals("session"));

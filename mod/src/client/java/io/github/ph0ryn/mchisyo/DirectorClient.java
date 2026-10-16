@@ -4,10 +4,14 @@ import com.google.gson.JsonObject;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import io.github.ph0ryn.mchisyo.observation.ServerGameState;
 import io.github.ph0ryn.mchisyo.observation.ServerObservations;
+import io.github.ph0ryn.mchisyo.reference.PackagedReferences;
 import io.github.ph0ryn.mchisyo.session.DirectorFiles;
 import io.github.ph0ryn.mchisyo.session.GameSession;
 import io.github.ph0ryn.mchisyo.transport.LoopbackConnection;
+import io.github.ph0ryn.mchisyo.transport.RpcError;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
@@ -17,6 +21,7 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.server.IntegratedServer;
 import net.minecraft.network.chat.Component;
@@ -42,6 +47,7 @@ final class DirectorClient {
         volatile GameSession session;
         volatile LoopbackConnection connection;
         boolean probing, began, feedbackSent;
+        PackagedReferences references; // Owned only by the existing bounded bootstrap worker.
         Attempt(IntegratedServer server, UUID player) { this.server = server; this.player = player; }
     }
     DirectorClient(Minecraft client, Path configDir) {
@@ -137,6 +143,37 @@ final class DirectorClient {
                         capture.requireCurrent(); JsonObject snapshot = ServerGameState.snapshot(requireServer(a));
                         requireServer(a); capture.requireCurrent(); return snapshot;
                     });
+                }
+                public CompletionStage<JsonObject> reference(GameSession.Capture capture, String method, JsonObject query) {
+                    capture.requireCurrent();
+                    CompletableFuture<JsonObject> result = new CompletableFuture<>();
+                    try { bootstrap.execute(() -> {
+                        try {
+                            Runnable guard = () -> { if (a.retired || active != a) throw GameSession.stale(); capture.requireCurrent(); };
+                            guard.run();
+                            if (a.references == null) {
+                                ArrayList<PackagedReferences.Root> selected = new ArrayList<>();
+                                guard.run();
+                                for (var mod : FabricLoader.getInstance().getAllMods()) {
+                                    guard.run();
+                                    if (selected.size() >= 4096) throw new RpcError(-32004, "Reference root limit exceeded");
+                                    String id = mod.getMetadata().getId();
+                                    List<Path> paths;
+                                    try { guard.run(); paths = mod.getRootPaths(); }
+                                    catch (RuntimeException unavailable) { guard.run(); selected.add(new PackagedReferences.Root(id + ":0", null, null)); continue; }
+                                    guard.run();
+                                    if (paths.isEmpty()) selected.add(new PackagedReferences.Root(id + ":0", null, null));
+                                    for (int i = 0; i < paths.size(); i++) {
+                                        if (selected.size() >= 4096) throw new RpcError(-32004, "Reference root limit exceeded");
+                                        selected.add(new PackagedReferences.Root(id + ":" + i, paths.get(i), null));
+                                    }
+                                }
+                                guard.run(); a.references = new PackagedReferences(selected);
+                            }
+                            JsonObject reference = a.references.query(method, query, guard); guard.run(); result.complete(reference);
+                        } catch (RuntimeException error) { result.completeExceptionally(error); }
+                    }); } catch (RejectedExecutionException full) { result.completeExceptionally(new RpcError(-32004, "Reference worker unavailable")); }
+                    return result;
                 }
                 public CompletionStage<Void> display(GameSession.Capture capture, String text) {
                     CompletableFuture<Void> result = new CompletableFuture<>();

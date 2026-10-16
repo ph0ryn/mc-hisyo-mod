@@ -1,3 +1,4 @@
+import { referenceTools, validReferenceResult } from "../protocol/gameReferences.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import { createServer, type AddressInfo, type Socket } from "node:net";
@@ -338,6 +339,11 @@ export class DirectorBridge extends EventEmitter<{
           .filter((definition) => this.#world!.supportedEvents.includes(definition.name)),
       };
     });
+    for (const reference of referenceTools) {
+      this.#register(connection, reference.method, "agent", reference.request, (params) =>
+        this.#forward(reference.method, params, reference.result),
+      );
+    }
     this.#register(connection, "game.state.get", "agent", GameStateRequestSchema, (params) =>
       this.#forward("game.state.get", params, GameStateResultSchema),
     );
@@ -384,12 +390,17 @@ export class DirectorBridge extends EventEmitter<{
   async #forward(
     method: string,
     params: RunBinding & Record<string, unknown>,
-    schema: typeof GameStateResultSchema | typeof SendMessageResultSchema,
+    schema: TSchema,
   ): Promise<unknown> {
     this.#requireRun(params);
     const result = await this.#game!.peer.call(method, params);
     this.#requireRun(params);
-    if (!Check(schema, result) || !sameRunBinding(result, params))
+    if (
+      !Check(schema, result) ||
+      !sameRunBinding(result as RunBinding, params) ||
+      (method.startsWith("game.files.") &&
+        !validReferenceResult({ method, result: schema }, result))
+    )
       throw new RpcError(-32603, "Invalid game result or binding");
     return result;
   }
