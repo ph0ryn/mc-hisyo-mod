@@ -7,9 +7,10 @@
 - イベントと応答hookをSQLiteへ保存し、worldId / playerId単位で再読込する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
+- 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
 
 **ゲームとPiを接続するDirector本体はまだ未実装。**
-CLIはヘルプと引数検証だけを提供し、Modは空のクライアント初期化処理だけを持つ。
+CLIはヘルプと引数検証だけを提供する。Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
 設計資料のToolや通信メソッドは、実装済み機能の一覧ではない。
 
@@ -42,7 +43,9 @@ GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew build
 Minecraft 1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
 Wrapper本体と配布zipは公式SHA-256で確認した。
 このビルドはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
-現在Java側のテストはなく、Gradleの`test`は`NO-SOURCE`になる。
+Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は独立した`observerTest`を実行する。
+Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
+登録API、明示nullのserialize、観測の限界は[観測資料](<observations.md>)を参照。
 
 ## イベントの追加
 
@@ -60,8 +63,8 @@ Wrapper本体と配布zipは公式SHA-256で確認した。
 
 [履歴とhookのテスト](<../tests/eventHistory.test.ts>)では、
 `example:machine_completed`を定義だけで追加し、永続化・検索・hook照合が動くことを確認する。
-現在の組込定義は、ブロック破壊、inventory slot差分、体力差分の3種。
-これはschemaの定義であり、現在のModが収集しているという意味ではない。
+現在は13種類の組込定義と対応observerがある。
+observerは未配線なので、実際の接続Modが収集・送信した実績とは区別する。
 
 ### 観測と推測を分ける
 
@@ -91,8 +94,8 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 ## 次の段階
 
 codecはまだCLIへ配線していない。[通信codecの契約](<protocol.md#実装済みの通信codec>)を基に、
-共有fixtureによるJava DTO検証、認証hello、world / run binding、Pi拡張の接続、
-実observer、単一実行scheduler、pause・切断・再開の順に接続する。
+認証hello、world / run binding、Pi拡張の接続、
+observerの登録・送信、単一実行scheduler、pause・切断・再開の順に接続する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
 OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。

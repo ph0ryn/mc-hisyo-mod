@@ -4,6 +4,22 @@ import { Check } from "typebox/value";
 const identifier = Type.String({ minLength: 1, maxLength: 128 });
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const position = Type.Tuple([Type.Number(), Type.Number(), Type.Number()]);
+const nullableIdentifier = Type.Union([identifier, Type.Null()]);
+const hand = Type.Union([Type.Literal("main_hand"), Type.Literal("off_hand")]);
+const damageSourceProperties = {
+  damageType: identifier,
+  causingEntityId: nullableIdentifier,
+  causingEntityType: nullableIdentifier,
+  directEntityId: nullableIdentifier,
+  directEntityType: nullableIdentifier,
+};
+const damageSourceFilterFields = [
+  "damageType",
+  "causingEntityId",
+  "causingEntityType",
+  "directEntityId",
+  "directEntityType",
+];
 
 export const WorldScopeSchema = Type.Object(
   {
@@ -55,7 +71,7 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
   {
     name: "inventory_slot_changed",
     description:
-      "A slot differs between tick snapshots; this does not identify pickup or crafting and can miss same-tick net-zero changes.",
+      "A slot's item ID/count differs between tick snapshots; this does not identify pickup or crafting and omits component-only and same-tick net-zero changes.",
     observation: "snapshot_delta",
     dataSchema: Type.Object(
       {
@@ -79,5 +95,183 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
       { additionalProperties: false },
     ),
     filterFields: ["before", "after"],
+  },
+  {
+    name: "food_changed",
+    description:
+      "Food level or saturation differs between tick snapshots; not individual eating/exhaustion events and same-tick net-zero changes can be missed.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        beforeFoodLevel: counter,
+        afterFoodLevel: counter,
+        beforeSaturation: Type.Number(),
+        afterSaturation: Type.Number(),
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: ["beforeFoodLevel", "afterFoodLevel", "beforeSaturation", "afterSaturation"],
+  },
+  {
+    name: "experience_changed",
+    description:
+      "Experience fields differ between tick snapshots; this does not identify XP earned or its cause and can miss same-tick net-zero changes.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        beforeLevel: counter,
+        afterLevel: counter,
+        beforeProgress: Type.Number(),
+        afterProgress: Type.Number(),
+        beforeTotalExperience: counter,
+        afterTotalExperience: counter,
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: [
+      "beforeLevel",
+      "afterLevel",
+      "beforeProgress",
+      "afterProgress",
+      "beforeTotalExperience",
+      "afterTotalExperience",
+    ],
+  },
+  {
+    name: "held_item_changed",
+    description:
+      "Hand item ID/count or selected main-hand slot differs between tick snapshots; component-only and same-tick net-zero changes are omitted. This is not item use; off-hand slot indices are null.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        hand,
+        beforeSlot: Type.Union([counter, Type.Null()]),
+        afterSlot: Type.Union([counter, Type.Null()]),
+        beforeItemId: identifier,
+        beforeCount: counter,
+        afterItemId: identifier,
+        afterCount: counter,
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: [
+      "hand",
+      "beforeSlot",
+      "afterSlot",
+      "beforeItemId",
+      "beforeCount",
+      "afterItemId",
+      "afterCount",
+    ],
+  },
+  {
+    name: "player_location_changed",
+    description:
+      "At sampleIntervalTicks server ticks, reports nonzero 3-D displacement of at least minimumDistance blocks or a biome-ID change from the last emitted baseline. elapsedTicks is since that baseline, not a complete travel path; unknown biome IDs are null.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        beforePosition: position,
+        afterPosition: position,
+        beforeBiomeId: nullableIdentifier,
+        afterBiomeId: nullableIdentifier,
+        sampleIntervalTicks: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+        minimumDistance: Type.Number({ minimum: 0 }),
+        elapsedTicks: counter,
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: [
+      "beforeBiomeId",
+      "afterBiomeId",
+      "sampleIntervalTicks",
+      "minimumDistance",
+      "elapsedTicks",
+    ],
+  },
+  {
+    name: "dimension_changed",
+    description:
+      "The server confirmed a player world change; envelope position is the observed destination, not a reconstructed departure position.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { fromDimension: identifier, toDimension: identifier },
+      { additionalProperties: false },
+    ),
+    filterFields: ["fromDimension", "toDimension"],
+  },
+  {
+    name: "player_died",
+    description:
+      "The server's AFTER_DEATH callback confirmed player death; nullable source entities are unknown/absent, and no final damage amount is inferred.",
+    observation: "confirmed",
+    dataSchema: Type.Object(damageSourceProperties, { additionalProperties: false }),
+    filterFields: damageSourceFilterFields,
+  },
+  {
+    name: "player_respawned",
+    description:
+      "The server created the replacement player; alive=true is recreation without implying a preceding death.",
+    observation: "confirmed",
+    dataSchema: Type.Object({ alive: Type.Boolean() }, { additionalProperties: false }),
+    filterFields: ["alive"],
+  },
+  {
+    name: "player_connection_changed",
+    description:
+      "Joined after server player placement, or leaving before removal is complete; leaving is not a completed-disconnection notification.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { state: Type.Union([Type.Literal("joined"), Type.Literal("leaving")]) },
+      { additionalProperties: false },
+    ),
+    filterFields: ["state"],
+  },
+  {
+    name: "living_damage_processed",
+    description:
+      "The server AFTER_DAMAGE callback processed nonlethal damage or a shield block involving the player; lethal damage is excluded and callback amounts are not final health loss.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        ...damageSourceProperties,
+        relationship: Type.Union([
+          Type.Literal("received"),
+          Type.Literal("dealt"),
+          Type.Literal("both"),
+        ]),
+        victimId: identifier,
+        victimType: identifier,
+        baseDamageTaken: Type.Number(),
+        damageTaken: Type.Number(),
+        blocked: Type.Boolean(),
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: [
+      ...damageSourceFilterFields,
+      "relationship",
+      "victimId",
+      "victimType",
+      "baseDamageTaken",
+      "damageTaken",
+      "blocked",
+    ],
+  },
+  {
+    name: "entity_use_attempted",
+    description:
+      "A server-side entity-use callback observed an attempt before vanilla validation; not confirmed trading, taming, riding, or menu opening. Server hit position can be null.",
+    observation: "attempt",
+    dataSchema: Type.Object(
+      {
+        entityId: identifier,
+        entityType: identifier,
+        hand,
+        hitPosition: Type.Union([position, Type.Null()]),
+      },
+      { additionalProperties: false },
+    ),
+    filterFields: ["entityId", "entityType", "hand"],
   },
 ];

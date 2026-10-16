@@ -33,7 +33,12 @@ Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11を固定し、
 Java 21 / Loom 1.17.21 / Gradle 9.7.1で`build`を確認した。
 配布JARのclient-only metadata、entrypoint、Java 21 class formatも確認した。
 
-これは空のクライアント初期化処理を持つ基盤のビルド確認で、Java側のテストやゲーム起動確認ではない。
+13種類のobserverをコンパイルし、`observerTest`の純Java **93 assertions**が成功した。
+共有fixtureのserialize、snapshot差分、プレイヤー別baseline、sample、reset、DTOの不変性・明示nullを確認する。
+実行classpathからMinecraft / Fabricを除外していることも検証する。
+
+observerはclient initializerに未登録で、ゲーム内callbackの発火確認ではない。
+[観測の契約と限界](<observations.md>)を参照。
 Minecraftを起動せず、EULAに同意せず、既存ワールドを使用していない。
 
 ### Piのローカル境界

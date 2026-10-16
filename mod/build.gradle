@@ -29,6 +29,37 @@ dependencies {
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
+// Pure-Java checks use the already-cached Gson dependency, not a game/JUnit runner.
+// A separate source set keeps the ordinary test task NO-SOURCE without hiding tests.
+sourceSets {
+    observerTest {
+        java.srcDir 'src/test/observerJava'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+dependencies {
+    // Same Gson as Minecraft 1.21.11, already cached; no Minecraft/Fabric classes on this test classpath.
+    observerTestImplementation('com.google.code.gson:gson:2.13.2') {
+        // Gson runs on the JDK alone; its Error Prone annotations are not a runtime/test requirement.
+        transitive = false
+    }
+}
+
+tasks.register('observerTest', JavaExec) {
+    dependsOn tasks.named('observerTestClasses')
+    classpath = sourceSets.observerTest.runtimeClasspath
+    mainClass = 'io.github.ph0ryn.mchisyo.observation.ObserverChecks'
+    def fixtures = rootProject.file('../tests/fixtures/protocol/observerEvents.json')
+    inputs.file fixtures
+    args fixtures.absolutePath
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('observerTest')
+}
+
 processResources {
     def metadata = [
         version: project.version,
