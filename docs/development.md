@@ -9,9 +9,11 @@
 - JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
 - 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
 - 認証付きloopback bridgeで、role・ready・world / run binding・古い応答の拒否を実TCPで検証する。
+- ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
 
-**CLI・Mod・Piを結ぶ起動処理とschedulerはまだ未実装。**
-CLIはヘルプと引数検証だけを提供する。Modのobserverは空のclient initializerへまだ登録していない。
+**Piの起動・接続、scheduler、Modへの配線はまだ未実装。**
+`--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
+Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
 設計資料のToolや通信メソッドは、実装済み機能の一覧ではない。
 
@@ -47,6 +49,29 @@ Wrapper本体と配布zipは公式SHA-256で確認した。
 Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は独立した`observerTest`を実行する。
 Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
 登録API、明示nullのserialize、観測の限界は[観測資料](<observations.md>)を参照。
+
+## bridge-only CLI
+
+```bash
+node dist/cli.mjs --bridge-only
+# または、既存の親ディレクトリ配下へ保存先を指定する
+node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
+```
+
+既定の保存先は`~/.mc-hisyo`。新規ディレクトリは`0700`、新規ファイルは`0600`にし、processのumaskを`077`へ絞る。
+既存ディレクトリには所有者と`0700`を要求し、symlinkは拒否する。既存の権限を自動でchmodしない。
+親ディレクトリは信頼できる場所を使う。POSIX modeを検査する実装で、拡張ACLとWindows ACLは未検証、Windows起動は未対応。
+
+- `history.sqlite`へ履歴とhookを保存する。既存のmain / WAL / SHM / journalは、所有者・regular file・`0600`・link数1をopen前に検査する。
+- `connection.json`へprotocolVersion、loopback接続先、port、token、PIDを公開する。[公開と削除の契約](<protocol.md>)を参照。
+- 接続情報が既にあれば停止する。内容が壊れていても読み飛ばして上書きしたり、PIDだけで古いと判断したりしない。
+- Ctrl-C / SIGINT / SIGTERMでlistenerと接続、SQLite、自分の接続情報を順に閉じる。履歴とhookは残す。
+- SIGKILLやcrash後の接続情報は自動回収しない。所有プロセスの停止を確認してから手動で処理する。
+
+起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
+CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
+[ビルド済みCLIのsubprocessテスト](<../tests/cli.test.ts>)は、一時保存先と偽gameの実TCP接続を使う。
+ModやPiの起動、ゲーム内の動作確認ではない。
 
 ## イベントの追加
 
@@ -96,9 +121,8 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 
 ## 次の段階
 
-認証bridgeはまだCLIへ配線していない。[通信の契約](<protocol.md>)を基に、
-CLIのprivate接続情報公開と起動・終了処理、Pi拡張の接続、
-observerの登録・送信、単一実行scheduler、pause・切断・再開の順に接続する。
+bridge-only CLIの起動・終了とprivate接続情報公開は実装済み。[通信の契約](<protocol.md>)を基に、
+Pi拡張と単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
 OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。

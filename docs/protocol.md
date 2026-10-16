@@ -1,7 +1,8 @@
 # 通信プロトコル
 
-codecと認証・bindingを扱うbridgeは実装済みだが、CLI・Mod・Piへの配線は未完了。
-以下はその通信契約と、接続時の起動案。[実装済みの範囲](<development.md>)は別に管理する。
+codec、認証・bindingを扱うbridge、bridge-only CLIの起動・終了は実装済み。
+Mod・Piへの配線は未完了。以下は通信契約と、Piを含む接続時の起動案。
+[実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
 | --- | --- | --- |
@@ -25,8 +26,8 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 9. Pi拡張も認証し、handlerの準備後に`director.ready`を送る。
 10. 両者がreadyかつunpausedなら、CLIが`game.run.bind`と`director.run.bind`のACKを待ち、判断を開始する。
 
-接続情報ファイルの配置場所は実装時に確定する。
-秘密情報を含むため所有ユーザーだけが読める権限にし、トークンをログへ出さない。
+現在のCLIは`--bridge-only`で待受・接続情報公開と1〜7のbridge側処理を受け持つ。
+Mod側、Piの起動、判断開始は未配線。
 初版は1つのゲーム接続を扱う。
 
 `worldId`は保存されたワールドを、`worldSessionId`は今回の接続・入場を識別する。
@@ -34,6 +35,26 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 `worldId`と`playerId`が永続化scope、`worldSessionId`と判断ごとの`runId`が実行bindingとなる。
 実行開始時の識別子をTool要求にも引き継ぎ、CLIとゲームスレッドの両方で現在の接続と一致することを確認する。
 古い実行の要求を、新しく接続したワールド向けに付け替えない。
+
+## CLIの接続情報ファイル
+
+保存先は既定で`~/.mc-hisyo/connection.json`。`--data-dir PATH`でディレクトリを変更する。
+JSONのfieldは`protocolVersion: 1`、`host: "127.0.0.1"`、`port`、`token`、`pid`。
+portは起動時にOSが割り当て、tokenは32 bytesの乱数をbase64url化した43文字で、起動ごとに変える。
+PIDは診断用で、stale判定や自動回収の根拠にしない。tokenはログへ出さない。
+
+[ディレクトリ検査](<../src/runtime/privateDataDirectory.ts>)でPOSIX所有者とmode `0700`を確認する。
+[publisher](<../src/runtime/connectionFile.ts>)は同じディレクトリのUUID付きtempを`0600`で排他作成し、write・fsync後にhard linkで公開する。
+既存の接続情報はfile / symlink / directoryのいずれでも拒否し、上書きしない。hard link未対応のfilesystemでも黙示的な代替方式は使わない。
+公開後にtempの名前を外すが、fdは終了時まで保持する。
+[POSIXが許す削除後のinode再利用](<https://pubs.opengroup.org/onlinepubs/9799919799/functions/unlink.html>)で、別fileを自分のものと誤認しないためである。
+
+終了時は接続とSQLiteを閉じてから、自分が公開した接続情報を削除する。
+削除前にcanonical directoryとdevice / inode / UIDを確認し、差し替わっていれば残してエラー終了する。
+自分のtemp以外を走査・削除しない。crash / SIGKILL後の自動回収は行わない。
+stateの既存権限を変更せず、信頼できる親ディレクトリと同じUIDの非敵対的な利用を前提とする。
+拡張ACLやWindows ACL、同じUIDによる敵対的なpath差替えへの防御は保証しない。
+SQLiteの検査はopen前のmetadata検査であり、稼働中にSQLiteのfileや親を外部から差し替える運用には対応しない。
 
 ## メッセージ形式
 

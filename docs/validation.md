@@ -41,6 +41,24 @@
 
 起動・終了競合と大量hook一覧は、失敗を再現してから修正した。
 
+### bridge-only CLIの起動・終了
+
+[packaged CLIのテスト](<../tests/cli.test.ts>)はビルド成果物を実際の子プロセスとして起動する。
+PiやModの代わりに、偽gameを認証付き実TCPで接続する。
+
+- `--help`でstateを作らずPiを起動しないこと、通常起動で未実装のPiを黙って省略しないこと。
+- privateな接続情報のfield、tokenの非ログ出力、`0700` / `0600`と所有UID。
+- 実TCPの観測をSQLiteへ保存し、SIGINT / SIGTERM後も履歴が残ること。
+- 同じ保存先の二重起動を拒否し、再起動ではtokenを更新すること。
+- 既存の接続情報、directory symlink、unsafeなmode、SQLiteのsymlink・hardlinkを変更せず拒否すること。
+- 接続情報をrenameまたはunlink / recreateで差し替えると、replacementを削除せずエラー終了すること。
+- stdoutのpipeが起動表示前に閉じても、明示的に失敗し、接続情報とSQLiteの終了処理を行うこと。
+- 未対応DB versionではversionを変えず、接続情報やtempを残さないこと。
+
+閉じたstdout pipeの`EPIPE`がcleanupを迂回して接続情報・WAL・SHMを残す失敗を再現し、修正後の成功を確認した。
+inodeを保持するfdはPOSIXの再利用規則に基づく対策で、ホスト上でのinode再利用自体は再現していない。
+Windows、拡張ACL、電源断時の公開耐久性、敵対的な同UIDの操作は未検証。
+
 ### Fabricビルド
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11を固定し、
@@ -74,7 +92,7 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 - アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。
 - 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
 - `get_game_state`のquery形式、Modが実際に広告するイベント部分集合。
-- データ保存先、接続情報ファイルの配置、ワールドUUIDの保存方法。
+- Pi会話の保存先・再開方法、ワールドUUIDの保存方法。履歴と接続情報の配置は確定済み。
 - ポーリングはactive play中60秒を仮値とし、優先順位、要求タイムアウト、フレームサイズを接続検証で決める。
 - ゲームのランチャー環境での接続先読込と、CLI起動環境でのPiのPATH解決。
 
