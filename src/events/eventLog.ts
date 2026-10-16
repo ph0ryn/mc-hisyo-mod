@@ -1,6 +1,16 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 import { validateScope, type GameEvent, type WorldScope } from "../protocol/gameEvent.js";
 import { EventCatalog, type EventFilter } from "./eventCatalog.js";
+import {
+  directorActivityCatalog,
+  isDirectorActivity,
+  validateDirectorActivity,
+  type DirectorActivity,
+} from "./directorActivity.js";
+
+// Reserve space for the existing JSON-RPC/tool envelope below the 1 MiB wire cap.
+export const eventPageBytes = 1024 * 1024 - 4096;
+export type StoredHistory = StoredEvent | { id: number; observation: DirectorActivity };
 
 export interface StoredEvent {
   id: number;
@@ -17,18 +27,45 @@ export interface EventSearch {
   limit?: number;
 }
 
-function decodeRow(row: Record<string, SQLOutputValue>): StoredEvent {
-  if (typeof row.id !== "number" || typeof row.observation_json !== "string") {
+function decodeRow(row: Record<string, SQLOutputValue>, catalog: EventCatalog): StoredHistory {
+  if (
+    typeof row.id !== "number" ||
+    !Number.isSafeInteger(row.id) ||
+    row.id < 1 ||
+    typeof row.observation_json !== "string"
+  )
     throw new Error("Invalid stored event");
-  }
-  const entry: StoredEvent = {
+  const observation: unknown = JSON.parse(row.observation_json);
+  if (row.seq === null) validateDirectorActivity(observation);
+  else catalog.validateObservation(observation);
+  const value = observation as GameEvent | DirectorActivity;
+  if (
+    row.world_id !== value.worldId ||
+    row.player_id !== value.playerId ||
+    row.session_id !== value.worldSessionId ||
+    row.event !== value.event ||
+    row.observed_at !== value.observedAt ||
+    ("seq" in value && row.seq !== value.seq)
+  )
+    throw new Error("Invalid stored event metadata");
+  if (row.gap_from === null && row.gap_to === null)
+    return { id: row.id, observation: value } as StoredHistory;
+  if (
+    !("seq" in value) ||
+    typeof row.gap_from !== "number" ||
+    typeof row.gap_to !== "number" ||
+    !Number.isSafeInteger(row.gap_from) ||
+    !Number.isSafeInteger(row.gap_to) ||
+    row.gap_from < 1 ||
+    row.gap_to < row.gap_from ||
+    row.gap_to !== value.seq - 1
+  )
+    throw new Error("Invalid stored event gap metadata");
+  return {
     id: row.id,
-    observation: JSON.parse(row.observation_json) as GameEvent,
+    observation: value,
+    missingSequencesBefore: { from: row.gap_from, to: row.gap_to },
   };
-  if (typeof row.gap_from === "number" && typeof row.gap_to === "number") {
-    entry.missingSequencesBefore = { from: row.gap_from, to: row.gap_to };
-  }
-  return entry;
 }
 
 function validateCounter(name: string, value: number): void {
@@ -40,6 +77,65 @@ export class EventLog {
     readonly db: DatabaseSync,
     readonly catalog: EventCatalog,
   ) {}
+
+  /** The hook store and this log share this SQLite transaction; no unrecorded mutation ACK. */
+  atomic<T>(mutate: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = mutate();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "History transaction and rollback failed");
+      }
+      throw error;
+    }
+  }
+
+  appendActivity(observation: DirectorActivity): { id: number; observation: DirectorActivity } {
+    validateDirectorActivity(observation);
+    const json = JSON.stringify(observation);
+    if (
+      Buffer.byteLength(
+        JSON.stringify({
+          events: [{ id: Number.MAX_SAFE_INTEGER, observation }],
+          through: Number.MAX_SAFE_INTEGER,
+          hasKnownGaps: false,
+          nextCursor: Number.MAX_SAFE_INTEGER,
+        }),
+      ) > eventPageBytes
+    )
+      throw new Error("Director activity exceeds history page byte budget");
+    const result = this.db
+      .prepare(`
+      INSERT INTO events(world_id, player_id, session_id, seq, event, observed_at, observation_json, gap_from, gap_to)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+      .run(
+        observation.worldId,
+        observation.playerId,
+        observation.worldSessionId,
+        null,
+        observation.event,
+        observation.observedAt,
+        json,
+        null,
+        null,
+      );
+    const id = Number(result.lastInsertRowid);
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid stored event cursor");
+    return { id, observation: structuredClone(observation) };
+  }
+
+  appendActivities(observations: readonly DirectorActivity[]): void {
+    if (!observations.length) return;
+    this.atomic(() => {
+      for (const observation of observations) this.appendActivity(observation);
+    });
+  }
 
   /** Persist first. A returned gap is evidence of missing observations, never inferred events. */
   append(observation: GameEvent): StoredEvent {
@@ -84,7 +180,7 @@ export class EventLog {
     scope: WorldScope,
     options: EventSearch = {},
   ): {
-    events: StoredEvent[];
+    events: StoredHistory[];
     through: number;
     /** Scope-wide gaps up to through, independent of filters, time, and page size. */
     hasKnownGaps: boolean;
@@ -98,7 +194,10 @@ export class EventLog {
     if (options.filter !== undefined && options.event === undefined)
       throw new Error("A filter requires an event");
     if (options.event !== undefined)
-      this.catalog.validateFilter(options.event, options.filter ?? {});
+      (isDirectorActivity(options.event) ? directorActivityCatalog : this.catalog).validateFilter(
+        options.event,
+        options.filter ?? {},
+      );
     const max = this.db
       .prepare("SELECT COALESCE(MAX(id), 0) AS id FROM events WHERE world_id = ? AND player_id = ?")
       .get(scope.worldId, scope.playerId)?.id;
@@ -134,15 +233,32 @@ export class EventLog {
     const rows = this.db
       .prepare(`SELECT * FROM events WHERE ${clauses.join(" AND ")} ORDER BY id LIMIT ?`)
       .all(...params, limit + 1);
-    const events = rows.slice(0, limit).map(decodeRow);
-    const nextCursor = rows.length > limit ? events.at(-1)?.id : undefined;
     const gap = this.db
       .prepare(`
       SELECT EXISTS(SELECT 1 FROM events WHERE world_id = ? AND player_id = ? AND id <= ? AND gap_from IS NOT NULL) AS found
     `)
       .get(scope.worldId, scope.playerId, through)?.found;
-    if (typeof gap !== "number") throw new Error("Invalid stored event gap metadata");
+    if (gap !== 0 && gap !== 1) throw new Error("Invalid stored event gap metadata");
+    const events: StoredHistory[] = [];
+    let bytes = Buffer.byteLength(
+      JSON.stringify({
+        events: [],
+        through,
+        hasKnownGaps: gap === 1,
+        nextCursor: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+    for (const row of rows.slice(0, limit)) {
+      const entry = decodeRow(row, this.catalog);
+      const size = Buffer.byteLength(JSON.stringify(entry)) + (events.length ? 1 : 0);
+      if (bytes + size > eventPageBytes) {
+        if (!events.length) throw new Error("Stored event exceeds history page byte budget");
+        break;
+      }
+      bytes += size;
+      events.push(entry);
+    }
     const result = { events, through, hasKnownGaps: gap === 1 };
-    return nextCursor === undefined ? result : { ...result, nextCursor };
+    return rows.length > events.length ? { ...result, nextCursor: events.at(-1)!.id } : result;
   }
 }
