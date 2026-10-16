@@ -2,7 +2,8 @@
 
 [状態schema](<../src/protocol/gameSnapshot.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
 [実TCPテスト](<../tests/directorBridge.test.ts>)は偽gameの応答を検証する。
-**Modの取得・送信、Piへの注入はまだ未接続。** 以下の取得方法はMod側で満たす契約であり、ゲーム内の動作実績ではない。
+[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装・ローカル検証済み。
+**Modの取得・送信はまだ未接続。** 以下の取得方法はMod側で満たす契約であり、ゲーム内の動作実績ではない。
 
 ## 要求と検証
 
