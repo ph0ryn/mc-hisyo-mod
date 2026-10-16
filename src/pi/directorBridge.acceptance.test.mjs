@@ -17,7 +17,7 @@ import { gameEventDefinitions } from "../protocol/gameEvent.js";
 import { openDatabase } from "../storage/database.js";
 import { JsonLineDecoder } from "../transport/jsonLines.js";
 import { RpcPeer } from "../transport/rpcPeer.js";
-import { sendProviderResponse } from "../../tests/pi/localProvider.mjs";
+import { sendProviderResponse } from "./fixtures/localProvider.mjs";
 
 const tools = [
   "get_game_state",

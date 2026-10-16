@@ -6,19 +6,19 @@ PATH上の実Piを使い、明示的ESM拡張の読込と、必須の最新状�
 通常の単体テストとは分離し、実モデル・有料API・Minecraftには接続しない。
 
 プロジェクト指定のNode.jsとPi **1.2.0**を用意し、リポジトリ直下で実行する。
-Piの別バージョン、未検証API、不明なシナリオは拒否する。
+Piの別バージョンは拒否する。APIとシナリオは検証済みの固定matrixで、Vitestを使う。
 
 ```bash
-node tests/pi/runProbe.mjs
+pnpm run verify:pi
 
-# APIとシナリオを限定する場合
-PI_PROBE_APIS=anthropic-messages node tests/pi/runProbe.mjs abort-first abort-second
+# Vitestのテスト名でAPIとシナリオを限定する場合
+pnpm run verify:pi -t 'anthropic-messages: abort-(first|second)'
 ```
 
 実行時には、OSの一時ディレクトリに`mkdtempSync`で毎回新しい領域を作る。
 最後の`RESULTS`行に集約結果への絶対パスを出力し、シナリオ別に起動引数・RPC・HTTP・終了コードも残す。
 証跡はリポジトリに生成せず、自動削除もしない。
-Piへ渡す隣接したESM拡張の場所は`import.meta.url`から解決する。
+[Vitestテスト](<../src/pi/directorProbe.test.mjs>)は、Piへ渡す[ESM fixture](<../src/pi/fixtures/directorProbe.mjs>)の場所を`import.meta.url`から解決する。
 
 ## 隔離と前提条件
 

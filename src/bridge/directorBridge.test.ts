@@ -3,16 +3,16 @@ import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { DirectorBridge } from "../src/bridge/directorBridge.js";
-import { EventCatalog } from "../src/events/eventCatalog.js";
-import { EventLog } from "../src/events/eventLog.js";
-import { ResponseHooks } from "../src/hooks/responseHooks.js";
-import type { RunBinding, WorldBinding } from "../src/protocol/bridge.js";
-import { gameEventDefinitions } from "../src/protocol/gameEvent.js";
-import type { GameSnapshot } from "../src/protocol/gameSnapshot.js";
-import { openDatabase } from "../src/storage/database.js";
-import { defaultMaxFrameBytes, encodeJsonLine } from "../src/transport/jsonLines.js";
-import { RpcPeer } from "../src/transport/rpcPeer.js";
+import { DirectorBridge } from "./directorBridge.js";
+import { EventCatalog } from "../events/eventCatalog.js";
+import { EventLog } from "../events/eventLog.js";
+import { ResponseHooks } from "../hooks/responseHooks.js";
+import type { RunBinding, WorldBinding } from "../protocol/bridge.js";
+import { gameEventDefinitions } from "../protocol/gameEvent.js";
+import type { GameSnapshot } from "../protocol/gameSnapshot.js";
+import { openDatabase } from "../storage/database.js";
+import { defaultMaxFrameBytes, encodeJsonLine } from "../transport/jsonLines.js";
+import { RpcPeer } from "../transport/rpcPeer.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -22,7 +22,7 @@ afterEach(async () => {
 const scope = { worldId: "world-a", playerId: "player-a" };
 const attachParams = { ...scope, supportedEvents: ["block_broken"], paused: false };
 const snapshot = JSON.parse(
-  readFileSync(new URL("./fixtures/protocol/gameSnapshot.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../../tests/fixtures/protocol/gameSnapshot.json", import.meta.url), "utf8"),
 ) as GameSnapshot;
 
 async function fixture() {

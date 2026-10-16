@@ -21,8 +21,8 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import type { WorldBinding } from "../src/protocol/bridge.js";
-import { RpcPeer } from "../src/transport/rpcPeer.js";
+import type { WorldBinding } from "./protocol/bridge.js";
+import { RpcPeer } from "./transport/rpcPeer.js";
 
 const directories = new Set<string>();
 const processes = new Map<ChildProcessWithoutNullStreams, Promise<unknown>>();

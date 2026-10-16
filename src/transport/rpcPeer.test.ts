@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { connect, createServer, type Socket } from "node:net";
 import { afterEach, describe, expect, test } from "vite-plus/test";
-import { RpcError, RpcPeer } from "../src/transport/rpcPeer.js";
+import { RpcError, RpcPeer } from "./rpcPeer.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {

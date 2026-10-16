@@ -6,17 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { sendProviderResponse } from "./localProvider.mjs";
+import { afterAll, test } from "vite-plus/test";
+import { sendProviderResponse } from "./fixtures/localProvider.mjs";
 
 // Optional real-PATH-Pi boundary test; never contacts a real model provider.
-const extensionPath = fileURLToPath(new URL("./directorProbe.mjs", import.meta.url));
-const supportedApis = ["openai-completions", "openai-responses", "anthropic-messages"];
-const supportedScenarios = ["success", "throw-only", "abort-first", "abort-second"];
-const apis = process.env.PI_PROBE_APIS?.split(",") ?? supportedApis;
-const scenarios = process.argv.slice(2).length ? process.argv.slice(2) : supportedScenarios;
-for (const api of apis) assert.ok(supportedApis.includes(api), `Unverified API refused: ${api}`);
-for (const scenario of scenarios)
-  assert.ok(supportedScenarios.includes(scenario), `Unknown scenario: ${scenario}`);
+const extensionPath = fileURLToPath(new URL("./fixtures/directorProbe.mjs", import.meta.url));
+const apis = ["openai-completions", "openai-responses", "anthropic-messages"];
+const scenarios = ["success", "throw-only", "abort-first", "abort-second"];
 const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
 assert.equal(version.status, 0, `PATH pi --version failed: ${version.error ?? version.stderr}`);
 assert.equal(version.stdout.trim(), "1.2.0", "Only the validated Pi 1.2.0 is supported");
@@ -375,14 +371,22 @@ async function run(scenario, api) {
 }
 for (const api of apis)
   for (const scenario of scenarios) {
-    const result = await run(scenario, api);
-    results.push(result);
-    console.log(JSON.stringify(result));
+    test(`${api}: ${scenario}`, async () => {
+      const result = await run(scenario, api);
+      results.push(result);
+      assert.equal(result.passed, true, JSON.stringify(result, null, 2));
+    });
   }
-const resultsPath = join(output, "results.json");
-writeFileSync(
-  resultsPath,
-  JSON.stringify({ version: version.stdout.trim(), versionExit: version.status, results }, null, 2),
-);
-console.log(`RESULTS ${resultsPath}`);
-if (results.some((r) => !r.passed)) process.exitCode = 1;
+
+afterAll(() => {
+  const resultsPath = join(output, "results.json");
+  writeFileSync(
+    resultsPath,
+    JSON.stringify(
+      { version: version.stdout.trim(), versionExit: version.status, results },
+      null,
+      2,
+    ),
+  );
+  console.log(`RESULTS ${resultsPath}`);
+});

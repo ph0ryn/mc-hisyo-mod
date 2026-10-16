@@ -101,7 +101,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 [JSON-RPC schema](<../src/protocol/jsonRpc.ts>)、[JSONL framing](<../src/transport/jsonLines.ts>)、
 [RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
-[実TCPテスト](<../tests/rpcPeer.test.ts>)で確認する。認証bridgeでもこのpeerを使う。
+[実TCPテスト](<../src/transport/rpcPeer.test.ts>)で確認する。認証bridgeでもこのpeerを使う。
 
 - JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
 - UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
@@ -124,7 +124,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 ## 実装済みの認証・binding bridge
 
 [DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
-[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済み。
+[実TCPテスト](<../src/bridge/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済み。
 run無効化通知をPi stdioのabortへ渡すhost driver配線は未実装。Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 
 - loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。

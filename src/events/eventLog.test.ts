@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { describe, expect, it, onTestFinished } from "vite-plus/test";
-import { EventCatalog } from "../src/events/eventCatalog.js";
-import { EventLog } from "../src/events/eventLog.js";
-import { ResponseHooks } from "../src/hooks/responseHooks.js";
-import { gameEventDefinitions, type GameEvent } from "../src/protocol/gameEvent.js";
-import { openDatabase } from "../src/storage/database.js";
+import { EventCatalog } from "./eventCatalog.js";
+import { EventLog } from "./eventLog.js";
+import { ResponseHooks } from "../hooks/responseHooks.js";
+import { gameEventDefinitions, type GameEvent } from "../protocol/gameEvent.js";
+import { openDatabase } from "../storage/database.js";
 
 const fixture: GameEvent = JSON.parse(
-  readFileSync(new URL("./fixtures/protocol/blockBroken.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../../tests/fixtures/protocol/blockBroken.json", import.meta.url), "utf8"),
 );
 const scope = { worldId: fixture.worldId, playerId: fixture.playerId };
 

@@ -1,13 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { EventCatalog, type EventFilter } from "../src/events/eventCatalog.js";
-import { EventLog } from "../src/events/eventLog.js";
-import { ResponseHooks } from "../src/hooks/responseHooks.js";
-import { gameEventDefinitions, type GameEvent } from "../src/protocol/gameEvent.js";
-import { openDatabase } from "../src/storage/database.js";
+import { EventCatalog, type EventFilter } from "../events/eventCatalog.js";
+import { EventLog } from "../events/eventLog.js";
+import { ResponseHooks } from "../hooks/responseHooks.js";
+import { gameEventDefinitions, type GameEvent } from "./gameEvent.js";
+import { openDatabase } from "../storage/database.js";
 
 const fixtures: GameEvent[] = JSON.parse(
-  readFileSync(new URL("./fixtures/protocol/observerEvents.json", import.meta.url), "utf8"),
+  readFileSync(
+    new URL("../../tests/fixtures/protocol/observerEvents.json", import.meta.url),
+    "utf8",
+  ),
 );
 const catalog: EventCatalog = new EventCatalog(gameEventDefinitions);
 

@@ -38,6 +38,8 @@ node dist/cli.mjs --help
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
+テストは対象コードの隣へ置く。通常の`*.test.ts`と、実Piを必要とする任意の`*.test.mjs`は別設定で実行する。
+共通JSON fixtureだけは、Javaと共有するため[fixtureディレクトリ](<../tests/fixtures/protocol/gameSnapshot.json>)に残す。
 [pnpm設定](<../pnpm-workspace.yaml>)は依存解決と供給網ポリシー用で、monorepo構成ではない。
 Vite+ coreのバージョン表記に対するpeer例外は、検証したバージョンのみに限定している。
 
@@ -75,7 +77,7 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 
 起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
 CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
-[ビルド済みCLIのsubprocessテスト](<../tests/cli.test.ts>)は、一時保存先と偽gameの実TCP接続を使う。
+[ビルド済みCLIのsubprocessテスト](<../src/cli.test.ts>)は、一時保存先と偽gameの実TCP接続を使う。
 ModやPiの起動、ゲーム内の動作確認ではない。
 
 ## イベントの追加
@@ -92,7 +94,7 @@ ModやPiの起動、ゲーム内の動作確認ではない。
 登録されていないイベント、schema違反、非対応フィールドのfilterはエラーにする。
 任意の外部pluginをロードする仕組みは導入していない。
 
-[履歴とhookのテスト](<../tests/eventHistory.test.ts>)では、
+[履歴とhookのテスト](<../src/events/eventLog.test.ts>)では、
 `example:machine_completed`を定義だけで追加し、永続化・検索・hook照合が動くことを確認する。
 現在は13種類の組込定義と対応observerがある。
 observerは未配線なので、実際の接続Modが収集・送信した実績とは区別する。

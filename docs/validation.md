@@ -18,7 +18,7 @@
 
 ### ローカルTCP codec
 
-[実TCPテスト](<../tests/rpcPeer.test.ts>)で次を確認した。CLI・Pi・Modの接続試験ではない。
+[実TCPテスト](<../src/transport/rpcPeer.test.ts>)で次を確認した。CLI・Pi・Modの接続試験ではない。
 
 - 双方向要求、順序が入れ替わる応答、通知の受信順。
 - TCPで分割されたUTF-8、多フレーム同時受信、壊れたJSONへの明示エラー。
@@ -29,7 +29,7 @@
 
 ### 認証・binding bridge
 
-[bridgeの実TCPテスト](<../tests/directorBridge.test.ts>)で次を確認した。CLI・Mod・Piの配線試験ではない。
+[bridgeの実TCPテスト](<../src/bridge/directorBridge.test.ts>)で次を確認した。CLI・Mod・Piの配線試験ではない。
 
 - token・role・version、認証前の操作、重複role、capabilityの制限。
 - attach応答後の`game.ready`までrunを開始せず、game / agent両方のbind ACKを待つこと。
@@ -43,7 +43,7 @@
 
 ### 必須の現在状態snapshot
 
-同じ[実TCPテスト](<../tests/directorBridge.test.ts>)で[状態契約](<gameState.md>)を確認する。
+同じ[実TCPテスト](<../src/bridge/directorBridge.test.ts>)で[状態契約](<gameState.md>)を確認する。
 
 - 空のstate、必須fieldの欠損、未対応version、不正型・件数を拒否する。
 - 36 main slotと7 named equipmentを要求し、body slotの省略も許さない。
@@ -58,7 +58,7 @@
 
 ### bridge-only CLIの起動・終了
 
-[packaged CLIのテスト](<../tests/cli.test.ts>)はビルド成果物を実際の子プロセスとして起動する。
+[packaged CLIのテスト](<../src/cli.test.ts>)はビルド成果物を実際の子プロセスとして起動する。
 PiやModの代わりに、偽gameを認証付き実TCPで接続する。
 
 - `--help`でstateを作らずPiを起動しないこと、通常起動で未実装のPiを黙って省略しないこと。

@@ -11,7 +11,7 @@ export default defineConfig({
     ignorePatterns: ["docs/**", "mod/**"],
   },
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["src/**/*.test.ts"],
     environment: "node",
   },
   pack: {
