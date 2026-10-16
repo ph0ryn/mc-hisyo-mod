@@ -10,6 +10,7 @@
       "io.github.ph0ryn.mchisyo.McHisyoClient"
     ]
   },
+  "mixins": ["mc_hisyo.mixins.json"],
   "depends": {
     "fabricloader": "${loaderVersion}",
     "minecraft": "${minecraftVersion}",

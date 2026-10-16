@@ -37,6 +37,8 @@ public final class ObserverChecks {
         snapshotsAndEmittedEventsAreImmutable();
         offHandHasNoInventedInventorySlot();
         policiesRejectInvalidValues();
+        equipmentDeltasAreSampledAndCopied(fixtures);
+        sampledWorldAndOutcomeEdges(fixtures);
         roundTripsAllSharedFacts(fixtures);
         System.out.println("ObserverChecks: " + checks + " assertions passed (pure Java; no Minecraft launch)");
     }
@@ -55,7 +57,7 @@ public final class ObserverChecks {
                 List.of(changed ? STONE : AIR, STONE), changed ? 18 : 20,
                 changed ? 18 : 20, changed ? 4 : 5, changed ? 1 : 0,
                 changed ? 0.5 : 0, changed ? 10 : 0, changed ? 1 : 0,
-                changed ? STONE : AIR, offHand);
+                changed ? STONE : AIR, offHand, Map.of());
     }
 
     private static void matchesSharedSnapshotFixtures(JsonArray fixtures) {
@@ -108,7 +110,7 @@ public final class ObserverChecks {
             int level, double progress, int total, int selectedSlot) {
         return new PlayerSnapshot("minecraft:overworld", List.of(0.0, 64.0, 0.0), "minecraft:plains",
                 tick, 1000, inventory, 20, 20, saturation, level, progress, total, selectedSlot,
-                inventory.get(selectedSlot), AIR);
+                inventory.get(selectedSlot), AIR, Map.of());
     }
 
     private static void onlyDelta(PlayerSnapshot before, PlayerSnapshot after, String name) {
@@ -156,7 +158,7 @@ public final class ObserverChecks {
         List<PlayerSnapshot.Item> sourceItems = new ArrayList<>(List.of(AIR, STONE));
         List<Double> sourcePosition = new ArrayList<>(List.of(0.0, 64.0, 0.0));
         PlayerSnapshot baseline = new PlayerSnapshot("minecraft:overworld", sourcePosition, "minecraft:plains",
-                100, 1000, sourceItems, 20, 20, 5, 0, 0, 0, 0, AIR, AIR);
+                100, 1000, sourceItems, 20, 20, 5, 0, 0, 0, 0, AIR, AIR, Map.of());
         SnapshotDeltaTracker tracker = tracker();
         tracker.observe(PLAYER, baseline);
         sourceItems.set(0, STONE);
@@ -204,8 +206,94 @@ public final class ObserverChecks {
                 List.of(Double.NaN, 0.0, 0.0), 1, 1, Map.of()));
     }
 
+    private static PlayerSnapshot equipped(long tick, Map<String, PlayerSnapshot.Item> equipment) {
+        return new PlayerSnapshot("minecraft:overworld", List.of(0.0, 64.0, 0.0), "minecraft:plains",
+                tick, 1000, List.of(AIR, AIR), 20, 20, 5, 0, 0, 0, 0, AIR, AIR, equipment);
+    }
+
+    private static void equipmentDeltasAreSampledAndCopied(JsonArray fixtures) {
+        SnapshotDeltaTracker tracker = tracker();
+        Map<String, PlayerSnapshot.Item> source = new HashMap<>(Map.of("head", AIR));
+        PlayerSnapshot first = equipped(100, source);
+        source.put("head", STONE);
+        equal(AIR, first.equipment().get("head"), "copied equipment baseline");
+        expectThrows(UnsupportedOperationException.class, () -> first.equipment().clear());
+        equal(List.of(), tracker.observe(PLAYER, first), "initial equipment is not acquisition");
+        List<ObservedEvent> changed = tracker.observe(PLAYER, equipped(101, source));
+        equal(List.of("equipment_slot_changed"), changed.stream().map(ObservedEvent::name).toList(), "equipment is not movement-throttled");
+        equal(fixture(fixtures, "equipment_slot_changed").get("data"), JSON.toJsonTree(changed.getFirst().data()), "shared equipment payload");
+        equal(List.of(), tracker.observe(PLAYER, equipped(102, Map.of("head", new PlayerSnapshot.Item("minecraft:stone", 3)))), "equal ID/count stays silent");
+        source.put("head", new PlayerSnapshot.Item("minecraft:stone", 2));
+        equal(2, tracker.observe(PLAYER, equipped(103, source)).getFirst().data().get("afterCount"), "count-only change");
+        tracker.reset(PLAYER);
+        equal(List.of(), tracker.observe(PLAYER, equipped(104, source)), "respawn/leave reset equipment baseline");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void sampledWorldAndOutcomeEdges(JsonArray fixtures) {
+        SnapshotDeltaTracker tracker = tracker();
+        PlayerSnapshot first = snapshot(100, 0, "minecraft:plains", false);
+        equal(true, tracker.worldSampleDue(PLAYER, first), "initial world sample due");
+        Map<String, Object> nearby = JSON.fromJson(fixture(fixtures, "nearby_sampled").get("data"), Map.class);
+        Map<String, Object> structures = JSON.fromJson(fixture(fixtures, "structures_sampled").get("data"), Map.class);
+        List<Map<String, Object>> effects = List.of(Map.of("effectId", "minecraft:speed", "amplifier", 0,
+                "duration", 200, "ambient", false, "visible", true, "showIcon", true));
+        List<ObservedEvent> baseline = tracker.observeWorld(PLAYER, first, false, false, 0, false,
+                nearby, structures, effects, false);
+        equal(List.of("status_effects_sampled", "nearby_sampled", "structures_sampled"),
+                baseline.stream().map(ObservedEvent::name).toList(), "baseline is sample, not acquisition/achievement");
+        for (ObservedEvent event : baseline) equal(fixture(fixtures, event.name()).get("data"),
+                JSON.toJsonTree(event.data()), "baseline shared payload: " + event.name());
+        equal(false, tracker.worldSampleDue(PLAYER, snapshot(119, 0, "minecraft:plains", false)), "20 tick cadence");
+        equal(List.of(), tracker.observeWorld(PLAYER, snapshot(119, 0, "minecraft:plains", false), true, true, 12000, false,
+                nearby, structures, effects, false), "subinterval observations cannot move baseline");
+        PlayerSnapshot next = snapshot(120, 2, "minecraft:forest", false);
+        equal(true, tracker.worldSampleDue(PLAYER, next), "sample due at20");
+        List<ObservedEvent> transitions = tracker.observeWorld(PLAYER, next, true, true, 12000, false,
+                nearby, structures, effects, false);
+        equal(List.of("nearby_sampled", "structures_sampled", "weather_changed", "day_clock_phase_changed"),
+                transitions.stream().map(ObservedEvent::name).toList(), "world transitions");
+        for (ObservedEvent event : transitions) equal(fixture(fixtures, event.name()).get("data"),
+                JSON.toJsonTree(event.data()), "sample shared payload: " + event.name());
+        equal(List.of("nearby_sampled", "structures_sampled"), tracker.observeWorld(PLAYER,
+                snapshot(140, 2, "minecraft:forest", false), true, true, 12001, false,
+                nearby, structures, effects, false).stream().map(ObservedEvent::name).toList(), "unchanged weather/phase silent");
+        List<ObservedEvent> rainOnly = tracker.observeWorld(PLAYER, snapshot(160, 2, "minecraft:forest", false),
+                false, true, 12002, false, nearby, structures, effects, false);
+        equal(List.of("nearby_sampled", "structures_sampled", "weather_changed"), rainOnly.stream().map(ObservedEvent::name).toList(), "independent rain change");
+        equal(true, rainOnly.getLast().data().get("beforeThundering"), "raw thunder is independent of rain");
+        List<ObservedEvent> thunderOnly = tracker.observeWorld(PLAYER, snapshot(180, 2, "minecraft:forest", false),
+                false, false, 12003, false, nearby, structures, effects, false);
+        equal(List.of("nearby_sampled", "structures_sampled", "weather_changed"), thunderOnly.stream().map(ObservedEvent::name).toList(), "independent thunder change");
+        List<ObservedEvent> fixed = tracker.observeWorld(PLAYER, snapshot(200, 2, "minecraft:forest", false),
+                false, false, 24000, true, nearby, structures, effects, false);
+        equal("day_clock_phase_changed", fixed.getLast().name(), "clock wrap transition");
+        equal(true, fixed.getLast().data().get("fixedTime"), "fixed-time dimension explicit");
+        equal("day", SnapshotDeltaTracker.clockPhase(11999), "last day tick");
+        equal("night", SnapshotDeltaTracker.clockPhase(12000), "first night tick");
+        equal("night", SnapshotDeltaTracker.clockPhase(-1), "negative day time floorMod");
+        equal("day", SnapshotDeltaTracker.clockPhase(-24000), "negative whole day");
+        equal(List.of(), SnapshotDeltaTracker.advancementEvents(false, false, true), "failed grant is not achievement");
+        equal(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents(true, true, true), "no repeated completion");
+        equal(List.of("advancement_criterion_granted", "advancement_completed"),
+                SnapshotDeltaTracker.advancementEvents(true, false, true), "new criterion plus done edge");
+        equal(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents(true, false, false), "partial criterion not completed");
+        PlayerSnapshot dimension = snapshot(201, 2, "minecraft:nether_wastes", false, "minecraft:the_nether", AIR);
+        equal(true, tracker.worldSampleDue(PLAYER, dimension), "dimension change samples immediately");
+        equal(List.of("status_effects_sampled", "nearby_sampled", "structures_sampled"), tracker.observeWorld(PLAYER,
+                dimension, true, true, -1, true, nearby, structures, effects, true).stream().map(ObservedEvent::name).toList(), "dimension rebaseline is not weather/clock transition");
+        equal(true, tracker.worldSampleDue(PLAYER, snapshot(1, 0, "minecraft:plains", false)), "tick rollback samples immediately");
+        tracker.rebaseline(PLAYER, next);
+        equal(true, tracker.worldSampleDue(PLAYER, next), "explicit respawn/dimension rebaseline clears world samples");
+        tracker.observeWorld(PLAYER, next, true, true, 12000, false, nearby, structures, effects, false);
+        equal(true, tracker.worldSampleDue(UUID.randomUUID(), next), "player samples remain isolated");
+        tracker.reset(PLAYER); equal(true, tracker.worldSampleDue(PLAYER, next), "reset world baseline");
+        tracker.observeWorld(PLAYER, next, true, true, 12000, false, nearby, structures, effects, false);
+        tracker.clear(); equal(true, tracker.worldSampleDue(PLAYER, next), "binding clear world baseline");
+    }
+
     private static void roundTripsAllSharedFacts(JsonArray fixtures) {
-        equal(13, fixtures.size(), "all shared fixture kinds");
+        equal(22, fixtures.size(), "all shared fixture kinds");
         for (var element : fixtures) {
             JsonObject fixture = element.getAsJsonObject();
             List<Double> position = new ArrayList<>();

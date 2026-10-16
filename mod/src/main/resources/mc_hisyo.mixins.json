@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "io.github.ph0ryn.mchisyo.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": ["LivingEntityMixin", "PlayerAdvancementsMixin"],
+  "injectors": { "defaultRequire": 1 }
+}

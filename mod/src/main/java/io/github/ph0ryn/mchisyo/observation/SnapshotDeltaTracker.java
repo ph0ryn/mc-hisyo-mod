@@ -23,6 +23,8 @@ public final class SnapshotDeltaTracker {
 
     private final MovementSampling movementSampling;
     private final Map<UUID, Baseline> baselines = new HashMap<>();
+    private final Map<UUID, ObservedEvent> worldBaselines = new HashMap<>();
+    public static final int WORLD_SAMPLE_INTERVAL = 20;
 
     public SnapshotDeltaTracker(MovementSampling movementSampling) {
         this.movementSampling = Objects.requireNonNull(movementSampling);
@@ -68,6 +70,15 @@ public final class SnapshotDeltaTracker {
                     "beforeProgress", before.experienceProgress(), "afterProgress", snapshot.experienceProgress(),
                     "beforeTotalExperience", before.totalExperience(), "afterTotalExperience", snapshot.totalExperience())));
         }
+        if (!before.equipment().keySet().equals(snapshot.equipment().keySet())) {
+            throw new IllegalStateException("Equipment layout changed; explicit rebaseline required");
+        }
+        snapshot.equipment().forEach((slot, after) -> {
+            PlayerSnapshot.Item old = before.equipment().get(slot);
+            if (!old.equals(after)) events.add(event("equipment_slot_changed", snapshot, Map.of(
+                    "slot", slot, "beforeItemId", old.itemId(), "beforeCount", old.count(),
+                    "afterItemId", after.itemId(), "afterCount", after.count())));
+        });
         heldDelta(events, snapshot, "main_hand", before.mainHand(), snapshot.mainHand(),
                 before.selectedSlot(), snapshot.selectedSlot());
         heldDelta(events, snapshot, "off_hand", before.offHand(), snapshot.offHand(), null, null);
@@ -118,15 +129,63 @@ public final class SnapshotDeltaTracker {
         return new ObservedEvent(name, snapshot.dimension(), snapshot.position(), snapshot.tick(), snapshot.observedAt(), data);
     }
 
+    public boolean worldSampleDue(UUID playerId, PlayerSnapshot snapshot) {
+        ObservedEvent previous = worldBaselines.get(playerId);
+        return previous == null || !previous.dimension().equals(snapshot.dimension())
+                || snapshot.tick() < previous.tick() || snapshot.tick() - previous.tick() >= WORLD_SAMPLE_INTERVAL;
+    }
+
+    public List<ObservedEvent> observeWorld(UUID playerId, PlayerSnapshot snapshot, boolean raining,
+            boolean thundering, long dayTime, boolean fixedTime, Map<String, Object> nearby,
+            Map<String, Object> structures, List<Map<String, Object>> effects, boolean effectsTruncated) {
+        if (!worldSampleDue(playerId, snapshot)) return List.of();
+        ObservedEvent previous = worldBaselines.get(playerId);
+        boolean initial = previous == null || !previous.dimension().equals(snapshot.dimension()) || snapshot.tick() < previous.tick();
+        String phase = clockPhase(dayTime);
+        List<ObservedEvent> events = new ArrayList<>();
+        if (initial) events.add(event("status_effects_sampled", snapshot,
+                Map.of("baseline", true, "effects", effects, "effectsTruncated", effectsTruncated)));
+        events.add(event("nearby_sampled", snapshot, nearby));
+        events.add(event("structures_sampled", snapshot, structures));
+        if (!initial) {
+            Map<String, Object> old = previous.data();
+            if (!old.get("raining").equals(raining) || !old.get("thundering").equals(thundering)) {
+                events.add(event("weather_changed", snapshot, Map.of("sampleIntervalTicks", WORLD_SAMPLE_INTERVAL,
+                        "beforeRaining", old.get("raining"), "afterRaining", raining,
+                        "beforeThundering", old.get("thundering"), "afterThundering", thundering)));
+            }
+            if (!old.get("phase").equals(phase)) {
+                events.add(event("day_clock_phase_changed", snapshot, Map.of("sampleIntervalTicks", WORLD_SAMPLE_INTERVAL,
+                        "beforePhase", old.get("phase"), "afterPhase", phase, "dayTime", dayTime, "fixedTime", fixedTime)));
+            }
+        }
+        worldBaselines.put(playerId, event("world_baseline", snapshot,
+                Map.of("raining", raining, "thundering", thundering, "phase", phase)));
+        return List.copyOf(events);
+    }
+
+    public static String clockPhase(long dayTime) {
+        return Math.floorMod(dayTime, 24000) < 12000 ? "day" : "night";
+    }
+
+    public static List<String> advancementEvents(boolean granted, boolean beforeDone, boolean afterDone) {
+        if (!granted) return List.of();
+        return !beforeDone && afterDone ? List.of("advancement_criterion_granted", "advancement_completed")
+                : List.of("advancement_criterion_granted");
+    }
+
     public void rebaseline(UUID playerId, PlayerSnapshot snapshot) {
+        worldBaselines.remove(playerId);
         baselines.put(Objects.requireNonNull(playerId), new Baseline(snapshot, snapshot, snapshot.tick()));
     }
 
     public void reset(UUID playerId) {
         baselines.remove(playerId);
+        worldBaselines.remove(playerId);
     }
 
     public void clear() {
         baselines.clear();
+        worldBaselines.clear();
     }
 }

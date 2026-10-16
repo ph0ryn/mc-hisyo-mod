@@ -211,5 +211,189 @@
       "hand": "main_hand",
       "hitPosition": null
     }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 14,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "status_effects_sampled",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "baseline": true,
+      "effects": [
+        {
+          "effectId": "minecraft:speed",
+          "amplifier": 0,
+          "duration": 200,
+          "ambient": false,
+          "visible": true,
+          "showIcon": true
+        }
+      ],
+      "effectsTruncated": false
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 15,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "status_effect_changed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "change": "updated",
+      "effectId": "minecraft:speed",
+      "amplifier": 0,
+      "duration": 200,
+      "ambient": false,
+      "visible": true,
+      "showIcon": true
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 16,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "equipment_slot_changed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "slot": "head",
+      "beforeItemId": "minecraft:air",
+      "beforeCount": 0,
+      "afterItemId": "minecraft:stone",
+      "afterCount": 3
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 17,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "nearby_sampled",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "sampleIntervalTicks": 20,
+      "blockRadius": 4,
+      "blocksComplete": false,
+      "blocks": [
+        {
+          "blockId": "minecraft:stone",
+          "position": [2, 63, 0]
+        }
+      ],
+      "entityRadius": 16,
+      "entitiesTruncated": true,
+      "entities": [
+        {
+          "entityId": "c488b05f-9cd7-43ed-96a0-cb8c19f7497a",
+          "entityType": "minecraft:cow",
+          "position": [3, 64, 0]
+        }
+      ]
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 18,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "structures_sampled",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "sampleIntervalTicks": 20,
+      "structureIds": ["minecraft:village_plains"],
+      "incomplete": true,
+      "currentChunkLoaded": true,
+      "startsInspected": 1,
+      "referenceChunksChecked": 1,
+      "unloadedReferences": 1,
+      "startsTruncated": false,
+      "referencesTruncated": false
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 19,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "weather_changed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "sampleIntervalTicks": 20,
+      "beforeRaining": false,
+      "afterRaining": true,
+      "beforeThundering": false,
+      "afterThundering": true
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 20,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "day_clock_phase_changed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "sampleIntervalTicks": 20,
+      "beforePhase": "day",
+      "afterPhase": "night",
+      "dayTime": 12000,
+      "fixedTime": false
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 21,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "advancement_criterion_granted",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "advancementId": "minecraft:story/mine_stone",
+      "criterion": "get_cobblestone",
+      "afterDone": true
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 22,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "advancement_completed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "advancementId": "minecraft:story/mine_stone",
+      "criterion": "get_cobblestone",
+      "afterDone": true
+    }
   }
 ]
