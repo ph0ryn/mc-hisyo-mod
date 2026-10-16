@@ -18,6 +18,7 @@ import {
   type RunBinding,
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
+import { physicalModelApis } from "./piPolicy.js";
 
 const strict = { additionalProperties: false } as const;
 const BootstrapSchema = Type.Object(
@@ -33,7 +34,6 @@ const stateArgs = Type.Object({ query: EmptySchema }, strict);
 const eventArgs = Type.Object({ query: EventSearchRequestSchema.properties.query }, strict);
 const messageArgs = Type.Object({ text: SendMessageSchema.properties.text }, strict);
 const removeArgs = Type.Object({ id: HookRemoveSchema.properties.id }, strict);
-const physicalApis = new Set(["openai-completions", "openai-responses", "anthropic-messages"]);
 
 /** Explicitly loaded Pi extension. The owning host supplies authenticated, scoped runs. */
 export default function directorBridge(pi: ExtensionAPI): void {
@@ -62,7 +62,7 @@ export default function directorBridge(pi: ExtensionAPI): void {
   }
 
   function requireHost(ctx: ExtensionContext): void {
-    if (ctx.mode !== "rpc" || !ctx.model || !physicalApis.has(ctx.model.api))
+    if (ctx.mode !== "rpc" || !ctx.model || !physicalModelApis.has(ctx.model.api))
       throw new Error("Director requires RPC mode and a validated physical model API");
     const actual = pi.getActiveTools().toSorted();
     if (JSON.stringify(actual) !== JSON.stringify(names.toSorted()))
