@@ -46,7 +46,7 @@ var observations = ServerObservations.register(isScopedPlayer, sink);
 
 ## ゲームを起動しない検証
 
-[共有fixture](<../tests/fixtures/protocol/observerEvents.json>)を
+[共有fixture](<../src/protocol/fixtures/observerEvents.json>)を
 [TypeScriptテスト](<../src/protocol/gameEvent.test.ts>)と
 [純Javaチェック](<../mod/src/test/observerJava/io/github/ph0ryn/mchisyo/observation/ObserverChecks.java>)の両方で読む。
 Java側はsnapshot差分、プレイヤー別baseline、sample、reset、不変DTO、明示nullを検証する。

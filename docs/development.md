@@ -42,7 +42,7 @@ node dist/cli.mjs --help
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
 テストは対象コードの隣へ置く。通常の`*.test.ts`と、実Piを必要とする任意の`*.test.mjs`は別設定で実行する。
-共通JSON fixtureだけは、Javaと共有するため[fixtureディレクトリ](<../tests/fixtures/protocol/gameSnapshot.json>)に残す。
+共通JSON fixtureも[protocolの隣](<../src/protocol/fixtures/gameSnapshot.json>)に置き、Javaから同じファイルを参照する。
 [pnpm設定](<../pnpm-workspace.yaml>)は依存解決と供給網ポリシー用で、monorepo構成ではない。
 Vite+ coreのバージョン表記に対するpeer例外は、検証したバージョンのみに限定している。
 

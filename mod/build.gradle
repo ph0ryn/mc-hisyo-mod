@@ -51,7 +51,7 @@ tasks.register('observerTest', JavaExec) {
     dependsOn tasks.named('observerTestClasses')
     classpath = sourceSets.observerTest.runtimeClasspath
     mainClass = 'io.github.ph0ryn.mchisyo.observation.ObserverChecks'
-    def fixtures = rootProject.file('../tests/fixtures/protocol/observerEvents.json')
+    def fixtures = rootProject.file('../src/protocol/fixtures/observerEvents.json')
     inputs.file fixtures
     args fixtures.absolutePath
 }

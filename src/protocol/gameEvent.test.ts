@@ -7,10 +7,7 @@ import { gameEventDefinitions, type GameEvent } from "./gameEvent.js";
 import { openDatabase } from "../storage/database.js";
 
 const fixtures: GameEvent[] = JSON.parse(
-  readFileSync(
-    new URL("../../tests/fixtures/protocol/observerEvents.json", import.meta.url),
-    "utf8",
-  ),
+  readFileSync(new URL("./fixtures/observerEvents.json", import.meta.url), "utf8"),
 );
 const catalog: EventCatalog = new EventCatalog(gameEventDefinitions);
 

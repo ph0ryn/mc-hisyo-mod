@@ -32,7 +32,7 @@ const tools = [
 ].sort();
 const apis = ["openai-completions", "openai-responses", "anthropic-messages"];
 const snapshot = JSON.parse(
-  readFileSync(new URL("../../tests/fixtures/protocol/gameSnapshot.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../protocol/fixtures/gameSnapshot.json", import.meta.url), "utf8"),
 );
 const extension = fileURLToPath(new URL("../../dist/directorBridge.mjs", import.meta.url));
 const scope = { worldId: "scratch-world", playerId: "scratch-player" };

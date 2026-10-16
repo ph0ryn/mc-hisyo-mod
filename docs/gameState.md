@@ -14,7 +14,7 @@
 不正な結果は`-32603`、無効なbindingは`-32001`。空の`state: {}`で成功扱いにしない。
 応答のawait後にもbindingを再検証する。schemaは形式の検証であり、Modが報告した値の真正性や実世界との一致を証明するものではない。
 
-完全なJSON例は[共有fixture](<../tests/fixtures/protocol/gameSnapshot.json>)を参照。
+完全なJSON例は[共有fixture](<../src/protocol/fixtures/gameSnapshot.json>)を参照。
 
 ## 必須field
 

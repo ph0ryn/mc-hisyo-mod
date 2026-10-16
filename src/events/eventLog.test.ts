@@ -10,7 +10,7 @@ import { gameEventDefinitions, type GameEvent } from "../protocol/gameEvent.js";
 import { openDatabase } from "../storage/database.js";
 
 const fixture: GameEvent = JSON.parse(
-  readFileSync(new URL("../../tests/fixtures/protocol/blockBroken.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../protocol/fixtures/blockBroken.json", import.meta.url), "utf8"),
 );
 const scope = { worldId: fixture.worldId, playerId: fixture.playerId };
 

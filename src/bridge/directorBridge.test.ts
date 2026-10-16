@@ -22,7 +22,7 @@ afterEach(async () => {
 const scope = { worldId: "world-a", playerId: "player-a" };
 const attachParams = { ...scope, supportedEvents: ["block_broken"], paused: false };
 const snapshot = JSON.parse(
-  readFileSync(new URL("../../tests/fixtures/protocol/gameSnapshot.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../protocol/fixtures/gameSnapshot.json", import.meta.url), "utf8"),
 ) as GameSnapshot;
 
 async function fixture() {

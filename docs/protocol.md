@@ -103,7 +103,7 @@ CLIからModへの要求例。
 ```
 
 応答の`result`は、要求と同じ4つのbinding fieldと`state`を持つ。
-`state`全体は[共有fixture](<../tests/fixtures/protocol/gameSnapshot.json>)、必須fieldと範囲は[現在状態の契約](<gameState.md>)を参照。
+`state`全体は[共有fixture](<../src/protocol/fixtures/gameSnapshot.json>)、必須fieldと範囲は[現在状態の契約](<gameState.md>)を参照。
 一部のfieldだけを返す応答は受け付けない。
 
 Modからのイベント通知例。
@@ -114,8 +114,8 @@ Modからのイベント通知例。
 
 `seq`は`worldSessionId`内で1から増加するイベント番号とし、順序や欠損の確認に使う。
 共通schemaとイベント定義は[gameEvent.ts](<../src/protocol/gameEvent.ts>)、
-共有fixtureは[blockBroken.json](<../tests/fixtures/protocol/blockBroken.json>)と
-[observerEvents.json](<../tests/fixtures/protocol/observerEvents.json>)を参照。
+共有fixtureは[blockBroken.json](<../src/protocol/fixtures/blockBroken.json>)と
+[observerEvents.json](<../src/protocol/fixtures/observerEvents.json>)を参照。
 Modは収集できるイベントの部分集合だけを通知し、CLIのschema一覧を収集実績と混同しない。
 
 ## 実装済みの通信codec
