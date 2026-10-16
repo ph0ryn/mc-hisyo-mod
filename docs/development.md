@@ -17,7 +17,7 @@
 - [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
 - [scheduler checkpoint](<scheduling.md#実行制御checkpoint>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
 
-**schedulerはPi通信容量の回帰テストがRED。タイマー、CLIとModへの配線も未完了。**
+**schedulerのPi通信容量回帰はunit testで修正を確認した。タイマー、CLIとModへの配線は未完了。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
 Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
@@ -34,9 +34,10 @@ pnpm run verify
 ```
 
 自動テストはunit testのみ。実TCP・HTTP・provider・子プロセス・SQLiteを使うsuiteは削除し、任意実行の別設定としても残さない。
-現在の3 suiteはschema/catalog/filter、literal入力のqueue、依存portを置き換えたschedulerである。
+現在の4 suiteはschema/catalog/filter、literal入力のqueue、依存portを置き換えたscheduler、pure Pi framingである。
 静的JSON fixtureの読込は行うが、CLI・Pi・偽実行fileの起動や実接続は行わない。
-[検証状況](<validation.md>)に実行結果と失われたcoverageを記す。既知のquote-heavy unit回帰1件がREDのため、`verify`は未完了。
+[検証状況](<validation.md>)に実行結果と失われたcoverageを記す。既存local runnerを直接使ったcheck・pack・全unit testは成功し、71件全成功だった。
+今回`pnpm run verify`を実行した結果ではなく、実接続や実Piの受入確認でもない。
 [Pi境界調査](<piFeasibility.md>)は過去の設計根拠であり、現行テストの実行手順ではない。
 Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
 
