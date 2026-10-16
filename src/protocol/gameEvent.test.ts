@@ -16,9 +16,9 @@ function fixture(name: string): GameEvent {
 }
 
 describe("server observer event contracts", () => {
-  it("publishes one shared fixture for each of the 13 supported observation kinds", () => {
-    expect(fixtures).toHaveLength(13);
-    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(13);
+  it("publishes one shared fixture for each of the 22 supported observation kinds", () => {
+    expect(fixtures).toHaveLength(22);
+    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(22);
     expect(gameEventDefinitions.map((entry) => entry.name).toSorted()).toEqual(
       fixtures.map((entry) => entry.event).toSorted(),
     );
@@ -124,6 +124,94 @@ describe("server observer event contracts", () => {
     const respawn = fixture("player_respawned");
     respawn.data.alive = true;
     catalog.validateObservation(respawn);
+  });
+
+  it("bounds new samples and rejects invented success, phase, slot and nested facts", () => {
+    const effect = {
+      effectId: "minecraft:speed",
+      amplifier: 0,
+      duration: -1,
+      ambient: false,
+      visible: true,
+      showIcon: true,
+    };
+    for (const change of ["added", "removed", "updated"]) {
+      catalog.validateObservation({
+        ...fixture("status_effect_changed"),
+        data: { ...effect, change },
+      });
+    }
+    catalog.validateObservation({
+      ...fixture("status_effects_sampled"),
+      data: {
+        baseline: true,
+        effects: Array(256).fill(effect),
+        effectsTruncated: true,
+      },
+    });
+    const invalid: [string, Record<string, unknown>][] = [
+      ["status_effects_sampled", { baseline: false }],
+      ["status_effects_sampled", { effects: Array(257).fill(effect) }],
+      ["status_effects_sampled", { effects: [{ ...effect, inferredCause: "potion" }] }],
+      ["status_effect_changed", { change: "refreshed" }],
+      ["status_effect_changed", { duration: -2 }],
+      ["equipment_slot_changed", { slot: "mainHand" }],
+      ["equipment_slot_changed", { afterCount: -1 }],
+      ["nearby_sampled", { blockRadius: 5 }],
+      [
+        "nearby_sampled",
+        {
+          entities: Array(65).fill({
+            entityId: "cow",
+            entityType: "minecraft:cow",
+            position: [0, 64, 0],
+          }),
+        },
+      ],
+      [
+        "nearby_sampled",
+        { blocks: Array(730).fill({ blockId: "minecraft:stone", position: [0, 64, 0] }) },
+      ],
+      [
+        "nearby_sampled",
+        { blocks: [{ blockId: "minecraft:stone", position: [0, 64, 0], visible: true }] },
+      ],
+      ["structures_sampled", { incomplete: false }],
+      [
+        "structures_sampled",
+        { structureIds: Array.from({ length: 129 }, (_, i) => `example:structure_${i}`) },
+      ],
+      [
+        "structures_sampled",
+        { structureIds: ["minecraft:village_plains", "minecraft:village_plains"] },
+      ],
+      ["structures_sampled", { referenceChunksChecked: 65 }],
+      ["structures_sampled", { startsInspected: 129 }],
+      ["weather_changed", { afterRaining: "raining" }],
+      ["day_clock_phase_changed", { afterPhase: "sunset" }],
+      ["day_clock_phase_changed", { dayTime: Number.NaN }],
+      ["day_clock_phase_changed", { fixedTime: null }],
+      ["advancement_criterion_granted", { criterion: "" }],
+      ["advancement_completed", { afterDone: false }],
+    ];
+    for (const [name, data] of invalid) {
+      const observation = fixture(name);
+      expect(
+        () =>
+          catalog.validateObservation({ ...observation, data: { ...observation.data, ...data } }),
+        `${name}: ${JSON.stringify(data)}`,
+      ).toThrow();
+    }
+    expect(
+      matchesFilter(fixture("status_effect_changed").data, {
+        change: "updated",
+        effectId: "minecraft:poison",
+      }),
+    ).toBe(false);
+    const fixedClock = fixture("day_clock_phase_changed");
+    fixedClock.data.dayTime = -1;
+    fixedClock.data.fixedTime = true;
+    catalog.validateObservation(fixedClock);
   });
 
   it("requires explicit valid movement sampling policy instead of claiming a full path", () => {

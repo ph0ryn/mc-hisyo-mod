@@ -1,6 +1,7 @@
 package io.github.ph0ryn.mchisyo.observation;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /** Copied values only: no ItemStack, entity, level, or other Minecraft runtime references. */
@@ -19,11 +20,13 @@ public record PlayerSnapshot(
         int totalExperience,
         int selectedSlot,
         Item mainHand,
-        Item offHand) {
+        Item offHand,
+        Map<String, Item> equipment) {
     public PlayerSnapshot {
         Objects.requireNonNull(dimension);
         position = ObservedEvent.copyPosition(position);
         inventory = List.copyOf(inventory);
+        equipment = Map.copyOf(equipment);
         Objects.requireNonNull(mainHand);
         Objects.requireNonNull(offHand);
     }

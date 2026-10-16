@@ -3,23 +3,32 @@ package io.github.ph0ryn.mchisyo.observation;
 import com.google.gson.*;
 import io.github.ph0ryn.mchisyo.session.GameSession;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.QuartPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.entity.EntityTypeTest;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 
-/** On-demand server-thread copy only; no chunk requests, history, or mutable objects escape. */
+/** Server-thread copies from already-loaded data only; no chunk requests or history. */
 public final class ServerGameState {
     private ServerGameState() {}
+    static final Map<String, EquipmentSlot> EQUIPMENT_SLOTS = Map.of(
+            "feet", EquipmentSlot.FEET, "legs", EquipmentSlot.LEGS, "chest", EquipmentSlot.CHEST,
+            "head", EquipmentSlot.HEAD, "offHand", EquipmentSlot.OFFHAND,
+            "body", EquipmentSlot.BODY, "saddle", EquipmentSlot.SADDLE);
     public static String biomeId(ServerLevel level, BlockPos position) {
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Server thread required");
         var biome = level.getBiomeManager().withDifferentSource((x, y, z) -> {
@@ -45,10 +54,13 @@ public final class ServerGameState {
         inventory.addProperty("selectedSlot", selected); JsonArray main = new JsonArray();
         for (int slot = 0; slot < 36; slot++) main.add(item(player.getInventory().getItem(slot)));
         inventory.add("main", main); JsonObject equipment = new JsonObject();
-        equipment.add("feet", item(player.getItemBySlot(EquipmentSlot.FEET))); equipment.add("legs", item(player.getItemBySlot(EquipmentSlot.LEGS)));
-        equipment.add("chest", item(player.getItemBySlot(EquipmentSlot.CHEST))); equipment.add("head", item(player.getItemBySlot(EquipmentSlot.HEAD)));
-        equipment.add("offHand", item(player.getItemBySlot(EquipmentSlot.OFFHAND))); equipment.add("body", item(player.getItemBySlot(EquipmentSlot.BODY)));
-        equipment.add("saddle", item(player.getItemBySlot(EquipmentSlot.SADDLE))); inventory.add("equipment", equipment); state.add("inventory", inventory);
+        EQUIPMENT_SLOTS.forEach((name, slot) -> equipment.add(name, item(player.getItemBySlot(slot))));
+        inventory.add("equipment", equipment); state.add("inventory", inventory);
+        state.add("nearby", nearby(player)); return state;
+    }
+    public static JsonObject nearby(ServerPlayer player) {
+        ServerLevel level = player.level();
+        if (!level.getServer().isSameThread()) throw new IllegalStateException("Server thread required");
         JsonObject nearby = new JsonObject(); nearby.addProperty("blockRadius", 4); JsonArray blocks = new JsonArray(); boolean complete = true;
         BlockPos center = player.blockPosition();
         for (int x = -4; x <= 4; x++) for (int y = -4; y <= 4; y++) for (int z = -4; z <= 4; z++) {
@@ -68,7 +80,49 @@ public final class ServerGameState {
             Entity entity = found.get(i); JsonObject entry = new JsonObject(); entry.addProperty("entityId", id(entity.getUUID().toString()));
             entry.addProperty("entityType", id(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString())); entry.add("position", position(entity.position())); entities.add(entry);
         }
-        nearby.addProperty("entitiesTruncated", found.size() > 64); nearby.add("entities", entities); state.add("nearby", nearby); return state;
+        nearby.addProperty("entitiesTruncated", found.size() > 64); nearby.add("entities", entities); return nearby;
+    }
+
+    public static Map<String, Object> containingStructures(ServerPlayer player) {
+        ServerLevel level = player.level();
+        if (!level.getServer().isSameThread()) throw new IllegalStateException("Server thread required");
+        BlockPos position = player.blockPosition();
+        var chunk = level.getChunkSource().getChunkNow(position.getX() >> 4, position.getZ() >> 4);
+        var registry = level.registryAccess().lookupOrThrow(Registries.STRUCTURE);
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        int starts = 0, references = 0, unloaded = 0, keys = 0;
+        boolean startsTruncated = false, referencesTruncated = false;
+        // ponytail: 64 current starts + 64 reference keys/chunk checks (<=128 starts), bounding-box metadata only;
+        // keep skipped/truncated explicit; widen measured budgets if needed, never load/search chunks.
+        if (chunk != null) {
+            for (var entry : chunk.getAllStarts().entrySet()) {
+                if (starts == 64) { startsTruncated = true; break; }
+                starts++;
+                if (contains(entry.getValue(), position)) ids.add(registry.getKey(entry.getKey()).toString());
+            }
+            outer: for (var entry : chunk.getAllReferences().entrySet()) {
+                if (keys++ == 64) { referencesTruncated = true; break; }
+                for (long reference : entry.getValue()) {
+                    if (references == 64) { referencesTruncated = true; break outer; }
+                    references++;
+                    var startChunk = level.getChunkSource().getChunkNow(ChunkPos.getX(reference), ChunkPos.getZ(reference));
+                    if (startChunk == null) { unloaded++; continue; }
+                    StructureStart start = startChunk.getAllStarts().get(entry.getKey());
+                    if (start != null) {
+                        starts++;
+                        if (contains(start, position)) ids.add(registry.getKey(entry.getKey()).toString());
+                    }
+                }
+            }
+        }
+        return Map.of("sampleIntervalTicks", SnapshotDeltaTracker.WORLD_SAMPLE_INTERVAL,
+                "structureIds", List.copyOf(ids), "incomplete", true, "currentChunkLoaded", chunk != null,
+                "startsInspected", starts, "referenceChunksChecked", references, "unloadedReferences", unloaded,
+                "startsTruncated", startsTruncated, "referencesTruncated", referencesTruncated);
+    }
+
+    private static boolean contains(StructureStart start, BlockPos position) {
+        return start.isValid() && start.getBoundingBox().isInside(position);
     }
     private static JsonObject item(ItemStack stack) {
         JsonObject result = new JsonObject(); result.addProperty("itemId", stack.isEmpty() ? "minecraft:air" : id(BuiltInRegistries.ITEM.getKey(stack.getItem()).toString()));

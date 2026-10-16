@@ -1,5 +1,6 @@
 package io.github.ph0ryn.mchisyo.observation;
 
+import com.google.gson.Gson;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -10,6 +11,7 @@ import java.util.function.Predicate;
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityWorldChangeEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
+import net.fabricmc.fabric.api.entity.event.v1.effect.ServerMobEffectEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
@@ -20,6 +22,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
@@ -39,7 +42,12 @@ public final class ServerObservations {
             "block_broken", "inventory_slot_changed", "health_changed", "food_changed",
             "experience_changed", "held_item_changed", "player_location_changed", "dimension_changed",
             "player_died", "player_respawned", "player_connection_changed", "living_damage_processed",
-            "entity_use_attempted");
+            "entity_use_attempted", "status_effects_sampled", "status_effect_changed", "equipment_slot_changed",
+            "nearby_sampled", "structures_sampled", "weather_changed", "day_clock_phase_changed",
+            "advancement_criterion_granted", "advancement_completed");
+
+    private static volatile ServerObservations active;
+    private static final Gson JSON = new Gson();
 
     private final Predicate<ServerPlayer> isScopedPlayer;
     private final Consumer<ObservedEvent> sink;
@@ -59,7 +67,9 @@ public final class ServerObservations {
     public static ServerObservations register(Predicate<ServerPlayer> isScopedPlayer, Consumer<ObservedEvent> sink,
             SnapshotDeltaTracker.MovementSampling movementSampling) {
         ServerObservations observations = new ServerObservations(isScopedPlayer, sink, movementSampling);
+        if (active != null) throw new IllegalStateException("Server observations already registered");
         observations.registerCallbacks();
+        active = observations;
         return observations;
     }
 
@@ -83,7 +93,11 @@ public final class ServerObservations {
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             requireServerThread(server);
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                if (scoped(player)) tracker.observe(player.getUUID(), snapshot(player)).forEach(sink);
+                if (scoped(player)) {
+                    PlayerSnapshot snapshot = snapshot(player);
+                    tracker.observe(player.getUUID(), snapshot).forEach(sink);
+                    if (tracker.worldSampleDue(player.getUUID(), snapshot)) sampleWorld(player, snapshot);
+                }
             }
         });
         ServerPlayerEvents.JOIN.register(player -> {
@@ -114,6 +128,8 @@ public final class ServerObservations {
                 tracker.rebaseline(player.getUUID(), snapshot(player));
             }
         });
+        ServerMobEffectEvents.AFTER_ADD.register((effect, entity, context) -> afterEffect(entity, effect, "added"));
+        ServerMobEffectEvents.AFTER_REMOVE.register((effect, entity, context) -> afterEffect(entity, effect, "removed"));
         ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
             if (entity instanceof ServerPlayer player && scoped(player)) {
                 emit(player, "player_died", damageSource(source));
@@ -137,6 +153,53 @@ public final class ServerObservations {
             requireServerThread(server);
             tracker.clear();
         });
+    }
+
+    // ponytail: equipment is tick-end ID/count only (7 slots), missing component-only/same-tick reversals.
+    // World cadence20: <=729 block probes, <=65 entity matches/64 copied, <=256 baseline effects;
+    // nearby is neither sight nor nearest/complete; weather/clock miss subinterval reversals. Widen only after measurement.
+    @SuppressWarnings("unchecked")
+    private void sampleWorld(ServerPlayer player, PlayerSnapshot snapshot) {
+        Map<String, Object> nearby = JSON.fromJson(ServerGameState.nearby(player), Map.class);
+        nearby.put("sampleIntervalTicks", SnapshotDeltaTracker.WORLD_SAMPLE_INTERVAL);
+        List<Map<String, Object>> effects = player.getActiveEffects().stream().limit(256).map(ServerObservations::effect).toList();
+        tracker.observeWorld(player.getUUID(), snapshot, player.level().isRaining(), player.level().isThundering(),
+                player.level().getDayTime(), player.level().dimensionType().hasFixedTime(), nearby,
+                ServerGameState.containingStructures(player), effects, player.getActiveEffects().size() > 256).forEach(sink);
+    }
+
+    public static boolean accepts(ServerPlayer player) {
+        ServerObservations observations = active;
+        return observations != null && observations.scoped(player);
+    }
+
+    public static void effectUpdated(LivingEntity entity, MobEffectInstance effect, boolean changed) {
+        ServerObservations observations = active;
+        if (changed && observations != null) observations.afterEffect(entity, effect, "updated");
+    }
+
+    private void afterEffect(LivingEntity entity, MobEffectInstance instance, String change) {
+        if (entity instanceof ServerPlayer player && scoped(player)) {
+            Map<String, Object> data = new LinkedHashMap<>(effect(instance));
+            data.put("change", change);
+            emit(player, "status_effect_changed", data);
+        }
+    }
+
+    private static Map<String, Object> effect(MobEffectInstance instance) {
+        return Map.of("effectId", instance.getEffect().unwrapKey().orElseThrow().identifier().toString(),
+                "amplifier", instance.getAmplifier(), "duration", instance.getDuration(), "ambient", instance.isAmbient(),
+                "visible", instance.isVisible(), "showIcon", instance.showIcon());
+    }
+
+    public static void advancementAwarded(ServerPlayer player, String advancementId, String criterion,
+            boolean granted, boolean beforeDone, boolean afterDone) {
+        ServerObservations observations = active;
+        if (observations != null && observations.scoped(player)) {
+            Map<String, Object> data = Map.of("advancementId", advancementId, "criterion", criterion, "afterDone", afterDone);
+            SnapshotDeltaTracker.advancementEvents(granted, beforeDone, afterDone)
+                    .forEach(name -> observations.emit(player, name, data));
+        }
     }
 
     private void afterDamage(LivingEntity victim, DamageSource source, float baseDamageTaken,
@@ -189,12 +252,14 @@ public final class ServerObservations {
         for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
             inventory.add(item(player.getInventory().getItem(slot)));
         }
+        Map<String, PlayerSnapshot.Item> equipment = new LinkedHashMap<>();
+        ServerGameState.EQUIPMENT_SLOTS.forEach((name, slot) -> equipment.put(name, item(player.getItemBySlot(slot))));
         String biomeId = ServerGameState.biomeId(player.level(), player.blockPosition());
         return new PlayerSnapshot(player.level().dimension().identifier().toString(), position(player.position()), biomeId,
                 player.level().getGameTime(), System.currentTimeMillis(), inventory, player.getHealth(),
                 player.getFoodData().getFoodLevel(), player.getFoodData().getSaturationLevel(),
                 player.experienceLevel, player.experienceProgress, player.totalExperience,
-                player.getInventory().getSelectedSlot(), item(player.getMainHandItem()), item(player.getOffhandItem()));
+                player.getInventory().getSelectedSlot(), item(player.getMainHandItem()), item(player.getOffhandItem()), equipment);
     }
 
     private static PlayerSnapshot.Item item(ItemStack stack) {

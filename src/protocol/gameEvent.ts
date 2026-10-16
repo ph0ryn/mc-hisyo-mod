@@ -5,6 +5,17 @@ const identifier = Type.String({ minLength: 1, maxLength: 128 });
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const position = Type.Tuple([Type.Number(), Type.Number(), Type.Number()]);
 const nullableIdentifier = Type.Union([identifier, Type.Null()]);
+const strict = { additionalProperties: false } as const;
+const sampleIntervalTicks = Type.Literal(20);
+const effectProperties = {
+  effectId: identifier,
+  amplifier: counter,
+  duration: Type.Integer({ minimum: -1, maximum: Number.MAX_SAFE_INTEGER }),
+  ambient: Type.Boolean(),
+  visible: Type.Boolean(),
+  showIcon: Type.Boolean(),
+};
+const phase = Type.Union([Type.Literal("day"), Type.Literal("night")]);
 const hand = Type.Union([Type.Literal("main_hand"), Type.Literal("off_hand")]);
 const damageSourceProperties = {
   damageType: identifier,
@@ -273,5 +284,191 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
       { additionalProperties: false },
     ),
     filterFields: ["entityId", "entityType", "hand"],
+  },
+  {
+    name: "status_effects_sampled",
+    description:
+      "Initial active-effect baseline, not acquisition; at most 256 entries, with explicit truncation.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        baseline: Type.Literal(true),
+        effects: Type.Array(Type.Object(effectProperties, strict), { maxItems: 256 }),
+        effectsTruncated: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: ["baseline", "effectsTruncated"],
+  },
+  {
+    name: "status_effect_changed",
+    description:
+      "Server AFTER_ADD/AFTER_REMOVE or true onEffectUpdated RETURN; copied state only, no inferred cause or before-values. Periodic false updates are excluded.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      {
+        change: Type.Union([
+          Type.Literal("added"),
+          Type.Literal("removed"),
+          Type.Literal("updated"),
+        ]),
+        ...effectProperties,
+      },
+      strict,
+    ),
+    filterFields: ["change", ...Object.keys(effectProperties)],
+  },
+  {
+    name: "equipment_slot_changed",
+    description:
+      "Tick-end equipment ID/count delta, not an equip action; omits component-only and same-tick net-zero changes.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        slot: Type.Union(
+          ["feet", "legs", "chest", "head", "offHand", "body", "saddle"].map((slot) =>
+            Type.Literal(slot),
+          ),
+        ),
+        beforeItemId: identifier,
+        beforeCount: counter,
+        afterItemId: identifier,
+        afterCount: counter,
+      },
+      strict,
+    ),
+    filterFields: ["slot", "beforeItemId", "beforeCount", "afterItemId", "afterCount"],
+  },
+  {
+    name: "nearby_sampled",
+    description:
+      "Every 20 ticks: loaded non-air blocks in radius4 cube and up to64 entities in radius16 sphere. Not sight, nearest order, or a complete world sample; may miss subinterval changes.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        sampleIntervalTicks,
+        blockRadius: Type.Literal(4),
+        blocksComplete: Type.Boolean(),
+        blocks: Type.Array(
+          Type.Object(
+            {
+              blockId: identifier,
+              position: Type.Tuple([Type.Integer(), Type.Integer(), Type.Integer()]),
+            },
+            strict,
+          ),
+          { maxItems: 729 },
+        ),
+        entityRadius: Type.Literal(16),
+        entitiesTruncated: Type.Boolean(),
+        entities: Type.Array(
+          Type.Object({ entityId: identifier, entityType: identifier, position }, strict),
+          { maxItems: 64 },
+        ),
+      },
+      strict,
+    ),
+    filterFields: [
+      "sampleIntervalTicks",
+      "blockRadius",
+      "blocksComplete",
+      "entityRadius",
+      "entitiesTruncated",
+    ],
+  },
+  {
+    name: "structures_sampled",
+    description:
+      "Every20ticks: valid containing bounding-box metadata from current loaded chunk and already-loaded referenced start chunks only. Not visual discovery or piece occupancy; always incomplete, no remote locations. At most64 current starts,64 reference keys/64 chunk checks,128 inspected starts.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        sampleIntervalTicks,
+        structureIds: Type.Array(identifier, { maxItems: 128, uniqueItems: true }),
+        incomplete: Type.Literal(true),
+        currentChunkLoaded: Type.Boolean(),
+        startsInspected: Type.Integer({ minimum: 0, maximum: 128 }),
+        referenceChunksChecked: Type.Integer({ minimum: 0, maximum: 64 }),
+        unloadedReferences: Type.Integer({ minimum: 0, maximum: 64 }),
+        startsTruncated: Type.Boolean(),
+        referencesTruncated: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: [
+      "sampleIntervalTicks",
+      "incomplete",
+      "currentChunkLoaded",
+      "startsInspected",
+      "referenceChunksChecked",
+      "unloadedReferences",
+      "startsTruncated",
+      "referencesTruncated",
+    ],
+  },
+  {
+    name: "weather_changed",
+    description:
+      "Actual isRaining/isThundering booleans differ between20tick samples; baseline is silent and subinterval reversals may be missed.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        sampleIntervalTicks,
+        beforeRaining: Type.Boolean(),
+        afterRaining: Type.Boolean(),
+        beforeThundering: Type.Boolean(),
+        afterThundering: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: [
+      "sampleIntervalTicks",
+      "beforeRaining",
+      "afterRaining",
+      "beforeThundering",
+      "afterThundering",
+    ],
+  },
+  {
+    name: "day_clock_phase_changed",
+    description:
+      "20tick sampled clock half-phase: floorMod(dayTime,24000)<12000 is day, otherwise night. Not light level; fixed-time dimension metadata is explicit; baseline is silent and subinterval changes may be missed.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        sampleIntervalTicks,
+        beforePhase: phase,
+        afterPhase: phase,
+        dayTime: Type.Integer({
+          minimum: -Number.MAX_SAFE_INTEGER,
+          maximum: Number.MAX_SAFE_INTEGER,
+        }),
+        fixedTime: Type.Boolean(),
+      },
+      strict,
+    ),
+    filterFields: ["sampleIntervalTicks", "beforePhase", "afterPhase", "dayTime", "fixedTime"],
+  },
+  {
+    name: "advancement_criterion_granted",
+    description:
+      "Original award returned true for a newly granted criterion; loaded progress is never replayed.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { advancementId: identifier, criterion: identifier, afterDone: Type.Boolean() },
+      strict,
+    ),
+    filterFields: ["advancementId", "criterion", "afterDone"],
+  },
+  {
+    name: "advancement_completed",
+    description:
+      "Successful criterion award changed native advancement done from false to true, not loaded progress or an already-done award.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { advancementId: identifier, criterion: identifier, afterDone: Type.Literal(true) },
+      strict,
+    ),
+    filterFields: ["advancementId", "criterion", "afterDone"],
   },
 ];
