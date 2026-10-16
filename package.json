@@ -12,8 +12,8 @@
     "test": "vp test",
     "build": "vp pack",
     "verify": "vp check && vp pack && vp test",
-    "verify:pi": "vp test --config vite.pi.config.ts src/pi/directorProbe.test.mjs",
-    "verify:pi:built": "vp pack && vp test --config vite.pi.config.ts src/pi/directorBridge.acceptance.test.mjs"
+    "verify:pi": "vp test --config vite.pi.config.ts src/pi/directorProbe.test.ts",
+    "verify:pi:built": "vp pack && vp test --config vite.pi.config.ts src/pi/directorBridge.acceptance.test.ts"
   },
   "dependencies": {
     "typebox": "1.3.37"

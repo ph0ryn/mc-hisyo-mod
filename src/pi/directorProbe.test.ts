@@ -1,26 +1,59 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringDecoder } from "node:string_decoder";
-import { afterAll, test } from "vite-plus/test";
-import { sendProviderResponse } from "./fixtures/localProvider.mjs";
+import { Type, type Static, type TSchema } from "typebox";
+import { Check } from "typebox/value";
+import { afterAll, beforeAll, test } from "vite-plus/test";
+import { sendProviderResponse, type ProviderApi } from "./fixtures/localProvider.mjs";
+
+type ProcessExit = { code: number | null; signal: NodeJS.Signals | null };
+interface TraceEntry extends Record<string, unknown> {
+  source: string;
+  type: string;
+  body?: Record<string, unknown>;
+}
+type TraceRecord = TraceEntry & { seq: number };
+const requestSchema = Type.Object({
+  tools: Type.Optional(
+    Type.Array(
+      Type.Object({
+        function: Type.Optional(Type.Object({ name: Type.String() })),
+        name: Type.Optional(Type.String()),
+      }),
+    ),
+  ),
+});
+const stateSchema = Type.Object({
+  model: Type.Object({ provider: Type.String(), id: Type.String(), api: Type.String() }),
+  thinkingLevel: Type.String(),
+  autoCompactionEnabled: Type.Boolean(),
+  isStreaming: Type.Boolean(),
+});
+const promptSchema = Type.Object({ disposition: Type.String() });
 
 // Optional real-PATH-Pi boundary test; never contacts a real model provider.
 const extensionPath = fileURLToPath(new URL("./fixtures/directorProbe.mjs", import.meta.url));
-const apis = ["openai-completions", "openai-responses", "anthropic-messages"];
+const apis: ProviderApi[] = ["openai-completions", "openai-responses", "anthropic-messages"];
 const scenarios = ["success", "throw-only", "abort-first", "abort-second"];
-const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
-assert.equal(version.status, 0, `PATH pi --version failed: ${version.error ?? version.stderr}`);
-assert.equal(version.stdout.trim(), "1.2.0", "Only the validated Pi 1.2.0 is supported");
-const output = mkdtempSync(join(tmpdir(), "mc-hisyo-pi-"));
-const results = [];
+let preflight: { version: SpawnSyncReturns<string>; output: string } | undefined;
+const results: Awaited<ReturnType<typeof run>>[] = [];
 
-async function run(scenario, api) {
-  const folder = join(output, api, scenario);
+// Collection must not execute even the Pi version preflight.
+beforeAll(() => {
+  const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
+  assert.equal(version.status, 0, `PATH pi --version failed: ${version.error ?? version.stderr}`);
+  assert.equal(version.stdout.trim(), "1.2.0", "Only the validated Pi 1.2.0 is supported");
+  preflight = { version, output: mkdtempSync(join(tmpdir(), "mc-hisyo-pi-")) };
+});
+
+async function run(scenario: string, api: ProviderApi) {
+  assert.ok(preflight);
+  const folder = join(preflight.output, api, scenario);
   for (const name of ["", "agent", "sessions", "home", "cwd", "tmp"])
     mkdirSync(join(folder, name), { recursive: true, mode: 0o700 });
   const promptPath = join(folder, "system.md");
@@ -34,28 +67,30 @@ async function run(scenario, api) {
     promptPath,
     "You are a local feasibility probe. Use only the game Tool stub. Never run OS commands.\n",
   );
-  const records = [];
-  const waiters = new Set();
-  const http = [];
+  const records: TraceRecord[] = [];
+  const waiters = new Set<() => void>();
+  const http: { path: string; body: Record<string, unknown> }[] = [];
   let stdout = "";
   let stderr = "";
-  let failure;
-  let child;
-  let closeResult;
+  let failure: string | undefined;
+  let closeResult: ProcessExit | undefined;
   let providerCount = 0;
   let stateCount = 0;
   let gameCount = 0;
   let hostActive = true;
-  let failureProviderCount;
-  let failureGameCount;
-  const record = (entry) => {
+  let failureProviderCount: number | undefined;
+  let failureGameCount: number | undefined;
+  const record = (entry: TraceEntry) => {
     records.push({ seq: records.length + 1, ...entry });
     for (const waiter of waiters) waiter();
   };
-  function waitFor(predicate, label) {
+  function waitFor(
+    predicate: (record: TraceRecord) => boolean,
+    label: string,
+  ): Promise<TraceRecord> {
     const prior = records.find(predicate);
     if (prior) return Promise.resolve(prior);
-    return new Promise((resolve, reject) => {
+    return new Promise<TraceRecord>((resolve, reject) => {
       const timer = setTimeout(() => {
         waiters.delete(check);
         reject(new Error(`Timeout waiting for ${label}`));
@@ -73,11 +108,14 @@ async function run(scenario, api) {
   }
   const server = createServer(async (req, res) => {
     try {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      assert.ok(req.url);
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      assert.ok(Check(Type.Record(Type.String(), Type.Unknown()), body));
       http.push({ path: req.url, body });
       if (req.url.startsWith("/provider/")) {
+        assert.ok(Check(requestSchema, body));
         providerCount++;
         record({
           source: "http",
@@ -140,15 +178,17 @@ async function run(scenario, api) {
     } catch (error) {
       record({ source: "harness", type: "server_error", path: req.url, error: String(error) });
       failure ??= `Fixture error at ${req.url}: ${String(error)}`;
-      if (res.headersSent) res.destroy(error);
+      if (res.headersSent) res.destroy(error instanceof Error ? error : new Error(String(error)));
       else {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
       }
     }
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`;
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
   const args = [
     "--mode",
     "rpc",
@@ -196,8 +236,12 @@ async function run(scenario, api) {
     join(folder, "command.json"),
     JSON.stringify({ command: "pi", args, env, cwd: join(folder, "cwd") }, null, 2),
   );
-  child = spawn("pi", args, { cwd: join(folder, "cwd"), env, stdio: ["pipe", "pipe", "pipe"] });
-  const closed = new Promise((resolve) =>
+  const child = spawn("pi", args, {
+    cwd: join(folder, "cwd"),
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const closed = new Promise<ProcessExit>((resolve) =>
     child.once("close", (code, signal) => {
       closeResult = { code, signal };
       record({ source: "process", type: "exit", ...closeResult });
@@ -209,7 +253,7 @@ async function run(scenario, api) {
   );
   const decoder = new StringDecoder("utf8");
   let buffer = "";
-  child.stdout.on("data", (chunk) => {
+  child.stdout.on("data", (chunk: Buffer) => {
     const text = decoder.write(chunk);
     stdout += text;
     buffer += text;
@@ -219,17 +263,24 @@ async function run(scenario, api) {
       buffer = buffer.slice(index + 1);
       if (!line) continue;
       try {
-        record({ source: "rpc", ...JSON.parse(line) });
+        const message: unknown = JSON.parse(line);
+        assert.ok(message && typeof message === "object" && "type" in message);
+        assert.ok(typeof message.type === "string");
+        record({ ...message, source: "rpc", type: message.type });
       } catch (error) {
         record({ source: "harness", type: "invalid_stdout", line, error: String(error) });
       }
     }
   });
-  child.stderr.on("data", (chunk) => {
+  child.stderr.on("data", (chunk: Buffer) => {
     stderr += chunk.toString("utf8");
   });
   let serial = 0;
-  async function rpc(type, data = {}) {
+  async function rpc<S extends TSchema>(
+    type: string,
+    schema: S,
+    data: Record<string, unknown> = {},
+  ): Promise<TraceRecord & { data: Static<S> }> {
     const id = `req-${++serial}`;
     const response = waitFor(
       (r) => r.source === "rpc" && r.type === "response" && r.id === id,
@@ -238,16 +289,18 @@ async function run(scenario, api) {
     child.stdin.write(`${JSON.stringify({ id, type, ...data })}\n`);
     const result = await response;
     assert.equal(result.success, true, JSON.stringify(result));
-    return result;
+    assert.ok(Check(schema, result.data));
+    return { ...result, data: result.data };
   }
   try {
     const startup = await waitFor(
       (r) => r.source === "http" && r.type === "startup",
       "extension startup",
     );
+    assert.ok(startup.body);
     assert.deepEqual(startup.body.tools, ["send_message"]);
     assert.equal(startup.body.mode, "rpc");
-    const state = await rpc("get_state");
+    const state = await rpc("get_state", stateSchema);
     assert.equal(state.data.model.provider, "scratch-local");
     assert.equal(state.data.model.id, "dummy-model");
     // Runtime gate before binding or a paid-capable prompt: reject unknown APIs.
@@ -263,10 +316,15 @@ async function run(scenario, api) {
       false,
       "Auto-compaction must be off before prompts",
     );
-    const levels = await rpc("get_available_thinking_levels");
+    const levels = await rpc(
+      "get_available_thinking_levels",
+      Type.Object({ levels: Type.Array(Type.String()) }),
+    );
     assert.ok(levels.data.levels.includes("medium"));
     const binding = { worldSessionId: "scratch-world-session", runId: `run-${scenario}` };
-    const bind = await rpc("prompt", { message: `/bind-run ${JSON.stringify(binding)}` });
+    const bind = await rpc("prompt", promptSchema, {
+      message: `/bind-run ${JSON.stringify(binding)}`,
+    });
     assert.equal(bind.data.disposition, "handled");
     await waitFor((r) => r.source === "http" && r.type === "bound", "binding ACK");
     assert.equal(providerCount, 0, "No provider before binding");
@@ -280,15 +338,20 @@ async function run(scenario, api) {
       (r) => r.source === "rpc" && r.type === "agent_settled",
       "agent_settled",
     );
-    const prompt = await rpc("prompt", { message: "Run the local game Tool stub once." });
+    const prompt = await rpc("prompt", promptSchema, {
+      message: "Run the local game Tool stub once.",
+    });
     assert.equal(prompt.data.disposition, "started");
     const settled = await settledPromise;
-    const after = await rpc("get_state");
-    const queue = await rpc("clear_queue");
+    const after = await rpc("get_state", stateSchema);
+    const queue = await rpc(
+      "clear_queue",
+      Type.Object({ steering: Type.Array(Type.Unknown()), followUp: Type.Array(Type.Unknown()) }),
+    );
     assert.equal(after.data.isStreaming, false);
     assert.deepEqual(queue.data.steering, []);
     assert.deepEqual(queue.data.followUp, []);
-    const messages = await rpc("get_messages");
+    const messages = await rpc("get_messages", Type.Unknown());
     assert.ok(
       !JSON.stringify(messages.data).includes("LATEST_STATE"),
       "Transient state must not persist in conversation",
@@ -297,8 +360,10 @@ async function run(scenario, api) {
       const requests = http.filter((r) => r.path.startsWith("/provider/"));
       for (const request of requests)
         assert.equal(JSON.stringify(request.body).match(/LATEST_STATE/g)?.length, 1);
-      assert.ok(JSON.stringify(requests[0].body).includes('snapshot\\\":1'));
-      assert.ok(JSON.stringify(requests[1].body).includes('snapshot\\\":2'));
+      const [first, second] = requests;
+      assert.ok(first && second);
+      assert.ok(JSON.stringify(first.body).includes('snapshot\\\":1'));
+      assert.ok(JSON.stringify(second.body).includes('snapshot\\\":2'));
     }
     if (scenario.startsWith("abort")) {
       assert.equal(settled.aborted, true);
@@ -312,13 +377,13 @@ async function run(scenario, api) {
         records.some(
           (r) =>
             r.type === "event" &&
-            r.body.type === "context_abort" &&
+            r.body?.type === "context_abort" &&
             r.body.abortedSynchronously === true,
         ),
       );
-      const stale = await rpc("prompt", { message: "/probe-stale" });
+      const stale = await rpc("prompt", promptSchema, { message: "/probe-stale" });
       assert.equal(stale.data.disposition, "handled");
-      assert.ok(records.some((r) => r.type === "event" && r.body.type === "stale_tool_rejected"));
+      assert.ok(records.some((r) => r.type === "event" && r.body?.type === "stale_tool_rejected"));
       assert.equal(
         http.filter((r) => r.path === "/message").length,
         failureGameCount,
@@ -341,18 +406,19 @@ async function run(scenario, api) {
     assert.equal(records.filter((r) => r.source === "rpc" && r.type === "agent_settled").length, 1);
     assert.ok(!records.some((r) => r.type === "invalid_stdout"));
   } catch (error) {
-    failure = String(error.stack ?? error);
+    failure = error instanceof Error ? (error.stack ?? String(error)) : String(error);
   } finally {
     child.stdin.end();
     const deadline = setTimeout(() => child.kill("SIGKILL"), 5000);
     await closed;
     clearTimeout(deadline);
-    await new Promise((resolve) => server.close(resolve));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   writeFileSync(join(folder, "stdout.jsonl"), stdout);
   writeFileSync(join(folder, "stderr.txt"), stderr);
   writeFileSync(join(folder, "trace.json"), JSON.stringify(records, null, 2));
   writeFileSync(join(folder, "http.json"), JSON.stringify(http, null, 2));
+  assert.ok(closeResult);
   const result = {
     api,
     scenario,
@@ -379,6 +445,8 @@ for (const api of apis)
   }
 
 afterAll(() => {
+  if (!preflight) return;
+  const { version, output } = preflight;
   const resultsPath = join(output, "results.json");
   writeFileSync(
     resultsPath,

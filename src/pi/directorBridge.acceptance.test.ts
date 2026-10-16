@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -8,18 +8,76 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Type, type Static, type TSchema } from "typebox";
+import { Check } from "typebox/value";
 import { expect, onTestFinished, test } from "vite-plus/test";
 import { DirectorBridge } from "../bridge/directorBridge.js";
 import { EventCatalog } from "../events/eventCatalog.js";
 import { EventLog } from "../events/eventLog.js";
 import { ResponseHooks } from "../hooks/responseHooks.js";
+import {
+  GameStateRequestSchema,
+  SendMessageSchema,
+  WorldBindingSchema,
+  type RunBinding,
+  type WorldBinding,
+} from "../protocol/bridge.js";
 import { gameEventDefinitions } from "../protocol/gameEvent.js";
+import { GameSnapshotSchema, type GameSnapshot } from "../protocol/gameSnapshot.js";
 import { openDatabase } from "../storage/database.js";
 import { JsonLineDecoder } from "../transport/jsonLines.js";
 import { RpcPeer } from "../transport/rpcPeer.js";
 import { startPiSession } from "../runtime/piSession.js";
-import { sendProviderResponse } from "./fixtures/localProvider.mjs";
+import {
+  sendProviderResponse,
+  type ProviderApi,
+  type ProviderToolCall,
+} from "./fixtures/localProvider.mjs";
 import { startPiRpcClient } from "./piRpcClient.js";
+
+type PiDriver = Awaited<ReturnType<typeof startPiRpcClient>>;
+type PiSession = Awaited<ReturnType<typeof startPiSession>>;
+type ProcessExit = { code: number | null; signal: NodeJS.Signals | null };
+const requestSchema = Type.Object({
+  tools: Type.Array(
+    Type.Object({
+      function: Type.Optional(Type.Object({ name: Type.String() })),
+      name: Type.Optional(Type.String()),
+    }),
+  ),
+});
+const recordSchema = Type.Object({
+  type: Type.String(),
+  id: Type.Optional(Type.String()),
+  success: Type.Optional(Type.Boolean()),
+  data: Type.Optional(Type.Unknown()),
+  aborted: Type.Optional(Type.Boolean()),
+  isError: Type.Optional(Type.Boolean()),
+});
+type PiRecord = Static<typeof recordSchema>;
+const stateSchema = Type.Object({
+  model: Type.Object({ api: Type.String() }),
+  thinkingLevel: Type.String(),
+  autoCompactionEnabled: Type.Boolean(),
+});
+const promptSchema = Type.Object({ disposition: Type.String() });
+interface FixtureOptions {
+  session?: boolean;
+  driver?: boolean;
+  thinking?: string;
+  expectedModel?: string;
+  bootstrap?: Record<string, unknown>;
+  plan?: (body: Static<typeof requestSchema>, number: number) => ProviderToolCall[];
+  // Failure scenarios deliberately return malformed or stale state responses.
+  state?: (context: {
+    binding: RunBinding;
+    state: GameSnapshot;
+    number: number;
+    bridge: DirectorBridge;
+    game: RpcPeer;
+    world: WorldBinding;
+  }) => unknown;
+}
 
 const tools = [
   "get_game_state",
@@ -30,20 +88,24 @@ const tools = [
   "remove_response_hook",
   "list_response_hooks",
 ].sort();
-const apis = ["openai-completions", "openai-responses", "anthropic-messages"];
-const snapshot = JSON.parse(
-  readFileSync(new URL("../protocol/fixtures/gameSnapshot.json", import.meta.url), "utf8"),
-);
+const apis: ProviderApi[] = ["openai-completions", "openai-responses", "anthropic-messages"];
+const snapshot = (() => {
+  const value: unknown = JSON.parse(
+    readFileSync(new URL("../protocol/fixtures/gameSnapshot.json", import.meta.url), "utf8"),
+  );
+  assert.ok(Check(GameSnapshotSchema, value));
+  return value;
+})();
 const extension = fileURLToPath(new URL("../../dist/directorBridge.mjs", import.meta.url));
 const scope = { worldId: "scratch-world", playerId: "scratch-player" };
 
-function texts(value) {
+function texts(value: unknown): string[] {
   if (typeof value === "string") return [value];
   if (value === null || typeof value !== "object") return [];
   return Object.values(value).flatMap(texts);
 }
 
-async function fixture(api, options = {}) {
+async function fixture(api: ProviderApi, options: FixtureOptions = {}) {
   if (!options.session) {
     const version = spawnSync("pi", ["--version"], { encoding: "utf8" });
     assert.equal(version.status, 0, `Pi preflight failed: ${version.error ?? version.stderr}`);
@@ -65,21 +127,23 @@ async function fixture(api, options = {}) {
       mode: 0o600,
     },
   );
-  let db;
-  let bridge;
-  let game;
-  let server;
-  let child;
-  let driver;
-  let session;
-  let closed;
-  let httpError;
+  const owned: {
+    db?: ReturnType<typeof openDatabase>;
+    bridge?: DirectorBridge;
+    game?: RpcPeer;
+    server?: ReturnType<typeof createServer>;
+  } = {};
+  let child: ChildProcessWithoutNullStreams | undefined;
+  let driver: PiDriver | undefined;
+  let session: PiSession | undefined;
+  let closed: Promise<ProcessExit> | undefined;
+  let httpError: unknown;
   let stderr = "";
-  const records = [];
-  const requests = [];
+  const records: PiRecord[] = [];
+  const requests: Static<typeof requestSchema>[] = [];
   // Register before acquiring handles so a failed setup cannot leak listeners or SQLite.
   onTestFinished(async () => {
-    let exit;
+    let exit: ProcessExit | undefined;
     if (session) {
       await session.close();
       stderr = session.diagnostics;
@@ -89,17 +153,19 @@ async function fixture(api, options = {}) {
       stderr = driver.diagnostics;
     }
     if (child) {
-      child.stdin.end();
-      const timer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+      const running = child;
+      running.stdin.end();
+      const timer = setTimeout(() => running.kill("SIGKILL"), 2_000);
       exit = await closed;
       clearTimeout(timer);
     }
-    game?.close();
-    await bridge?.close();
-    db?.close();
-    if (server) {
+    owned.game?.close();
+    await owned.bridge?.close();
+    owned.db?.close();
+    if (owned.server) {
+      const server = owned.server;
       server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     writeFileSync(join(folder, "rpc.json"), JSON.stringify(records, null, 2), { mode: 0o600 });
     writeFileSync(join(folder, "stderr.txt"), stderr, { mode: 0o600 });
@@ -107,12 +173,12 @@ async function fixture(api, options = {}) {
     if (exit) expect(exit).toEqual({ code: 0, signal: null });
     if (httpError) throw httpError;
   });
-  db = openDatabase(":memory:");
+  const db = (owned.db = openDatabase(":memory:"));
   const catalog = new EventCatalog(gameEventDefinitions);
   const eventLog = new EventLog(db, catalog);
   const hooks = new ResponseHooks(db, catalog);
   const token = randomBytes(32).toString("base64url");
-  bridge = new DirectorBridge({ token, eventLog, hooks });
+  const bridge = (owned.bridge = new DirectorBridge({ token, eventLog, hooks }));
   let agentReady = false;
   bridge.on("agentReady", () => {
     agentReady = true;
@@ -123,17 +189,19 @@ async function fixture(api, options = {}) {
   const address = await bridge.listen();
   const socket = createConnection(address);
   await once(socket, "connect");
-  game = new RpcPeer(socket);
-  const stateRequests = [];
-  const displays = [];
+  const game = (owned.game = new RpcPeer(socket));
+  const stateRequests: Static<typeof GameStateRequestSchema>[] = [];
+  const displays: string[] = [];
   game.handle("game.run.bind", (binding) => binding);
   game.handle("game.run.clear", () => {});
   game.handle("game.message.send", (params) => {
+    assert.ok(Check(SendMessageSchema, params));
     displays.push(params.text);
     const { text: _text, ...binding } = params;
     return { ...binding, displayed: true };
   });
   game.handle("game.state.get", async (params) => {
+    assert.ok(Check(GameStateRequestSchema, params));
     stateRequests.push(params);
     const state = { ...snapshot, tick: 120 + stateRequests.length };
     const { query: _query, ...binding } = params;
@@ -142,11 +210,13 @@ async function fixture(api, options = {}) {
     return { ...binding, state };
   });
   await game.call("bridge.hello", { protocolVersion: 1, role: "game", token });
-  const world = await game.call("game.attach", {
+  const attached = await game.call("game.attach", {
     ...scope,
     supportedEvents: ["block_broken"],
     paused: false,
   });
+  assert.ok(Check(WorldBindingSchema, attached));
+  const world = attached;
   await game.call("game.ready", world);
   await game.call("game.event", {
     ...world,
@@ -158,7 +228,7 @@ async function fixture(api, options = {}) {
     position: [0, 64, 0],
     data: { blockId: "minecraft:stone", position: [0, 64, 1] },
   });
-  server = createServer(async (req, res) => {
+  const server = (owned.server = createServer(async (req, res) => {
     try {
       // No proxy and no remote endpoint: only this disposable loopback server is advertised.
       assert.equal(
@@ -174,11 +244,18 @@ async function fixture(api, options = {}) {
           req.headers[api === "anthropic-messages" ? "x-api-key" : "authorization"],
           `${api === "anthropic-messages" ? "" : "Bearer "}!inert-$local-key`,
         );
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      assert.ok(Check(requestSchema, body));
       requests.push(body);
-      const names = body.tools.map((tool) => tool.function?.name ?? tool.name).sort();
+      const names = body.tools
+        .map((tool) => {
+          const name = tool.function?.name ?? tool.name;
+          assert.ok(typeof name === "string");
+          return name;
+        })
+        .sort();
       assert.deepEqual(names, tools);
       const toolCalls = options.plan
         ? options.plan(body, requests.length)
@@ -191,9 +268,11 @@ async function fixture(api, options = {}) {
       if (res.headersSent) res.destroy();
       else res.writeHead(500).end();
     }
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`;
+  }));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const providerAddress = server.address();
+  assert.ok(providerAddress && typeof providerAddress === "object");
+  const origin = `http://127.0.0.1:${providerAddress.port}`;
   writeFileSync(
     join(folder, "agent", "models.json"),
     JSON.stringify({
@@ -237,12 +316,13 @@ async function fixture(api, options = {}) {
       ...options.bootstrap,
     }),
   };
-  const waiters = new Set();
+  const waiters = new Set<() => void>();
   let nextId = 0;
-  function waitFor(predicate) {
+  function waitFor(predicate: (record: PiRecord) => boolean): Promise<PiRecord> {
     const check = () => records.find(predicate);
-    if (check()) return Promise.resolve(check());
-    return new Promise((resolve, reject) => {
+    const prior = check();
+    if (prior) return Promise.resolve(prior);
+    return new Promise<PiRecord>((resolve, reject) => {
       const timer = setTimeout(() => {
         waiters.delete(update);
         reject(new Error(`Pi boundary timeout; logs: ${folder}; stderr: ${stderr}`));
@@ -290,7 +370,7 @@ async function fixture(api, options = {}) {
     "--api-key",
     "dummy-local-key",
   ];
-  async function startSession(binding = world) {
+  async function startSession(binding: WorldBinding = world) {
     session = await startPiSession({
       dataDirectory: join(folder, "data"),
       bridge,
@@ -329,42 +409,63 @@ async function fixture(api, options = {}) {
     });
     driver.on("fault", () => bridge.invalidateRun("Pi stdio driver failed"));
   } else {
-    child = spawn("pi", args, { cwd: join(folder, "cwd"), env, stdio: ["pipe", "pipe", "pipe"] });
-    closed = new Promise((resolve) =>
-      child.once("close", (code, signal) => resolve({ code, signal })),
+    const running = (child = spawn("pi", args, {
+      cwd: join(folder, "cwd"),
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    }));
+    closed = new Promise<ProcessExit>((resolve) =>
+      running.once("close", (code, signal) => resolve({ code, signal })),
     );
     const decoder = new JsonLineDecoder();
-    child.stdout.on("data", (chunk) =>
+    child.stdout.on("data", (chunk: Buffer) =>
       decoder.push(chunk, (line) => {
-        records.push(JSON.parse(line));
+        const record: unknown = JSON.parse(line);
+        assert.ok(Check(recordSchema, record));
+        records.push(record);
         for (const waiter of waiters) waiter();
       }),
     );
     child.stdout.on("end", () => decoder.finish());
-    child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
   }
-  async function rpc(type, data = {}) {
+  async function rpc<S extends TSchema>(
+    type: string,
+    schema: S,
+    data: Record<string, unknown> = {},
+  ): Promise<Static<S>> {
     const id = `request-${++nextId}`;
     const response = waitFor((r) => r.type === "response" && r.id === id);
+    assert.ok(child);
     child.stdin.write(`${JSON.stringify({ id, type, ...data })}\n`);
     const result = await response;
     assert.equal(result.success, true, JSON.stringify(result));
+    assert.ok(Check(schema, result.data));
     return result.data;
   }
   async function prompt() {
     const startIndex = records.length;
     const settled = waitFor((r) => records.indexOf(r) >= startIndex && r.type === "agent_settled");
-    const ack = await rpc("prompt", { message: "Inspect current play and decide." });
+    const ack = await rpc("prompt", promptSchema, { message: "Inspect current play and decide." });
     assert.equal(ack.disposition, "started", "Prompt ACK is not completion");
-    return settled;
+    const result = await settled;
+    assert.ok(typeof result.aborted === "boolean");
+    return { ...result, aborted: result.aborted };
   }
   async function run(message = "Inspect current play and decide.") {
-    if (session) return session.judge(message);
+    if (session) {
+      const result = await session.judge(message);
+      assert.ok(result.status === "settled");
+      return result;
+    }
     const run = await bridge.beginRun();
     try {
-      return driver ? await driver.run("Inspect current play and decide.") : await prompt();
+      if (!driver) return await prompt();
+      const result = await driver.run("Inspect current play and decide.");
+      assert.ok(result.status === "settled");
+      return result;
     } catch (error) {
       // Unknown-started failures are not a reusable bridge slot until the child is terminated.
       if (driver) await driver.close();
@@ -375,8 +476,12 @@ async function fixture(api, options = {}) {
   }
   return {
     ready,
-    driver,
+    get driver() {
+      assert.ok(driver);
+      return driver;
+    },
     get session() {
+      assert.ok(session);
       return session;
     },
     startSession,
@@ -418,6 +523,7 @@ for (const api of apis) {
       supportedEvents: ["block_broken"],
       paused: false,
     });
+    assert.ok(Check(WorldBindingSchema, reattached));
     await f.game.call("game.ready", reattached);
     await f.startSession(reattached);
     expect(f.session.sessionPath).toBe(firstPath);
@@ -433,7 +539,9 @@ for (const api of apis) {
     expect(texts(f.requests[1])).toContain(sentinel);
     const current = texts(f.requests[1]).filter((text) => text.startsWith("CURRENT_GAME_STATE\n"));
     expect(current).toHaveLength(1);
+    assert.ok(current[0]);
     expect(JSON.parse(current[0].slice("CURRENT_GAME_STATE\n".length)).tick).toBe(122);
+    assert.ok(f.stateRequests[1] && f.stateRequests[0]);
     expect(f.stateRequests[1].runId).not.toBe(f.stateRequests[0].runId);
     await f.session.close();
     await f.game.call("game.detach", reattached);
@@ -443,6 +551,7 @@ for (const api of apis) {
       supportedEvents: [],
       paused: false,
     });
+    assert.ok(Check(WorldBindingSchema, other));
     await f.game.call("game.ready", other);
     await f.startSession(other);
     expect(f.session.sessionPath).not.toBe(firstPath);
@@ -460,6 +569,7 @@ for (const api of apis) {
     expect(await f.run()).toEqual({ status: "settled", aborted: false });
     expect(f.requests).toHaveLength(3);
     expect(f.stateRequests).toHaveLength(3);
+    assert.ok(f.stateRequests[2] && f.stateRequests[0]);
     expect(f.stateRequests[2].runId).not.toBe(f.stateRequests[0].runId);
     expect(f.displays).toHaveLength(1);
     expect(f.driver.isRetired).toBe(false);
@@ -483,7 +593,7 @@ for (const api of apis) {
   test(`${api}: built tools and fresh transient state, explicit display only, then another bound run`, async () => {
     const f = await fixture(api);
     await f.ready;
-    const state = await f.rpc("get_state");
+    const state = await f.rpc("get_state", stateSchema);
     expect(state.model.api).toBe(api);
     expect(state.thinkingLevel).toBe("medium");
     expect(state.autoCompactionEnabled).toBe(false);
@@ -494,18 +604,21 @@ for (const api of apis) {
     for (const [index, body] of f.requests.entries()) {
       const current = texts(body).filter((text) => text.startsWith("CURRENT_GAME_STATE\n"));
       expect(current).toHaveLength(1);
+      assert.ok(current[0]);
       expect(JSON.parse(current[0].slice("CURRENT_GAME_STATE\n".length)).tick).toBe(121 + index);
     }
-    expect(JSON.stringify(await f.rpc("get_messages"))).not.toContain("CURRENT_GAME_STATE");
+    expect(JSON.stringify(await f.rpc("get_messages", Type.Unknown()))).not.toContain(
+      "CURRENT_GAME_STATE",
+    );
     expect((await f.run()).aborted).toBe(false);
     expect(f.requests).toHaveLength(3);
     expect(f.stateRequests).toHaveLength(3);
+    assert.ok(f.stateRequests[2] && f.stateRequests[0]);
     expect(f.stateRequests[2].runId).not.toBe(f.stateRequests[0].runId);
     expect(f.displays).toHaveLength(1);
   });
 
   test(`${api}: seven bundled tools execute CRUD/history and reject scope injection`, async () => {
-    let hookId;
     const f = await fixture(api, {
       plan(body, number) {
         if (number === 1)
@@ -530,17 +643,32 @@ for (const api of apis) {
         if (number === 2) {
           const outputs = texts(body)
             .filter((text) => text.startsWith("{"))
-            .map((text) => JSON.parse(text));
+            .map((text): unknown => JSON.parse(text));
+          const addedSchema = Type.Object({ instruction: Type.String(), id: Type.String() });
           const added = outputs.find(
-            (value) => value.instruction === "Inspect progress" && value.id,
+            (value) =>
+              Check(addedSchema, value) && value.instruction === "Inspect progress" && value.id,
           );
           assert.ok(added, "Persisted hook result must reach the model");
-          hookId = added.id;
+          assert.ok(Check(addedSchema, added));
+          const hookId = added.id;
+          const historySchema = Type.Object({
+            through: Type.Number(),
+            events: Type.Array(
+              Type.Object({
+                observation: Type.Object({ data: Type.Object({ blockId: Type.String() }) }),
+              }),
+            ),
+          });
           const history = outputs.find(
-            (value) => value.through === 1 && Array.isArray(value.events),
+            (value) =>
+              Check(historySchema, value) && value.through === 1 && Array.isArray(value.events),
           );
+          assert.ok(Check(historySchema, history));
           assert.equal(history.events.length, 1);
-          assert.equal(history.events[0].observation.data.blockId, "minecraft:stone");
+          const [firstEvent] = history.events;
+          assert.ok(firstEvent);
+          assert.equal(firstEvent.observation.data.blockId, "minecraft:stone");
           return [
             { id: "list", name: "list_response_hooks", arguments: { limit: 8 } },
             { id: "remove", name: "remove_response_hook", arguments: { id: hookId } },
@@ -574,7 +702,7 @@ for (const [name, bootstrap] of Object.entries({
 })) {
   test(`startup rejects ${name} and later prompts stay closed`, async () => {
     const f = await fixture("openai-completions", { bootstrap });
-    await f.rpc("get_state"); // Stdio attaches only after session_start has finished.
+    await f.rpc("get_state", stateSchema); // Stdio attaches only after session_start has finished.
     expect(f.agentReady).toBe(false);
     await expect(f.bridge.beginRun()).rejects.toThrow();
     expect((await f.prompt()).aborted).toBe(true);

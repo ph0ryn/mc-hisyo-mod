@@ -1,4 +1,5 @@
 import { defineConfig } from "vite-plus";
+import { configDefaults } from "vite-plus/test/config";
 
 export default defineConfig({
   lint: {
@@ -12,6 +13,12 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.test.ts"],
+    // Real-PATH-Pi boundary tests are strictly opt-in via vite.pi.config.ts.
+    exclude: [
+      ...configDefaults.exclude,
+      "src/pi/directorProbe.test.ts",
+      "src/pi/directorBridge.acceptance.test.ts",
+    ],
     environment: "node",
   },
   pack: {

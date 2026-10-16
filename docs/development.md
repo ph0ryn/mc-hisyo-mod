@@ -14,9 +14,10 @@
 - ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
-- [保留キュー](<scheduling.md#保留キュー実行制御未接続>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
+- [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
+- [scheduler checkpoint](<scheduling.md#実行制御checkpoint>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
 
-**scheduler、CLIとModへの配線はまだ未実装。**
+**schedulerはPi通信容量の回帰テストがRED。タイマー、CLIとModへの配線も未完了。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
 Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
@@ -41,7 +42,8 @@ node dist/cli.mjs --help
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
-テストは対象コードの隣へ置く。通常の`*.test.ts`と、実Piを必要とする任意の`*.test.mjs`は別設定で実行する。
+追加するテストは対象コードの隣の`*.test.ts`にunit testとして書く。
+既存の実Pi境界検証も同じ拡張子へ統一するが、unit testとは区別し、別設定で明示実行する。
 共通JSON fixtureも[protocolの隣](<../src/protocol/fixtures/gameSnapshot.json>)に置き、Javaから同じファイルを参照する。
 [pnpm設定](<../pnpm-workspace.yaml>)は依存解決と供給網ポリシー用で、monorepo構成ではない。
 Vite+ coreのバージョン表記に対するpeer例外は、検証したバージョンのみに限定している。

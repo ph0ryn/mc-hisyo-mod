@@ -6,7 +6,8 @@
 
 ### TypeScriptと永続化
 
-`pnpm run verify`でformat、型検査付きlint、ESMビルド、実行境界のテストを確認した。
+`pnpm run verify`でformat、型検査付きlint、ESMビルド、実行境界のテストを確認する。
+現在は下記scheduler checkpointの通信容量回帰がREDで、全体検証は未完了。
 
 - ビルドしたCLIのヘルプ、未知の引数の拒否。
 - hookなしでのイベント保存、SQLite再open後のイベント・hook復元。
@@ -96,6 +97,9 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 
 ### Piのローカル境界
 
+既存の任意Pi検証2ファイルは`.test.ts`へ統一し、通常のunit testとは別設定で維持する。
+移行時は42ケースの収集と元のassert / expect文120件の保持を確認した。実Piでの再実行はしておらず、以下の成功実績は移行前のもの。
+
 `pnpm run verify:pi`はPATH上の実Pi **1.2.0**と、ローカルの偽providerを使う任意テスト。
 3つの組込APIで4シナリオずつ、**12/12成功、全子プロセス終了コード0**を確認した。
 
@@ -154,12 +158,35 @@ CLI schedulerやFabricへの配線試験ではない。
 - UTF-8・JSON escapeを含む正確な容量境界、単一hookの反復発火・複数hookの一括超過での継続拒否。
 - 超過した観測のraw履歴は残る。履歴をpending配送用の永続inboxとして再利用しない。
 
-初回の未実装moduleでの失敗から実装した。RPC受付・single-flight実行制御・timer・Pi取消には未接続で、その接続検証とは区別する。
+初回の未実装moduleでの失敗から実装した。queue単体の境界確認で、次のscheduler接続検証とは区別する。
+
+### Single-flight scheduler checkpoint
+
+[隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は26ケースのunit testである。
+bridgeの公開イベント・同期受付とPi session factoryだけを置き換え、ファイル・SQLite・TCP・子プロセスを使わない。
+既存の実境界テストをunit testと呼び替えるのではなく、scheduler自身の入力・出力と非同期所有権を分離して検証する。
+
+- ready前は起動せず、ready済みworldは開始理由を1回取り込む。初期pauseと設定snapshotを確認する。
+- 同文チャットの順序、発火時のhook・保存ID、通常観測をpromptへ混ぜないことを確認する。
+- pause解除よりsettledが遅くても重複実行せず、`not_started`は元batchを次の入力と別に保持する。
+- チャット／hook超過で所有者のcloseを要求してからfaultを通知し、以後の受付・自動再開を拒否する。
+- 所有者のcloseが解決する前は次を起動せず、退出前の揮発入力を次worldへ再送しない。
+- 起動途中の退出・close、起動失敗、曖昧な判断失敗、cleanup失敗、同期callbackからのclose再入を扱う。
+- 次worldの開始batchが容量超過しても前所有者の終了待ちを失わず、不正な容量設定を拒否する。
+
+raw保存はqueueとbridge、実際のbinding無効化・abort・子プロセス終了は所有者の既存境界検証で確認する。
+その検証をschedulerのunit testが実行したとは扱わない。
+
+25ケースは成功し、quote-heavy batchの通信容量回帰1ケースは**RED**のまま保持する。
+受付済み約544 KBのJSONを公開codecでPi envelopeへ包むだけで1 MiBを超えることを、I/Oなしで再現する。
+通常の`verify`はformat・型検査付きlint・buildが成功し、216テスト中215成功・この1件失敗である。
+通信上限の方針確認前にテストを削除・緩和せずcheckpointへ残す。実Piの入力echoも修正時の検証対象とする。
+タイマー、CLI / Modの配線、実Piでのscheduler受入は確認していない。
 
 ### Production Pi拡張
 
 `pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
-[隣接するVitestテスト](<../src/pi/directorBridge.acceptance.test.mjs>)は認証付きTCP bridge、SQLite、偽game、loopback偽providerを使う。
+[隣接するVitestテスト](<../src/pi/directorBridge.acceptance.test.ts>)は認証付きTCP bridge、SQLite、偽game、loopback偽providerを使う。
 開発依存のPiはAPI型の検査用で、実行時はPATHのPiを正確なバージョン検査後に使う。
 
 3 physical APIすべてで7 Toolの実行、イベント検索、hook CRUD、scope注入の拒否、明示的な表示だけがgameへ届くことを確認する。

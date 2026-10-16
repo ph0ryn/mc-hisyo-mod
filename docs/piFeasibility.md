@@ -18,7 +18,7 @@ pnpm run verify:pi -t 'anthropic-messages: abort-(first|second)'
 実行時には、OSの一時ディレクトリに`mkdtempSync`で毎回新しい領域を作る。
 最後の`RESULTS`行に集約結果への絶対パスを出力し、シナリオ別に起動引数・RPC・HTTP・終了コードも残す。
 証跡はリポジトリに生成せず、自動削除もしない。
-[Vitestテスト](<../src/pi/directorProbe.test.mjs>)は、Piへ渡す[ESM fixture](<../src/pi/fixtures/directorProbe.mjs>)の場所を`import.meta.url`から解決する。
+[Vitestテスト](<../src/pi/directorProbe.test.ts>)は、Piへ渡す[ESM fixture](<../src/pi/fixtures/directorProbe.mjs>)の場所を`import.meta.url`から解決する。
 
 ## 隔離と前提条件
 

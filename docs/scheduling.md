@@ -1,7 +1,7 @@
 # ポーリングと応答hook
 
-以下はscheduler接続時の契約。bridgeのbinding無効化・実行slotの保持と、session所有者によるPiの取消・終了管理は実装済み。
-保留キューは実装済み。タイマー・実行制御・CLIへの配線は未接続。[実装状況](<development.md>)を参照。
+保留キューと開始・チャット・一致hookのsingle-flight実行制御はcheckpoint実装済み。
+Piの通信容量との整合は未解決で、タイマー・CLI / Modへの配線も未完了。[実装状況](<development.md>)を参照。
 
 ## AIを起動する入口
 
@@ -89,7 +89,7 @@ Piの`steer`は進行中のAPI応答を即座に中断する機能ではなく�
 実行の完了確認には`agent_settled`を使う。
 `prompt`の受理応答や`agent_end`だけでは、その後の自動処理まで完了したと判断しない。
 
-## 保留キュー（実行制御未接続）
+## 保留キュー
 
 [JudgmentQueue](<../src/runtime/judgmentQueue.ts>)は、一つのworld / player / worldSessionIdに属する起動理由を保持する。
 開始・pollはそれぞれ1予約へまとめ、チャットは同文でも受信順に別々に残す。
@@ -102,12 +102,37 @@ hookは発火時のID・指示・正確な保存イベントIDを保持し、同
 - 一つの観測に複数hookが一致した場合も、全件を収められなければ受付を失敗させる。一部だけを判断へ渡さない。
 - 超過後は新しい受付もbatch取得も同じエラーで拒否し、自動回復しない。古い入力を追い出して空きを作らない。
 - batch取得後の入力は次の保留batchへ入り、取得済みの内容を書き換えない。
-  実行制御の接続時は、呼出側も実行待ちbatchを1件までに制限する。
+  runtimeも取得済みbatchを1件に制限し、その実行前・実行中の入力を次の保留batchへ分離する。
 - 保留は接続session内の揮発状態。crash・退出・明示停止を超えた配送保証や、次のsessionへの再送は行わない。
   永続する履歴・hook登録とは分ける。
 
 [隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)は、実SQLiteのhook照合・履歴と公開queue APIで確認する。
-この段階ではRPC受付、失敗時のPi取消、timerからの起動へ未接続。queueだけでsingle-flightや過負荷のゲーム表示を保証しない。
+queue単体の検証であり、single-flightは次のscheduler unit test、Pi取消は所有者の境界検証で区別する。
+
+## 実行制御checkpoint
+
+[JudgmentScheduler](<../src/runtime/judgmentScheduler.ts>)はready済みworldから開始理由を1回取り込み、
+チャットと一致hookのbatchをPi session所有者へ順番に渡す。通常観測は保存だけを行う。
+pause中も入力は保持するが判断を開始しない。pause解除がsettledより先でも、slotを重ねず次回へ進む。
+`not_started`は取得済みbatchを保持し、開始後のsettledは取消済みでも消費する。曖昧な失敗は再送しない。
+
+容量超過は同期的に失敗を固定し、実行bindingを無効化・Piを取消してから`fault`を通知する。
+その後のチャットも`-32004`で拒否し、world再接続だけでは回復しない。
+hook受付時点でrawイベントは保存済みなので、容量超過でも`stored` ACKと履歴は維持する。停止後も観測保存を続けられる。
+ゲームへのエラー表示は未配線で、RPCの明示エラーとruntimeの`fault`を提供する段階である。
+
+退出時は古い揮発入力を次のbindingへ移さず、起動途中のcleanupと実子プロセスの終了を待ってから次の所有者を起動する。
+起動中の明示`close()`は受付と新規実行を直ちに止め、既存の期限付き起動・cleanup完了を待つ。
+終了確認に失敗したらcleanup promiseを失敗のまま保ち、leaseを回収したり次を起動したりしない。
+
+[隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
+ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
+実際の取消・子プロセス終了は[所有者の既存境界検証](<../src/runtime/piSession.test.ts>)へ分離する。
+26ケース中25ケースが成功したが、quoteを多く含む受付済みbatchの通信容量を確認する1ケースは**RED**である。
+同じunit test内で、保留JSON約544 KBがPiのprompt envelopeで再escapeされると1 MiBを超えることを再現する。
+実Piは入力を受信イベントにも含めて返すため、送信側だけの拡張では解決しない。
+通信上限の方針確認と回帰修正まで、このcheckpointは利用可能なschedulerの完成ではない。
+active-play timer、CLI / Mod接続、実Piでのscheduler受入は未実装・未実施である。
 
 ## 推論設定
 

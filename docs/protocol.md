@@ -1,7 +1,7 @@
 # 通信プロトコル
 
 codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driver、隔離Pi sessionの起動管理は実装済み。
-schedulerとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
+schedulerは[checkpoint実装](<scheduling.md#実行制御checkpoint>)で通信容量の整合が未解決。タイマーとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
 [実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
