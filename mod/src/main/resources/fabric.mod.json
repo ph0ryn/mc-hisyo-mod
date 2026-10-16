@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "mc_hisyo",
+  "version": "${version}",
+  "name": "MC Hisyo",
+  "description": "Fabric client interface for the AI Director.",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "io.github.ph0ryn.mchisyo.McHisyoClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": "${loaderVersion}",
+    "minecraft": "${minecraftVersion}",
+    "java": ">=21",
+    "fabric-api": "${fabricApiVersion}"
+  }
+}
