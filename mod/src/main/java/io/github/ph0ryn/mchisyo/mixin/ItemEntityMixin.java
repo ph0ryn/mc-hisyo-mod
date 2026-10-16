@@ -24,7 +24,7 @@ abstract class ItemEntityMixin {
         int before = stack.getCount();
         boolean succeeded = original.call(inventory, stack);
         // Capture here: playerTouch later restores the original count after a full pickup.
-        ServerObservations.itemPickedUp(player, (ItemEntity) (Object) this, itemId, before, stack.getCount(), succeeded);
+        ServerObservations.itemPickedUp(player, (ItemEntity) (Object) this, itemId, before, stack.getCount());
         return succeeded;
     }
 }

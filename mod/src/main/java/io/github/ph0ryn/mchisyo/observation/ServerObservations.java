@@ -272,10 +272,10 @@ public final class ServerObservations {
     }
 
     public static void itemPickedUp(ServerPlayer player, ItemEntity entity, String itemId,
-            int before, int remaining, boolean succeeded) {
+            int before, int remaining) {
         ServerObservations observations = active;
         if (observations == null || !observations.scoped(player)) return;
-        int count = SnapshotDeltaTracker.consumedAmount(succeeded, before, remaining);
+        int count = SnapshotDeltaTracker.consumedAmount(before, remaining);
         if (count == 0) return;
         observations.emit(player, "item_picked_up", Map.of("itemId", itemId, "count", count,
                 "remainingCount", remaining, "entityId", entity.getUUID().toString(),

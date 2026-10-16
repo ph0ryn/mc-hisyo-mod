@@ -174,9 +174,10 @@ public final class SnapshotDeltaTracker {
                 : List.of("advancement_criterion_granted");
     }
 
-    /** Immediate entity remainder, before playerTouch restores a fully consumed stack's count. */
-    public static int consumedAmount(boolean succeeded, int before, int remaining) {
-        return succeeded && before > 0 && remaining >= 0 && remaining < before ? before - remaining : 0;
+    /** Immediate entity remainder, before playerTouch restores a fully consumed stack's count.
+     * Inventory.add may return false after partial consumption and a final no-progress retry. */
+    public static int consumedAmount(int before, int remaining) {
+        return before > 0 && remaining >= 0 && remaining < before ? before - remaining : 0;
     }
 
     public static int successfulCount(boolean succeeded, int count) {
