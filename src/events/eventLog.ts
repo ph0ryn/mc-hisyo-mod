@@ -1,4 +1,6 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+import { maxPiFrameBytes } from "../pi/piFraming.js";
+import { defaultMaxFrameBytes } from "../transport/jsonLines.js";
 import { validateScope, type GameEvent, type WorldScope } from "../protocol/gameEvent.js";
 import { EventCatalog, type EventFilter } from "./eventCatalog.js";
 import {
@@ -8,8 +10,12 @@ import {
   type DirectorActivity,
 } from "./directorActivity.js";
 
-// Reserve space for the existing JSON-RPC/tool envelope below the 1 MiB wire cap.
-export const eventPageBytes = 1024 * 1024 - 4096;
+// Page JSON has no raw controls: Pi's escaped content costs <=2x, plus details <=1x.
+// ponytail: wrappers/call metadata get 4096 bytes; measure envelopes if they grow.
+export const eventPageBytes = Math.min(
+  defaultMaxFrameBytes - 4096,
+  Math.floor((maxPiFrameBytes - 4096) / 3),
+);
 export type StoredHistory = StoredEvent | { id: number; observation: DirectorActivity };
 
 export interface StoredEvent {

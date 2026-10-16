@@ -2,6 +2,8 @@ import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { EventEmitter } from "node:events";
 import { expect, test, vi } from "vite-plus/test";
 import type { DirectorBridge } from "../bridge/directorBridge.js";
+import { maxPiFrameBytes } from "../pi/piFraming.js";
+import { defaultMaxFrameBytes } from "../transport/jsonLines.js";
 import { JudgmentScheduler } from "../runtime/judgmentScheduler.js";
 import type { JudgmentBatch } from "../runtime/judgmentQueue.js";
 import { startPiSession } from "../runtime/piSession.js";
@@ -206,6 +208,39 @@ test("byte-bounded escaped-text pages resume without loss or duplication", () =>
     after = page.nextCursor;
   } while (after < 24);
   expect(seen).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
+});
+
+test("quote-heavy history pages fit TCP and native Pi tool results across cursors", () => {
+  const quoted = { ...input, data: { text: '"'.repeat(16_000) } };
+  const rows = Array.from({ length: 32 }, (_, i) => row(i + 1, quoted));
+  const seen: number[] = [];
+  let after = 0;
+  do {
+    const f = log(port([[{ id: 32 }], rows.slice(after), [{ found: 0 }]]));
+    const page = f.log.search({ worldId: "world", playerId: "player" }, { after, through: 32 });
+    expect(page.through).toBe(32);
+    expect(page.events.every((entry) => entry.observation.data.text === quoted.data.text)).toBe(
+      true,
+    );
+    expect(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: "9007199254740991", result: page })),
+    ).toBeLessThan(defaultMaxFrameBytes);
+    // Existing extension result and installed Pi's native tool_execution_end emitter.
+    const toolEnd = {
+      type: "tool_execution_end",
+      toolCallId: "history-call",
+      toolName: "get_recent_events",
+      result: { content: [{ type: "text", text: JSON.stringify(page) }], details: page },
+      isError: false,
+      durationMs: 1,
+    };
+    expect(Buffer.byteLength(JSON.stringify(toolEnd))).toBeLessThanOrEqual(maxPiFrameBytes);
+    seen.push(...page.events.map((entry) => entry.id));
+    if (page.nextCursor === undefined) break;
+    expect(page.nextCursor).toBeGreaterThan(after);
+    after = page.nextCursor;
+  } while (after < 32);
+  expect(seen).toEqual(Array.from({ length: 32 }, (_, i) => i + 1));
 });
 
 test("oversized future game records fail explicitly instead of dropping or truncating", () => {
