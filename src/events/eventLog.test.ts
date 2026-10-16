@@ -115,6 +115,9 @@ test("every current Director activity fits individually at maximum escaped text 
   const text = "\u0000".repeat(16_000);
   const maxBinding = { worldId: id, playerId: id, worldSessionId: id };
   const samples: [string, Record<string, unknown>][] = [
+    ["session_attached", { beforeAttachment: "unknown" }],
+    ["status_reported", { paused: false }],
+    ["session_detached", { reason: "link_closed", afterLastObservation: "unknown" }],
     ["player_input", { text }],
     ["hud_displayed", { runId: id, text }],
     [
@@ -448,6 +451,120 @@ test("actual scheduler stores request reasons before judge and stops on storage 
       await scheduler.close();
     }
   }
+});
+
+test("lifecycle history preserves initial false reports and FIFO facts without native event fiction", () => {
+  const facts = [
+    activity(binding, "director.session_attached", { beforeAttachment: "unknown" }, 100),
+    ...[false, true, false].map((paused, i) =>
+      activity(binding, "director.status_reported", { paused }, 101 + i),
+    ),
+    activity(
+      binding,
+      "director.session_detached",
+      {
+        reason: "link_closed",
+        afterLastObservation: "unknown",
+      },
+      104,
+    ),
+  ];
+  const f = log();
+  facts.forEach((fact, i) => {
+    expect(f.log.appendActivity(fact)).toEqual({ id: i + 1, observation: fact });
+    expect(f.calls[i]!.args.slice(3, 6)).toEqual([null, fact.event, fact.observedAt]);
+    expect(JSON.parse(f.calls[i]!.args[6] as string)).toEqual(fact);
+    expect(f.calls[i]!.args.slice(7)).toEqual([null, null]);
+    for (const key of ["seq", "tick", "position", "dimension", "runId"])
+      expect(fact).not.toHaveProperty(key);
+  });
+  expect(facts.slice(1, 4).map((fact) => fact.data)).toEqual([
+    { paused: false },
+    { paused: true },
+    { paused: false },
+  ]);
+});
+
+test("unknown lifecycle coverage is searchable across sessions and is not a numeric sequence gap", () => {
+  const previous = activity(
+    binding,
+    "director.session_detached",
+    {
+      reason: "bridge_shutdown",
+      afterLastObservation: "unknown",
+    },
+    100,
+  );
+  const current = activity(
+    { ...binding, worldSessionId: "next-session" },
+    "director.session_attached",
+    { beforeAttachment: "unknown" },
+    200,
+  );
+  const rows = [previous, current].map((fact, i) => ({
+    ...row(i + 1, fact),
+    session_id: fact.worldSessionId,
+    event: fact.event,
+    observed_at: fact.observedAt,
+  }));
+  const f = log(port([[{ id: 2 }], rows, [{ found: 0 }]]));
+  const first = f.log.search({ worldId: "world", playerId: "player" }, { limit: 1 });
+  expect(first).toEqual({
+    events: [{ id: 1, observation: previous }],
+    through: 2,
+    hasKnownGaps: false,
+    nextCursor: 1,
+  });
+  expect(f.calls[1]!.args).toEqual(["world", "player", 0, 2, 2]);
+  const next = log(port([[{ id: 2 }], [rows[1]!], [{ found: 0 }]]));
+  expect(
+    next.log.search(
+      { worldId: "world", playerId: "player" },
+      { after: first.nextCursor, through: first.through },
+    ),
+  ).toEqual({
+    events: [{ id: 2, observation: current }],
+    through: 2,
+    hasKnownGaps: false,
+  });
+});
+
+test("lifecycle schemas reject fabricated coverage, unsafe reasons and nonboolean reports before writes or decoding", () => {
+  for (const [event, data] of [
+    ["session_attached", { beforeAttachment: "complete" }],
+    ["status_reported", { paused: "false" }],
+    ["status_reported", { paused: false, before: false }],
+    ["session_detached", { reason: "/private/token", afterLastObservation: "unknown" }],
+    ["session_detached", { reason: "link_closed", afterLastObservation: "complete" }],
+  ] as const) {
+    const invalid = { ...input, event: `director.${event}`, data };
+    const f = log();
+    expect(() => f.log.appendActivity(invalid)).toThrow();
+    expect(f.calls).toEqual([]);
+    const stored = { ...row(1, invalid), event: invalid.event };
+    expect(() => log(port([[{ id: 1 }], [stored], [{ found: 0 }]])).log.search(binding)).toThrow();
+  }
+  directorActivityCatalog.validateFilter("director.status_reported", { paused: false });
+  expect(() =>
+    directorActivityCatalog.validateFilter("director.status_reported", { paused: "false" }),
+  ).toThrow();
+  expect(() => new EventCatalog(gameEventDefinitions).get("director.session_attached")).toThrow();
+});
+
+test("lifecycle recording failures propagate without retry or fabricated successful rows", () => {
+  const f = log(port([], 1));
+  const fact = activity(
+    binding,
+    "director.session_detached",
+    {
+      reason: "game_detached",
+      afterLastObservation: "unknown",
+    },
+    100,
+  );
+  expect(() => f.log.appendActivity(fact)).toThrow("storage failed");
+  expect(f.calls).toHaveLength(1);
+  expect(f.transactions).toEqual([]);
 });
 
 test("v1 and unknown schema versions fail before even write-affecting PRAGMAs", () => {
