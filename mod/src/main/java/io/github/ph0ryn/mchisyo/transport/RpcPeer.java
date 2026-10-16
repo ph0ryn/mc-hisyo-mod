@@ -7,7 +7,6 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.Strictness;
 import io.github.ph0ryn.mchisyo.protocol.JsonRpc;
-import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -54,31 +53,13 @@ public final class RpcPeer implements AutoCloseable {
         final CompletableFuture<JsonElement> result = new CompletableFuture<>();
         Deadline deadline;
     }
-    // Numeric IDs remain numeric and exact, with 1 and 1.0 identifying the same active request.
+    // Active identity matches TS JSON.parse/Set; the original ID is retained separately for echo.
     private record Id(int kind, String value) {
         static Id of(JsonElement id) {
             if (id.isJsonNull()) return new Id(0, "");
             if (id.getAsJsonPrimitive().isString()) return new Id(1, id.getAsString());
-            return new Id(2, numericKey(id.getAsString()));
-        }
-        // BigDecimal itself narrows exponent/scale to int, unlike the shared finite-number schema.
-        private static String numericKey(String number) {
-            int e = Math.max(number.indexOf('e'), number.indexOf('E'));
-            String mantissa = e < 0 ? number : number.substring(0, e);
-            BigInteger exponent = e < 0 ? BigInteger.ZERO : new BigInteger(number.substring(e + 1));
-            int point = mantissa.indexOf('.');
-            if (point >= 0) {
-                exponent = exponent.subtract(BigInteger.valueOf(mantissa.length() - point - 1L));
-                mantissa = mantissa.substring(0, point) + mantissa.substring(point + 1);
-            }
-            boolean negative = mantissa.charAt(0) == '-';
-            int start = negative ? 1 : 0;
-            while (start < mantissa.length() && mantissa.charAt(start) == '0') start++;
-            if (start == mantissa.length()) return "0";
-            int end = mantissa.length();
-            while (mantissa.charAt(end - 1) == '0') end--;
-            exponent = exponent.add(BigInteger.valueOf(mantissa.length() - end));
-            return (negative ? "-" : "") + mantissa.substring(start, end) + "e" + exponent;
+            double number = id.getAsDouble(); // Already validated finite by JsonRpc.
+            return new Id(2, Double.toString(number == 0.0 ? 0.0 : number)); // SameValueZero merges ±0.
         }
     }
 

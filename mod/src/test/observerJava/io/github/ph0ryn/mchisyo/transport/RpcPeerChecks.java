@@ -20,6 +20,7 @@ public final class RpcPeerChecks {
         equal(null, RpcPeerChecks.class.getClassLoader().getResource("net/fabricmc/loader/api/FabricLoader.class"), "no Fabric runtime");
         correlation();
         dispatch();
+        activeIdIdentity();
         invalidForms();
         limitsAndRetirement();
         System.out.println("RpcPeerChecks: " + checks + " assertions passed (pure manual ports/deadlines only)");
@@ -60,10 +61,13 @@ public final class RpcPeerChecks {
         peer.handle("secret", params -> { throw new IllegalStateException("token/source/params"); });
         peer.handle("domain", params -> CompletableFuture.failedFuture(new RpcError(-32602, "Bad params", JsonNull.INSTANCE)));
         rejects(() -> peer.handle("echo", params -> deferred), "duplicate handler");
-        for (String id : List.of("null", "1.25", "1e100", "1e-2147483649", "9007199254740993", "\"\"", "\"" + "x".repeat(256) + "\"")) {
+        for (String id : List.of("null", "1.25", "1e100", "1e-2147483649", "9007199254740993", "\"\"", "\"" + "x".repeat(256) + "\"", "-0", "1.0000000000000001")) {
             feed(peer, "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"echo\",\"params\":{\"日\":null}}\n");
             JsonObject response = port.frame(port.frames.size() - 1).getAsJsonObject();
             equal(json(id), response.get("id"), "inbound ID preserved");
+            if (response.get("id").isJsonPrimitive() && response.getAsJsonPrimitive("id").isNumber()) {
+                equal(id, response.get("id").getAsString(), "numeric ID literal text echoed without rounding");
+            }
             equal(json("{\"日\":null}"), response.get("result"), "reverse request result");
         }
         feed(peer, "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"wait\"}\n");
@@ -83,6 +87,36 @@ public final class RpcPeerChecks {
         equal(1, notifications[0], "reverse notification dispatched");
         equal(before + 4, port.frames.size(), "notification sends no response");
         peer.close();
+    }
+
+    private static void activeIdIdentity() {
+        for (List<String> ids : List.of(List.of("-0", "0"), List.of("1e-2147483649", "0"), List.of("1.0000000000000001", "1"))) {
+            Manual port = new Manual(); RpcPeer peer = new RpcPeer(port);
+            CompletableFuture<JsonElement> deferred = new CompletableFuture<>();
+            int[] dispatched = {0};
+            peer.handle("wait", params -> { dispatched[0]++; return deferred; });
+            feed(peer, "{\"jsonrpc\":\"2.0\",\"id\":" + ids.get(0) + ",\"method\":\"wait\"}\n");
+            equal(false, peer.isClosed(), "first finite numeric ID accepted");
+            feed(peer, "{\"jsonrpc\":\"2.0\",\"id\":" + ids.get(1) + ",\"method\":\"wait\"}\n");
+            equal(true, peer.isClosed(), "SameValueZero active IDs fail-close: " + ids);
+            equal(1, dispatched[0], "duplicate ID never dispatches a second handler");
+            equal(1, port.closes, "duplicate ID closes owner once");
+            deferred.complete(JsonNull.INSTANCE);
+            equal(0, port.frames.size(), "duplicate and late completion send no response");
+        }
+        for (List<String> ids : List.of(List.of("9007199254740992", "9007199254740994"), List.of("1", "\"1\""))) {
+            Manual port = new Manual(); RpcPeer peer = new RpcPeer(port);
+            CompletableFuture<JsonElement> deferred = new CompletableFuture<>();
+            int[] dispatched = {0};
+            peer.handle("wait", params -> { dispatched[0]++; return deferred; });
+            for (String id : ids) feed(peer, "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"wait\"}\n");
+            equal(false, peer.isClosed(), "representable doubles and numeric/string kinds remain distinct: " + ids);
+            equal(2, dispatched[0], "distinct active IDs both dispatch");
+            equal(0, port.frames.size(), "distinct handlers remain unresolved together");
+            deferred.complete(JsonNull.INSTANCE);
+            equal(2, port.frames.size(), "distinct active requests both complete");
+            peer.close();
+        }
     }
 
     private static void invalidForms() {
@@ -158,7 +192,7 @@ public final class RpcPeerChecks {
         exact.handle("wait", x -> new CompletableFuture<>());
         feed(exact, "{\"jsonrpc\":\"2.0\",\"id\":9007199254740992,\"method\":\"wait\"}\n");
         feed(exact, "{\"jsonrpc\":\"2.0\",\"id\":9007199254740993,\"method\":\"wait\"}\n");
-        equal(false, exact.isClosed(), "numeric IDs not narrowed through double/integer width"); exact.close();
+        equal(true, exact.isClosed(), "binary64-rounded duplicate active IDs close"); exact.close();
         Manual notificationFailure = new Manual(); RpcPeer rejected = new RpcPeer(notificationFailure);
         rejected.handle("a", x -> CompletableFuture.failedFuture(new IllegalStateException("private")));
         feed(rejected, "{\"jsonrpc\":\"2.0\",\"method\":\"a\"}\n");
