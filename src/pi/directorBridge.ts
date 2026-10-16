@@ -140,13 +140,13 @@ export default function directorBridge(pi: ExtensionAPI): void {
   );
   tool(
     "list_event_types",
-    "List events observed by this attached game, including filter fields and observation limitations.",
+    "List attached-game hook capabilities and searchable-only CLI Director activities, with explicit origin, hookability, filters and observation limitations.",
     EmptySchema,
     "director.events.list",
   );
   tool(
     "get_recent_events",
-    "Search this world/player event history. Scalar filters are type-sensitive AND matches; inspect gap flags and page cursors.",
+    "Search game and Director activity history for this world/player across sessions. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches; inspect gap flags. Requests/matches do not prove provider execution.",
     eventArgs,
     "director.events.get",
   );

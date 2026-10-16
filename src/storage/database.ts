@@ -4,19 +4,31 @@ import { DatabaseSync } from "node:sqlite";
 export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   try {
-    const version = db.prepare("PRAGMA user_version").get()?.user_version;
-    if (typeof version !== "number") throw new Error("Invalid stored database version");
-    if (version !== 0 && version !== 1) throw new Error(`Unsupported database version: ${version}`);
-    db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 1000;");
-    if (version === 0) {
-      db.exec(`
+    initializeDatabase(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+/** Version 1 cannot represent truthful CLI-origin facts. Deliberately no migration. */
+export function initializeDatabase(db: Pick<DatabaseSync, "prepare" | "exec">): void {
+  const version = db.prepare("PRAGMA user_version").get()?.user_version;
+  if (typeof version !== "number" || (version !== 0 && version !== 2))
+    throw new Error(
+      "Unsupported database schema: expected version 2. Preserve the existing database and select a new empty data directory; automatic migration is not supported.",
+    );
+  db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 1000;");
+  if (version === 0) {
+    db.exec(`
         BEGIN IMMEDIATE;
         CREATE TABLE events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           world_id TEXT NOT NULL,
           player_id TEXT NOT NULL,
           session_id TEXT NOT NULL,
-          seq INTEGER NOT NULL,
+          seq INTEGER CHECK(seq IS NULL OR seq > 0),
           event TEXT NOT NULL,
           observed_at INTEGER NOT NULL,
           observation_json TEXT NOT NULL CHECK(json_valid(observation_json)),
@@ -36,13 +48,8 @@ export function openDatabase(path: string): DatabaseSync {
           instruction TEXT NOT NULL
         ) STRICT;
         CREATE INDEX hooks_scope ON response_hooks(world_id, player_id, event);
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         COMMIT;
       `);
-    }
-    return db;
-  } catch (error) {
-    db.close();
-    throw error;
   }
 }

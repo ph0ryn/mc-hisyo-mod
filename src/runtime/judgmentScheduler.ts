@@ -200,6 +200,8 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
     try {
       world.batch ??= world.queue.take();
       if (!world.batch) return;
+      // Synchronous durable reasons before the attempt; not evidence a provider ran.
+      this.#options.bridge.emit("judgmentRequested", world.batch);
       world.flight = world.session
         .judge(JSON.stringify(world.batch))
         .then((result) => {

@@ -4,6 +4,14 @@ import { createServer, type AddressInfo, type Socket } from "node:net";
 import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { EventLog, StoredEvent } from "../events/eventLog.js";
+import {
+  activity,
+  directorActivityCatalog,
+  displayedActivity,
+  isDirectorActivity,
+  judgmentActivities,
+} from "../events/directorActivity.js";
+import type { JudgmentBatch } from "../runtime/judgmentQueue.js";
 import type { ResponseHook, ResponseHooks } from "../hooks/responseHooks.js";
 import {
   EmptySchema,
@@ -57,6 +65,7 @@ export class DirectorBridge extends EventEmitter<{
   agentReady: [];
   runInvalidated: [binding: RunBinding, reason: string];
   observation: [stored: StoredEvent, hooks: ResponseHook[]];
+  judgmentRequested: [batch: JudgmentBatch];
   peerClosed: [role: BridgeRole | undefined, reason: Error];
   fault: [error: Error];
 }> {
@@ -79,7 +88,13 @@ export class DirectorBridge extends EventEmitter<{
       throw new Error("Invalid bridge token");
     const timeout = options.helloTimeoutMs ?? 5_000;
     if (!Number.isSafeInteger(timeout) || timeout <= 0) throw new Error("Invalid hello timeout");
+    if (options.eventLog.db !== options.hooks.db)
+      throw new Error("History and hooks must share one database");
     this.#options = options;
+    this.on("judgmentRequested", (batch) => {
+      this.#requireWorld(batch.binding);
+      this.#storage(() => options.eventLog.appendActivities(judgmentActivities(batch)));
+    });
     this.#server.maxConnections = 4;
     this.#server.on("error", (error) => this.emit("fault", error));
   }
@@ -296,8 +311,19 @@ export class DirectorBridge extends EventEmitter<{
       const world = this.#requireWorld(params);
       if (!world.supportedEvents.includes(params.event))
         throw new RpcError(-32602, "Unadvertised event");
-      const stored = this.#options.eventLog.append(params);
-      this.emit("observation", stored, this.#options.hooks.match(params));
+      const stored = this.#storage(() => this.#options.eventLog.append(params));
+      const hooks = this.#storage(() => this.#options.hooks.match(params));
+      this.#storage(() =>
+        this.#options.eventLog.appendActivities(
+          hooks.map((hook) =>
+            activity(world.binding, "director.hook_matched", {
+              hookId: hook.id,
+              sourceEventId: stored.id,
+            }),
+          ),
+        ),
+      );
+      this.emit("observation", stored, hooks);
       return { stored: stored.id };
     });
     this.#register(connection, "game.player_message", "game", PlayerMessageSchema, (params) => {
@@ -305,6 +331,11 @@ export class DirectorBridge extends EventEmitter<{
       if (!params.text.trim()) throw new RpcError(-32602, "Player message is blank");
       if (this.#closing || !connection.ready || !this.#playerMessageIntake)
         throw new RpcError(-32003, "Director is not accepting player messages");
+      this.#storage(() =>
+        this.#options.eventLog.appendActivity(
+          activity(world.binding, "director.player_input", { text: params.text }),
+        ),
+      );
       this.#playerMessageIntake.accept(world.binding, params.text);
       return { accepted: true };
     });
@@ -312,14 +343,41 @@ export class DirectorBridge extends EventEmitter<{
       const scope = this.#requireRun(params);
       this.#requireEvent(params.event);
       const { event, filter, instruction } = params;
+      if (!instruction.trim()) throw new RpcError(-32602, "Hook instruction is blank");
+      this.#options.hooks.catalog.validateFilter(event, filter ?? {});
       const input = filter === undefined ? { event, instruction } : { event, filter, instruction };
-      return this.#options.hooks.add(scope, input);
+      return this.#storage(() =>
+        this.#options.eventLog.atomic(() => {
+          const hook = this.#options.hooks.add(scope, input);
+          this.#options.eventLog.appendActivity(
+            activity(params, "director.hook_added", {
+              runId: params.runId,
+              hookId: hook.id,
+              event: hook.event,
+              filter: hook.filter,
+              instruction: hook.instruction,
+            }),
+          );
+          return hook;
+        }),
+      );
     });
     this.#register(connection, "director.hooks.remove", "agent", HookRemoveSchema, (params) => {
-      return { removed: this.#options.hooks.remove(this.#requireRun(params), params.id) };
+      const scope = this.#requireRun(params);
+      return this.#storage(() =>
+        this.#options.eventLog.atomic(() => {
+          const removed = this.#options.hooks.remove(scope, params.id);
+          if (removed)
+            this.#options.eventLog.appendActivity(
+              activity(params, "director.hook_removed", { runId: params.runId, hookId: params.id }),
+            );
+          return { removed };
+        }),
+      );
     });
     this.#register(connection, "director.hooks.list", "agent", HookListRequestSchema, (params) => {
-      return this.#options.hooks.list(this.#requireRun(params), params.query);
+      const scope = this.#requireRun(params);
+      return this.#storage(() => this.#options.hooks.list(scope, params.query));
     });
     this.#register(
       connection,
@@ -327,15 +385,30 @@ export class DirectorBridge extends EventEmitter<{
       "agent",
       EventSearchRequestSchema,
       (params) => {
-        return this.#options.eventLog.search(this.#requireRun(params), params.query);
+        const scope = this.#requireRun(params);
+        const { event, filter } = params.query;
+        if (filter !== undefined && event === undefined)
+          throw new RpcError(-32602, "A filter requires an event");
+        if (event !== undefined)
+          (isDirectorActivity(event)
+            ? directorActivityCatalog
+            : this.#options.eventLog.catalog
+          ).validateFilter(event, filter ?? {});
+        return this.#storage(() => this.#options.eventLog.search(scope, params.query));
       },
     );
     this.#register(connection, "director.events.list", "agent", RunBindingSchema, (params) => {
       this.#requireRun(params);
       return {
-        events: this.#options.eventLog.catalog
-          .list()
-          .filter((definition) => this.#world!.supportedEvents.includes(definition.name)),
+        events: [
+          ...this.#options.eventLog.catalog
+            .list()
+            .filter((definition) => this.#world!.supportedEvents.includes(definition.name))
+            .map((definition) => ({ ...definition, origin: "game", hookable: true })),
+          ...directorActivityCatalog
+            .list()
+            .map((definition) => ({ ...definition, origin: "cli", hookable: false })),
+        ],
       };
     });
     this.#register(connection, "game.state.get", "agent", GameStateRequestSchema, (params) =>
@@ -363,6 +436,11 @@ export class DirectorBridge extends EventEmitter<{
   }
 
   #requireEvent(name: string): void {
+    if (isDirectorActivity(name))
+      throw new RpcError(
+        -32602,
+        "Director activities are searchable only, not game hook capabilities",
+      );
     if (
       !(
         this.#world?.supportedEvents ??
@@ -381,16 +459,36 @@ export class DirectorBridge extends EventEmitter<{
     this.emit("detach", world.binding);
   }
 
+  #storage<T>(operation: () => T): T {
+    try {
+      return operation();
+    } catch (error) {
+      this.invalidateRun("storage_failed");
+      this.emit(
+        "fault",
+        error instanceof Error ? error : new Error("History storage failed", { cause: error }),
+      );
+      throw error;
+    }
+  }
+
   async #forward(
     method: string,
     params: RunBinding & Record<string, unknown>,
     schema: typeof GameStateResultSchema | typeof SendMessageResultSchema,
   ): Promise<unknown> {
     this.#requireRun(params);
-    const result = await this.#game!.peer.call(method, params);
-    this.#requireRun(params);
-    if (!Check(schema, result) || !sameRunBinding(result, params))
+    // Capture literal request data before awaiting; never retarget a delayed display fact.
+    const captured = structuredClone(params);
+    const result = await this.#game!.peer.call(method, captured);
+    if (method !== "game.message.send") this.#requireRun(captured);
+    if (!Check(schema, result) || !sameRunBinding(result, captured))
       throw new RpcError(-32603, "Invalid game result or binding");
+    if (method === "game.message.send")
+      this.#storage(() =>
+        this.#options.eventLog.appendActivity(displayedActivity(captured, result)),
+      );
+    this.#requireRun(captured);
     return result;
   }
 }
