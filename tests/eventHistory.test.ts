@@ -41,7 +41,7 @@ describe("durable event history and response hooks", () => {
 
     const resumed = open(path, catalog);
     expect(resumed.log.search(scope).events).toEqual([{ id: 1, observation: fixture }]);
-    expect(resumed.hooks.list(scope)).toEqual([]);
+    expect(resumed.hooks.list(scope)).toEqual({ hooks: [] });
   });
 
   it("matches exact AND filters, persists hook instructions, and removes only within scope", () => {

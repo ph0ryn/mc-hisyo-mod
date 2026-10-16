@@ -10,7 +10,7 @@ import {
 } from "../events/eventCatalog.js";
 import { validateScope, type GameEvent, type WorldScope } from "../protocol/gameEvent.js";
 
-const HookInputSchema = Type.Object(
+export const HookInputSchema = Type.Object(
   {
     event: Type.String({ minLength: 1, maxLength: 128 }),
     filter: Type.Optional(EventFilterSchema),
@@ -19,6 +19,18 @@ const HookInputSchema = Type.Object(
   { additionalProperties: false },
 );
 export type HookInput = Static<typeof HookInputSchema>;
+export const HookListOptionsSchema = Type.Object(
+  {
+    after: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+  },
+  { additionalProperties: false },
+);
+export type HookListOptions = Static<typeof HookListOptionsSchema>;
+export interface HookPage {
+  hooks: ResponseHook[];
+  nextCursor?: string;
+}
 export interface ResponseHook {
   id: string;
   event: string;
@@ -76,12 +88,19 @@ export class ResponseHooks {
     return hook;
   }
 
-  list(scope: WorldScope): ResponseHook[] {
+  list(scope: WorldScope, options: HookListOptions = {}): HookPage {
     validateScope(scope);
-    return this.db
-      .prepare("SELECT * FROM response_hooks WHERE world_id = ? AND player_id = ? ORDER BY rowid")
-      .all(scope.worldId, scope.playerId)
+    if (!Check(HookListOptionsSchema, options)) throw new Error("Invalid hook list options");
+    const limit = options.limit ?? 8;
+    const hooks = this.db
+      .prepare(
+        "SELECT * FROM response_hooks WHERE world_id = ? AND player_id = ? AND id > ? ORDER BY id LIMIT ?",
+      )
+      .all(scope.worldId, scope.playerId, options.after ?? "", limit + 1)
       .map(decodeRow);
+    if (hooks.length <= limit) return { hooks };
+    hooks.pop();
+    return { hooks, nextCursor: hooks.at(-1)!.id };
   }
 
   remove(scope: WorldScope, id: string): boolean {

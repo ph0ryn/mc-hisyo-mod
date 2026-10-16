@@ -1,6 +1,7 @@
 # 通信プロトコル
 
-以下は接続実装時の案。[実装済みの範囲](<development.md>)は別に管理する。
+codecと認証・bindingを扱うbridgeは実装済みだが、CLI・Mod・Piへの配線は未完了。
+以下はその通信契約と、接続時の起動案。[実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
 | --- | --- | --- |
@@ -18,9 +19,11 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 3. 接続先、起動ごとのトークン、プロトコルバージョンを、ユーザー専用の接続情報ファイルへ保存する。
 4. Modが接続情報を読み、CLIへ接続する。
 5. `bridge.hello`でトークン、役割、プロトコルバージョンを確認する。
-6. ワールド入場時、Modがワールド・プレイヤー情報と対応イベント一覧を通知する。
-7. CLIがPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
-8. Pi拡張がCLIへ接続し、準備が整ったら最初の判断を開始する。
+6. Modが`game.attach`でworld / player・対応イベント・pausedを送り、新しいsession bindingを受け取る。
+7. Modがbindingと要求handlerを準備してから`game.ready`を送る。attach応答前にrunを開始しない。
+8. CLIがPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
+9. Pi拡張も認証し、handlerの準備後に`director.ready`を送る。
+10. 両者がreadyかつunpausedなら、CLIが`game.run.bind`と`director.run.bind`のACKを待ち、判断を開始する。
 
 接続情報ファイルの配置場所は実装時に確定する。
 秘密情報を含むため所有ユーザーだけが読める権限にし、トークンをログへ出さない。
@@ -39,7 +42,7 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 - イベントなど、応答が不要な通知には`id`を付けない。
 - TCPの受信単位とJSONの境界は一致しないため、LFまでバイト列を蓄積して解析する。
 - Piのstdoutは標準RPC専用とし、診断ログはstderrへ分ける。
-- 送受信のバックプレッシャーを扱う。フレームサイズと要求時間にも上限を設け、具体値は検証時に決める。
+- 送受信のバックプレッシャーを扱う。フレームサイズと要求時間の開発用上限は次節を参照。実ゲーム計測で見直す。
 
 CLIからModへの要求例。
 
@@ -50,7 +53,7 @@ CLIからModへの要求例。
 Modからの応答例。
 
 ```json
-{"jsonrpc":"2.0","id":"game-19","result":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","tick":12040,"inventory":[{"itemId":"minecraft:cobblestone","count":7}]}}
+{"jsonrpc":"2.0","id":"game-19","result":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","state":{"tick":12040,"inventory":[{"itemId":"minecraft:cobblestone","count":7}]}}}
 ```
 
 Modからのイベント通知例。
@@ -61,14 +64,15 @@ Modからのイベント通知例。
 
 `seq`は`worldSessionId`内で1から増加するイベント番号とし、順序や欠損の確認に使う。
 共通schemaとイベント定義は[gameEvent.ts](<../src/protocol/gameEvent.ts>)、
-共有fixtureは[blockBroken.json](<../tests/fixtures/protocol/blockBroken.json>)を参照。
+共有fixtureは[blockBroken.json](<../tests/fixtures/protocol/blockBroken.json>)と
+[observerEvents.json](<../tests/fixtures/protocol/observerEvents.json>)を参照。
 Modは収集できるイベントの部分集合だけを通知し、CLIのschema一覧を収集実績と混同しない。
 
 ## 実装済みの通信codec
 
 [JSON-RPC schema](<../src/protocol/jsonRpc.ts>)、[JSONL framing](<../src/transport/jsonLines.ts>)、
 [RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
-[実TCPテスト](<../tests/rpcPeer.test.ts>)で確認する。認証やDirector本体にはまだ配線していない。
+[実TCPテスト](<../tests/rpcPeer.test.ts>)で確認する。認証bridgeでもこのpeerを使う。
 
 - JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
 - UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
@@ -86,24 +90,52 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 上限値は開発用の仮値であり、実ゲームでのイベント量測定は未実施。
 切断で既に実行された副作用を取り消せるわけではない。
-認証・役割・world / run bindingと、ゲームスレッド上の再検証はこのcodecの所有者側で実装する。
+認証・役割・world / run bindingは次のbridgeが担う。ゲームスレッド上の再検証はModへの配線時に実装する。
+
+## 実装済みの認証・binding bridge
+
+[DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
+[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。CLIの起動・接続情報公開・Piのabortはまだ接続していない。
+
+- loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。
+- helloは`protocolVersion: 1`、`role: "game" | "agent"`、43文字のbase64url tokenを厳密に検証する。
+  起動ごとの256-bit tokenを呼出側が用意し、bridgeは定時間比較する。
+  tokenを知る信頼済みプロセス間の境界であり、token所持者同士の役割偽装を防ぐものではない。
+- attachで新しいsessionを発行する。`game.ready`まではattach完了を通知せず、runを開始しない。
+  agentも`director.ready`が必要。両者のbind ACK後、現在のbindingを再確認してからrun開始を返す。
+- pause・detach・切断でrunを即時無効化し、Modへ`game.run.clear`を通知する。
+  clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。
+- 判断はsingle-flight。無効化してもslotを保持し、呼出側が`agent_settled`を確認して`finishRun`するまで次を開始しない。
+- Tool要求にはworld / player / session / runの完全一致が必要。Modからの応答もawait後にbindingを再確認する。
+  ゲームスレッドへ渡した処理の直前にも、Modが同じ検証を行う必要がある。
+- game eventのscopeとsessionを検証し、raw保存の後でhook照合を通知する。偽のscopeは保存せず接続を閉じる。
+  イベント一覧・hook追加は、接続Modが広告したcapabilityに制限する。
+- 転送結果はbinding付きの厳密な外側envelope。状態は`state`、表示成功は`displayed: true`。
+  状態queryと`state`内部の具体的な形式はMod接続時に確定する。
+- 起動途中の`close()`もlistenerの解放まで待つ。閉じたbridgeは再起動せず、新しいinstanceを使う。
 
 ## 主な通信メソッド
 
-| メソッド案 | 要求・通知の方向 | 処理 |
+| メソッド | 要求・通知の方向 | 処理 |
 | --- | --- | --- |
 | `bridge.hello` | Mod / Pi拡張 → CLI | 接続の初期確認 |
-| `game.attach` | Mod → CLI | ワールド・プレイヤー・対応イベントの登録 |
+| `game.attach` / `game.ready` | Mod → CLI | sessionの発行と準備完了 |
+| `director.ready` | Pi拡張 → CLI | 拡張の準備完了 |
+| `game.run.bind` / `director.run.bind` | CLI → Mod / Pi拡張 | 判断bindingを準備しACKを返す |
+| `game.run.clear` | CLI → Mod | 一致する判断bindingの無効化通知 |
 | `game.status` | Mod → CLI | プレイ中・ポーズ中などの状態通知 |
 | `game.detach` | Mod → CLI | ワールド退出通知 |
 | `game.event` | Mod → CLI | ゲーム内イベントの通知 |
 | `game.player_message` | Mod → CLI | プレイヤーからAIへのチャット入力 |
 | `game.state.get` | Pi拡張 → CLI → Mod | ゲーム状態の取得 |
 | `game.message.send` | Pi拡張 → CLI → Mod | AIの発言表示 |
-| `director.context.get` | Pi拡張 → CLI | 最新状態と起動理由などの取得 |
-| `director.hooks.add` / `remove` / `list` | Pi拡張 → CLI | hookの管理 |
+| `director.context.get`（予定） | Pi拡張 → CLI | 最新状態と起動理由などの取得 |
+| `director.hooks.add` / `remove` / `list` | Pi拡張 → CLI | hookの管理とページング |
 | `director.events.get` | Pi拡張 → CLI | イベント履歴と既知の欠損の取得 |
 | `director.events.list` | Pi拡張 → CLI | 対応イベント、schema、照合可能フィールドの一覧 |
+
+`director.context.get`以外はbridge側にhandlerまたは送信処理がある。
+この表はMod / Pi側のhandlerやCLI起動処理の完成を意味しない。
 
 ## 切断・失敗時の扱い
 

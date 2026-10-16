@@ -27,6 +27,20 @@
 - 不正notificationの後で後続観測を続行しないこと。
 - 結果未返却や結果上限超過を空データの成功扱いにしないこと。
 
+### 認証・binding bridge
+
+[bridgeの実TCPテスト](<../tests/directorBridge.test.ts>)で次を確認した。CLI・Mod・Piの配線試験ではない。
+
+- token・role・version、認証前の操作、重複role、capabilityの制限。
+- attach応答後の`game.ready`までrunを開始せず、game / agent両方のbind ACKを待つこと。
+- raw保存後のhook照合、偽scopeの拒否、履歴・hookのscope隔離。
+- pause後の即時拒否、無効化後もsettled確認までslotを保持すること。
+- world交換後の遅い状態応答を破棄し、表示は`displayed: true`を要求すること。
+- 起動と同時のcloseでlistenerを残さないこと。
+- 16,000文字の指示を持つ70 hooksを最大8件ずつ列挙できること。
+
+起動・終了競合と大量hook一覧は、失敗を再現してから修正した。
+
 ### Fabricビルド
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11を固定し、

@@ -8,8 +8,9 @@
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
 - 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
+- 認証付きloopback bridgeで、role・ready・world / run binding・古い応答の拒否を実TCPで検証する。
 
-**ゲームとPiを接続するDirector本体はまだ未実装。**
+**CLI・Mod・Piを結ぶ起動処理とschedulerはまだ未実装。**
 CLIはヘルプと引数検証だけを提供する。Modのobserverは空のclient initializerへまだ登録していない。
 実ゲーム、実モデル、有料APIでの受入確認は行っていない。
 設計資料のToolや通信メソッドは、実装済み機能の一覧ではない。
@@ -87,14 +88,16 @@ slot差分から「拾った」「クラフトした」とは断定しない。
   イベント種別、filter、時刻条件、ページサイズで欠損を隠さない。
 - `hasKnownGaps: false`は完全な観測を保証しない。切断中、新session前後、observerの捕捉限界による欠落は検出できない。
 - hookの追加・一覧・削除・照合はworld / playerに隔離し、再接続後も保持する。
+- hook一覧はID辞書順、既定8件・最大8件。`nextCursor`を次の`after`へ渡す。
+  履歴の`through`とは異なりsnapshotではない。[一覧の契約](<tools.md>)を参照。
 
 SQLiteにはschema versionを保存し、未対応versionは自動変換せず停止する。
 現在は初期version 1のみで、過去の公開schemaからの移行はまだない。
 
 ## 次の段階
 
-codecはまだCLIへ配線していない。[通信codecの契約](<protocol.md#実装済みの通信codec>)を基に、
-認証hello、world / run binding、Pi拡張の接続、
+認証bridgeはまだCLIへ配線していない。[通信の契約](<protocol.md>)を基に、
+CLIのprivate接続情報公開と起動・終了処理、Pi拡張の接続、
 observerの登録・送信、単一実行scheduler、pause・切断・再開の順に接続する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
