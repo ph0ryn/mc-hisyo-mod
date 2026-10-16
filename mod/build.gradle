@@ -56,8 +56,14 @@ tasks.register('observerTest', JavaExec) {
     args fixtures.absolutePath
 }
 
+tasks.register('transportTest', JavaExec) {
+    dependsOn tasks.named('observerTestClasses')
+    classpath = sourceSets.observerTest.runtimeClasspath
+    mainClass = 'io.github.ph0ryn.mchisyo.transport.TransportChecks'
+}
+
 tasks.named('check') {
-    dependsOn tasks.named('observerTest')
+    dependsOn tasks.named('observerTest'), tasks.named('transportTest')
 }
 
 processResources {
