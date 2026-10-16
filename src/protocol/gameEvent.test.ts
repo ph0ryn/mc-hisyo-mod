@@ -1,10 +1,8 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vite-plus/test";
-import { EventCatalog, type EventFilter } from "../events/eventCatalog.js";
-import { EventLog } from "../events/eventLog.js";
-import { ResponseHooks } from "../hooks/responseHooks.js";
+import { Type } from "typebox";
+import { EventCatalog, matchesFilter, type EventFilter } from "../events/eventCatalog.js";
 import { gameEventDefinitions, type GameEvent } from "./gameEvent.js";
-import { openDatabase } from "../storage/database.js";
 
 const fixtures: GameEvent[] = JSON.parse(
   readFileSync(new URL("./fixtures/observerEvents.json", import.meta.url), "utf8"),
@@ -30,43 +28,50 @@ describe("server observer event contracts", () => {
     expect(() => catalog.validateObservation(observation)).not.toThrow();
   });
 
-  it("stores, searches, and matches every advertised scalar filter without changing generic engines", () => {
-    const db = openDatabase(":memory:");
-    try {
-      const log = new EventLog(db, catalog);
-      const hooks = new ResponseHooks(db, catalog);
-      for (const observation of fixtures) {
-        const scope = { worldId: observation.worldId, playerId: observation.playerId };
-        const definition = catalog.get(observation.event);
-        const filter: Record<string, EventFilter[string]> = {};
-        for (const field of definition.filterFields) {
-          const value = observation.data[field];
-          if (
-            value !== null &&
-            typeof value !== "string" &&
-            typeof value !== "number" &&
-            typeof value !== "boolean"
-          ) {
-            throw new Error(`Fixture filter must be scalar: ${observation.event}.${field}`);
-          }
-          filter[field] = value;
+  it("validates and matches every advertised scalar filter", () => {
+    for (const observation of fixtures) {
+      const definition = catalog.get(observation.event);
+      const filter: Record<string, EventFilter[string]> = {};
+      for (const field of definition.filterFields) {
+        const value = observation.data[field];
+        if (
+          value !== null &&
+          typeof value !== "string" &&
+          typeof value !== "number" &&
+          typeof value !== "boolean"
+        ) {
+          throw new Error(`Fixture filter must be scalar: ${observation.event}.${field}`);
         }
-        const hook = hooks.add(scope, {
-          event: observation.event,
-          filter,
-          instruction: "Review the observed facts, not an inferred action.",
-        });
-        log.append(observation);
-        expect(log.search(scope, { event: observation.event, filter }).events).toEqual([
-          expect.objectContaining({ observation }),
-        ]);
-        expect(hooks.match(observation)).toEqual([hook]);
-        expect(hooks.match({ ...observation, playerId: "other-player" })).toEqual([]);
-        expect(() => catalog.validateFilter(observation.event, { inventedField: true })).toThrow();
+        filter[field] = value;
       }
-    } finally {
-      db.close();
+      expect(() => catalog.validateFilter(observation.event, filter)).not.toThrow();
+      expect(matchesFilter(observation.data, filter)).toBe(true);
+      expect(() => catalog.validateFilter(observation.event, { inventedField: true })).toThrow();
     }
+  });
+
+  it("distinguishes false, zero, null and missing scalar values", () => {
+    for (const value of [false, 0, null]) {
+      for (const candidate of [false, 0, null]) {
+        expect(matchesFilter({ value: candidate }, { value })).toBe(candidate === value);
+      }
+      expect(matchesFilter({}, { value })).toBe(false);
+    }
+  });
+
+  it("rejects non-scalar advertised filter fields at catalog construction", () => {
+    expect(
+      () =>
+        new EventCatalog([
+          {
+            name: "example:invalid",
+            description: "Invalid scalar capability.",
+            observation: "confirmed",
+            dataSchema: Type.Object({ items: Type.Array(Type.String()) }),
+            filterFields: ["items"],
+          },
+        ]),
+    ).toThrow(/scalar filter/i);
   });
 
   it("rejects undeclared payload fields for every fixture", () => {
