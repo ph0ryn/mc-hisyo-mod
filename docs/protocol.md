@@ -1,5 +1,7 @@
 # 通信プロトコル
 
+以下は接続実装時の案。[実装済みの範囲](<development.md>)は別に管理する。
+
 | 接続 | 方式 | 用途 |
 | --- | --- | --- |
 | CLI ↔ Fabric Mod | ローカルTCP、UTF-8のJSONL、JSON-RPC 2.0 | イベント通知、状態取得、発言表示 |
@@ -26,7 +28,8 @@ Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形
 
 `worldId`は保存されたワールドを、`worldSessionId`は今回の接続・入場を識別する。
 再接続・再入場時には新しい`worldSessionId`を割り当てる。
-実行開始時の識別子をTool要求にも引き継ぎ、CLIは現在の接続と一致することを確認する。
+`worldId`と`playerId`が永続化scope、`worldSessionId`と判断ごとの`runId`が実行bindingとなる。
+実行開始時の識別子をTool要求にも引き継ぎ、CLIとゲームスレッドの両方で現在の接続と一致することを確認する。
 古い実行の要求を、新しく接続したワールド向けに付け替えない。
 
 ## メッセージ形式
@@ -53,10 +56,13 @@ Modからの応答例。
 Modからのイベント通知例。
 
 ```json
-{"jsonrpc":"2.0","method":"game.event","params":{"worldSessionId":"w1","seq":85,"tick":12042,"event":"block_broken","data":{"blockId":"minecraft:stone","position":[10,64,20]}}}
+{"jsonrpc":"2.0","method":"game.event","params":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","seq":85,"tick":12042,"observedAt":1792130000000,"event":"block_broken","dimension":"minecraft:overworld","position":[10.5,64,20.5],"data":{"blockId":"minecraft:stone","position":[10,64,20]}}}
 ```
 
-`seq`は`worldSessionId`内で増加するイベント番号とし、順序や欠損の確認に使う。
+`seq`は`worldSessionId`内で1から増加するイベント番号とし、順序や欠損の確認に使う。
+共通schemaとイベント定義は[gameEvent.ts](<../src/protocol/gameEvent.ts>)、
+共有fixtureは[blockBroken.json](<../tests/fixtures/protocol/blockBroken.json>)を参照。
+Modは収集できるイベントの部分集合だけを通知し、CLIのschema一覧を収集実績と混同しない。
 
 ## 主な通信メソッド
 
@@ -69,12 +75,11 @@ Modからのイベント通知例。
 | `game.event` | Mod → CLI | ゲーム内イベントの通知 |
 | `game.player_message` | Mod → CLI | プレイヤーからAIへのチャット入力 |
 | `game.state.get` | Pi拡張 → CLI → Mod | ゲーム状態の取得 |
-| `game.recipes.get` | Pi拡張 → CLI → Mod | レシピの取得 |
 | `game.message.send` | Pi拡張 → CLI → Mod | AIの発言表示 |
 | `director.context.get` | Pi拡張 → CLI | 最新状態と起動理由などの取得 |
 | `director.hooks.add` / `remove` / `list` | Pi拡張 → CLI | hookの管理 |
-| `director.events.get` | Pi拡張 → CLI | イベント履歴の取得 |
-| `director.memory.search` | Pi拡張 → CLI | 観測記憶の検索 |
+| `director.events.get` | Pi拡張 → CLI | イベント履歴と既知の欠損の取得 |
+| `director.events.list` | Pi拡張 → CLI | 対応イベント、schema、照合可能フィールドの一覧 |
 
 ## 切断・失敗時の扱い
 
@@ -84,7 +89,8 @@ Modからのイベント通知例。
 - 必須コンテキストを取得できない場合、その判断を止める。
 - 発言表示など、処理済みか不明な要求を自動再送しない。
 - 再接続時は最新状態を取得し、イベント欠損があれば明示する。古いhook発火をまとめて再実行しない。
-- 同じワールドでは既存hookと記憶を参照できるようにし、再開時にLLMが状況を確認する。
+- 同じワールド・プレイヤーでは既存hookと履歴を参照できるようにし、再開時にLLMが状況を確認する。
+- 既知の連番欠損がない場合でも、切断中やsession前後の観測を保証しない。
 - PATH上のPiを起動できない場合は、起動エラーとして表示する。
 
 ## 一次資料

@@ -11,7 +11,8 @@
     "format": "vp fmt",
     "test": "vp test",
     "build": "vp pack",
-    "verify": "vp check && vp pack && vp test"
+    "verify": "vp check && vp pack && vp test",
+    "verify:pi": "node tests/pi/runProbe.mjs"
   },
   "dependencies": {
     "typebox": "1.3.37"
