@@ -13,7 +13,12 @@ import {
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { DirectorBridge } from "../bridge/directorBridge.js";
-import { directorToolNames, physicalModelApis } from "../pi/piPolicy.js";
+import {
+  assertNativePiModel,
+  nativePiModelsConfig,
+  type NativePiModel,
+} from "../pi/nativePiModel.js";
+import { directorToolNames } from "../pi/piPolicy.js";
 import { PiRunError, startPiRpcClient, type PiJudgment } from "../pi/piRpcClient.js";
 import { sameWorldBinding, type RunBinding, type WorldBinding } from "../protocol/bridge.js";
 import type { ConnectionInfo } from "./connectionFile.js";
@@ -29,21 +34,7 @@ export interface PiSessionOptions {
   bundledExtension: string;
   /** Trusted executable wrapper; never untrusted game/model arguments. */
   prefixArgs?: readonly string[];
-  model: {
-    provider: string;
-    id: string;
-    api: string;
-    baseUrl: string;
-    apiKey: string;
-    definition: {
-      name: string;
-      reasoning: boolean;
-      input: ("text" | "image")[];
-      contextWindow: number;
-      maxTokens: number;
-      cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-    };
-  };
+  model: NativePiModel;
   readyTimeoutMs?: number;
   requestTimeoutMs?: number;
   judgmentTimeoutMs?: number;
@@ -137,35 +128,10 @@ function prepareFiles(options: PiSessionOptions) {
       { flag: "wx", mode: 0o600 },
     );
     const model = options.model;
-    writeFileSync(
-      join(agent.path, "models.json"),
-      JSON.stringify({
-        providers: {
-          [model.provider]: {
-            api: model.api,
-            baseUrl: model.baseUrl,
-            apiKey: "${MC_HISYO_MODEL_API_KEY}",
-            models: [
-              {
-                id: model.id,
-                name: model.definition.name,
-                reasoning: model.definition.reasoning,
-                input: model.definition.input,
-                contextWindow: model.definition.contextWindow,
-                maxTokens: model.definition.maxTokens,
-                cost: {
-                  input: model.definition.cost.input,
-                  output: model.definition.cost.output,
-                  cacheRead: model.definition.cost.cacheRead,
-                  cacheWrite: model.definition.cost.cacheWrite,
-                },
-              },
-            ],
-          },
-        },
-      }),
-      { flag: "wx", mode: 0o600 },
-    );
+    writeFileSync(join(agent.path, "models.json"), JSON.stringify(nativePiModelsConfig(model)), {
+      flag: "wx",
+      mode: 0o600,
+    });
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
       HOME: home.path,
@@ -231,16 +197,7 @@ export async function startPiSession(options: PiSessionOptions): Promise<PiSessi
     throw new Error("Pi session already owned on this bridge");
   if (!isAbsolute(options.bundledExtension))
     throw new Error("Bundled Pi extension path must be absolute");
-  if (
-    !physicalModelApis.has(options.model.api) ||
-    !options.model.apiKey ||
-    !options.model.provider ||
-    !options.model.id ||
-    options.model.id.startsWith(`${options.model.provider}/`)
-  )
-    throw new Error(
-      "Choose an explicit physical API-key model without a provider-prefix-colliding ID",
-    );
+  assertNativePiModel(options.model);
   if (
     options.readyTimeoutMs !== undefined &&
     (!Number.isSafeInteger(options.readyTimeoutMs) || options.readyTimeoutMs <= 0)
@@ -325,6 +282,8 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     this.#client.on("fault", this.#fault);
     if (this.#client.isRetired) throw new Error("Pi failed during startup");
     await ready;
+    await this.#client.initialize(signal);
+    signal.throwIfAborted();
     if (this.#retired || !options.bridge.isAgentReady)
       throw new Error("Pi readiness lost during startup");
   }

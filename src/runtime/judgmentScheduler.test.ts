@@ -119,17 +119,7 @@ function fixture(config: { ready?: boolean; paused?: boolean; maxPendingBytes?: 
     model: {
       provider: "test-provider",
       id: "test-model",
-      api: "openai-completions",
-      baseUrl: "http://127.0.0.1:1",
       apiKey: "unused",
-      definition: {
-        name: "Test",
-        reasoning: true,
-        input: ["text"],
-        contextWindow: 10_000,
-        maxTokens: 100,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      },
     },
     ...(config.maxPendingBytes === undefined ? {} : { maxPendingBytes: config.maxPendingBytes }),
   };
