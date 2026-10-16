@@ -20,8 +20,9 @@ public final class GameSessionChecks {
     private static void rejects(Runnable work) { try { work.run(); throw new AssertionError("accepted"); } catch (IllegalArgumentException expected) { check(!expected.toString().contains("SECRET")); } }
     private static final class Wire implements RpcPeer.Port {
         final List<JsonObject> sent = new ArrayList<>();
+        Runnable beforeSchedule = () -> {};
         public void write(byte[] bytes) { sent.add(json(new String(bytes, StandardCharsets.UTF_8))); }
-        public RpcPeer.Deadline schedule(long delay, Runnable work) { return () -> {}; }
+        public RpcPeer.Deadline schedule(long delay, Runnable work) { beforeSchedule.run(); return () -> {}; }
         public void close() {}
         JsonObject last() { return sent.getLast(); }
     }
@@ -153,6 +154,42 @@ public final class GameSessionChecks {
         reply(ackPeer, ackWire, RUN.worldBinding().toJson()); reply(ackPeer, ackWire, json("{\"ready\":true}"));
         CompletionStage<Void> invalidAck = ackSession.playerMessage("hello"); reply(ackPeer, ackWire, json("{\"accepted\":false}"));
         check(invalidAck.toCompletableFuture().isCompletedExceptionally()); check(ackPeer.isClosed());
+        Wire orderedWire = new Wire(); RpcPeer orderedPeer = new RpcPeer(orderedWire); Game orderedGame = new Game();
+        GameSession ordered = new GameSession(orderedPeer, orderedGame, WORLD, PLAYER, List.of(), false);
+        ordered.start(CompletableFuture.completedFuture(orderedPeer), "a".repeat(43));
+        reply(orderedPeer, orderedWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
+        reply(orderedPeer, orderedWire, RUN.worldBinding().toJson()); reply(orderedPeer, orderedWire, json("{\"ready\":true}"));
+        receive(orderedPeer, "game.run.bind", RUN.toJson(), 100);
+        receive(orderedPeer, "game.message.send", message, 101);
+        orderedWire.beforeSchedule = () -> {
+            orderedWire.beforeSchedule = () -> {};
+            // RpcPeer has reserved the true request but has not written it: the other caller resumes.
+            ordered.pause(false);
+            orderedGame.queue.remove().run();
+            check(orderedGame.displayed == 0);
+            check(orderedWire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+        };
+        ordered.pause(true);
+        List<JsonObject> statuses = orderedWire.sent.stream().filter(frame -> frame.has("method")
+                && frame.get("method").getAsString().equals("game.status")).toList();
+        check(statuses.size() == 2);
+        check(statuses.getFirst().getAsJsonObject("params").get("paused").getAsBoolean());
+        check(!statuses.getLast().getAsJsonObject("params").get("paused").getAsBoolean());
+        check(statuses.stream().allMatch(frame -> {
+            JsonObject params = frame.getAsJsonObject("params").deepCopy(); params.remove("paused");
+            return params.equals(RUN.worldBinding().toJson());
+        }));
+        int orderedFrames = orderedWire.sent.size(); ordered.pause(false);
+        check(orderedWire.sent.size() == orderedFrames); check(ordered.isReady());
+        orderedWire.beforeSchedule = () -> {
+            orderedWire.beforeSchedule = () -> {};
+            for (int i = 0; i < 31; i++) ordered.pause(i % 2 != 0);
+            check(!orderedPeer.isClosed()); // Head + 31 waiting transitions fit; the next must fail closed.
+            ordered.pause(true); check(orderedPeer.isClosed());
+        };
+        ordered.pause(true); // Closing reentrantly during scheduling must safely retire the drainer too.
+        check(!ordered.isReady()); check(orderedWire.sent.size() == orderedFrames);
+        ordered.pause(false); check(orderedWire.sent.size() == orderedFrames);
         System.out.println("GameSessionChecks: " + checks + " assertions (pure/manual ports only)");
     }
 }

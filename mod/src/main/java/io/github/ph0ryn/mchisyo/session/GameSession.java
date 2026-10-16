@@ -38,6 +38,7 @@ public final class GameSession implements AutoCloseable {
     private Object runIdentity;
     private long seq;
     private int eventPending;
+    private final ArrayDeque<JsonObject> statuses = new ArrayDeque<>();
 
     public GameSession(RpcPeer peer, GamePort game, String worldId, String playerId, List<String> events, boolean paused) {
         this.peer = Objects.requireNonNull(peer); this.game = Objects.requireNonNull(game);
@@ -123,15 +124,23 @@ public final class GameSession implements AutoCloseable {
         return result;
     }
     public void pause(boolean value) {
-        WorldBinding binding;
+        JsonObject params;
         synchronized (state) {
             if (closed || paused == value) return;
-            paused = value; invalidateRun(); binding = world;
-            if (!ready) binding = null;
+            paused = value; invalidateRun();
+            if (!ready || statuses.size() >= 32) params = null;
+            else {
+                params = world.toJson(); params.addProperty("paused", value); statuses.addLast(params);
+                // The head stays queued while its sole drainer calls the peer, outside this lock.
+                if (statuses.size() > 1) return;
+            }
         }
-        if (binding == null) { close(); return; }
-        JsonObject params = binding.toJson(); params.addProperty("paused", value);
-        request("game.status", params).thenAccept(ack -> { try { flag(ack, "paused", value); } catch (RuntimeException error) { close(); } });
+        if (params == null) { close(); return; }
+        do {
+            boolean expected = params.get("paused").getAsBoolean();
+            request("game.status", params).thenAccept(ack -> { try { flag(ack, "paused", expected); } catch (RuntimeException error) { close(); } });
+            synchronized (state) { statuses.pollFirst(); params = closed ? null : statuses.peekFirst(); }
+        } while (params != null);
     }
     public void observation(ObservedEvent event) {
         JsonObject params;
@@ -160,7 +169,7 @@ public final class GameSession implements AutoCloseable {
         } catch (RuntimeException error) { close(); return CompletableFuture.failedFuture(stale()); }
     }
     private void invalidateRun() { run = null; runIdentity = null; }
-    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); } }
+    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); statuses.clear(); } }
     @Override public void close() { invalidate(); peer.close(); }
     public static RpcError stale() { return new RpcError(-32001, "Inactive or stale execution binding"); }
     private static RpcError invalid() { return new RpcError(-32602, "Invalid method parameters"); }
