@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import { EventFilterSchema } from "../events/eventCatalog.js";
 import { HookInputSchema, HookListOptionsSchema } from "../hooks/responseHooks.js";
 import { GameEventSchema, WorldScopeSchema } from "./gameEvent.js";
+import { GameSnapshotSchema } from "./gameSnapshot.js";
 
 export const protocolVersion = 1;
 const identifier = GameEventSchema.properties.worldId;
@@ -101,14 +102,14 @@ export const EventSearchRequestSchema = Type.Object(
 export const GameStateRequestSchema = Type.Object(
   {
     ...RunBindingSchema.properties,
-    query: Type.Record(Type.String(), Type.Unknown()),
+    query: EmptySchema,
   },
   strict,
 );
 export const GameStateResultSchema = Type.Object(
   {
     ...RunBindingSchema.properties,
-    state: Type.Record(Type.String(), Type.Unknown()),
+    state: GameSnapshotSchema,
   },
   strict,
 );

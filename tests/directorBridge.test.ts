@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
+import { readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { afterEach, describe, expect, test } from "vite-plus/test";
 import { DirectorBridge } from "../src/bridge/directorBridge.js";
@@ -8,7 +9,9 @@ import { EventLog } from "../src/events/eventLog.js";
 import { ResponseHooks } from "../src/hooks/responseHooks.js";
 import type { RunBinding, WorldBinding } from "../src/protocol/bridge.js";
 import { gameEventDefinitions } from "../src/protocol/gameEvent.js";
+import type { GameSnapshot } from "../src/protocol/gameSnapshot.js";
 import { openDatabase } from "../src/storage/database.js";
+import { defaultMaxFrameBytes, encodeJsonLine } from "../src/transport/jsonLines.js";
 import { RpcPeer } from "../src/transport/rpcPeer.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -18,6 +21,9 @@ afterEach(async () => {
 
 const scope = { worldId: "world-a", playerId: "player-a" };
 const attachParams = { ...scope, supportedEvents: ["block_broken"], paused: false };
+const snapshot = JSON.parse(
+  readFileSync(new URL("./fixtures/protocol/gameSnapshot.json", import.meta.url), "utf8"),
+) as GameSnapshot;
 
 async function fixture() {
   const db = openDatabase(":memory:");
@@ -140,6 +146,167 @@ describe("authenticated director bridge over real TCP", () => {
     expect(f.eventLog.search(scope).events).toHaveLength(2);
   });
 
+  test.each([
+    ["empty state", {}],
+    ["missing inventory", { ...snapshot, inventory: undefined }],
+    ["missing capture time", { ...snapshot, observedAt: undefined }],
+    ["missing position", { ...snapshot, position: undefined }],
+    ["unsupported state version", { ...snapshot, version: 2 }],
+    ["unrecognized state field", { ...snapshot, guessed: true }],
+    ["nonintegral tick", { ...snapshot, tick: 1.5 }],
+    ["unsafe capture time", { ...snapshot, observedAt: Number.MAX_SAFE_INTEGER + 1 }],
+    ["invalid health", { ...snapshot, health: null }],
+    ["negative health", { ...snapshot, health: -1 }],
+    ["incomplete coordinates", { ...snapshot, position: [1, 64] }],
+    [
+      "missing main slot",
+      { ...snapshot, inventory: { ...snapshot.inventory, main: snapshot.inventory.main.slice(1) } },
+    ],
+    [
+      "invalid selected slot",
+      { ...snapshot, inventory: { ...snapshot.inventory, selectedSlot: 9 } },
+    ],
+    [
+      "missing equipment",
+      { ...snapshot, inventory: { ...snapshot.inventory, equipment: undefined } },
+    ],
+    [
+      "missing body slot",
+      {
+        ...snapshot,
+        inventory: {
+          ...snapshot.inventory,
+          equipment: { ...snapshot.inventory.equipment, body: undefined },
+        },
+      },
+    ],
+    [
+      "missing block coverage",
+      { ...snapshot, nearby: { ...snapshot.nearby, blocksComplete: undefined } },
+    ],
+    [
+      "oversized block sample",
+      {
+        ...snapshot,
+        nearby: { ...snapshot.nearby, blocks: Array(730).fill(snapshot.nearby.blocks[0]) },
+      },
+    ],
+    [
+      "oversized entity sample",
+      {
+        ...snapshot,
+        nearby: { ...snapshot.nearby, entities: Array(65).fill(snapshot.nearby.entities[0]) },
+      },
+    ],
+  ])("rejects %s instead of forwarding an unusable required snapshot", async (_label, state) => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    await f.attach(game);
+    const agent = await f.connect("agent");
+    const run = await f.bridge.beginRun();
+    game.handle("game.state.get", () => ({ ...run, state }));
+    await expect(agent.call("game.state.get", { ...run, query: {} })).rejects.toMatchObject({
+      code: -32603,
+    });
+  });
+
+  test.each([false, true])(
+    "accepts complete snapshots with explicit unknown coverage=%s",
+    async (unknown) => {
+      const f = await fixture();
+      const game = await f.connect("game");
+      await f.attach(game);
+      const agent = await f.connect("agent");
+      const run = await f.bridge.beginRun();
+      const state = unknown
+        ? {
+            ...snapshot,
+            biomeId: null,
+            nearby: { ...snapshot.nearby, blocksComplete: false, entitiesTruncated: true },
+          }
+        : snapshot;
+      game.handle("game.state.get", () => ({ ...run, state }));
+      expect(snapshot.inventory.main).toHaveLength(36);
+      expect(await agent.call("game.state.get", { ...run, query: {} })).toEqual({ ...run, state });
+    },
+  );
+
+  test.each(["界", "\u0000"])(
+    "maximum snapshot fits real TCP framing for %j identifiers",
+    async (character) => {
+      const f = await fixture();
+      const game = await f.connect("game");
+      await f.attach(game);
+      const agent = await f.connect("agent");
+      const run = await f.bridge.beginRun();
+      const identifier = character.repeat(128);
+      const counter = Number.MAX_SAFE_INTEGER;
+      const position = [-Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE];
+      const item = { itemId: identifier, count: counter };
+      const state = {
+        ...snapshot,
+        tick: counter,
+        observedAt: counter,
+        dayTime: -counter,
+        dimension: identifier,
+        biomeId: identifier,
+        position,
+        health: Number.MAX_VALUE,
+        maxHealth: Number.MAX_VALUE,
+        foodLevel: counter,
+        saturation: Number.MAX_VALUE,
+        experience: { level: counter, progress: 1, total: counter },
+        inventory: {
+          selectedSlot: 8,
+          main: Array(36).fill(item),
+          equipment: Object.fromEntries(
+            Object.keys(snapshot.inventory.equipment).map((slot) => [slot, item]),
+          ),
+        },
+        nearby: {
+          blockRadius: 4,
+          blocksComplete: true,
+          blocks: Array(729).fill({ blockId: identifier, position: [-counter, counter, counter] }),
+          entityRadius: 16,
+          entitiesTruncated: true,
+          entities: Array(64).fill({ entityId: identifier, entityType: identifier, position }),
+        },
+      };
+      // Budget maximum binding lengths and a numeric ID, as generated by our RpcPeer.
+      const budgetEnvelope = {
+        jsonrpc: "2.0",
+        id: counter,
+        result: {
+          worldId: identifier,
+          playerId: identifier,
+          worldSessionId: identifier,
+          runId: identifier,
+          state,
+        },
+      };
+      expect(encodeJsonLine(budgetEnvelope).length - 1).toBeLessThanOrEqual(defaultMaxFrameBytes);
+      game.handle("game.state.get", () => ({ ...run, state }));
+      expect(await agent.call("game.state.get", { ...run, query: {} })).toEqual({ ...run, state });
+    },
+  );
+
+  test("rejects an unimplemented query before requesting game state", async () => {
+    const f = await fixture();
+    const game = await f.connect("game");
+    await f.attach(game);
+    const agent = await f.connect("agent");
+    const run = await f.bridge.beginRun();
+    let requests = 0;
+    game.handle("game.state.get", () => {
+      requests++;
+      return { ...run, state: snapshot };
+    });
+    await expect(
+      agent.call("game.state.get", { ...run, query: { inventory: true } }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(requests).toBe(0);
+  });
+
   test("pause invalidates tools immediately but a new run waits for settled confirmation", async () => {
     const f = await fixture();
     const game = await f.connect("game");
@@ -179,7 +346,7 @@ describe("authenticated director bridge over real TCP", () => {
         release = resolve;
       });
     });
-    const pending = agent.call("game.state.get", { ...old, query: { inventory: true } });
+    const pending = agent.call("game.state.get", { ...old, query: {} });
     const rejected = expect(pending).rejects.toMatchObject({ code: -32001 });
     await entered;
     game.notify("game.detach", oldWorld);
@@ -187,7 +354,7 @@ describe("authenticated director bridge over real TCP", () => {
     expect(nextWorld.worldSessionId).not.toBe(oldWorld.worldSessionId);
     expect(f.bridge.finishRun(old)).toBe(true);
     const current = await f.bridge.beginRun();
-    release({ ...old, state: { tick: 10 } });
+    release({ ...old, state: snapshot });
     await rejected;
     expect(await agent.call("director.hooks.list", current)).toEqual({ hooks: [] });
     expect(await agent.call("director.events.get", { ...current, query: {} })).toMatchObject({

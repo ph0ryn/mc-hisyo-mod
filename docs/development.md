@@ -9,6 +9,7 @@
 - JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
 - 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
 - 認証付きloopback bridgeで、role・ready・world / run binding・古い応答の拒否を実TCPで検証する。
+- 必須の[現在状態snapshot](<gameState.md>)を検証し、空の状態、欠損field、未対応queryを拒否する。
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
 
 **Piの起動・接続、scheduler、Modへの配線はまだ未実装。**

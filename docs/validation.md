@@ -41,6 +41,21 @@
 
 起動・終了競合と大量hook一覧は、失敗を再現してから修正した。
 
+### 必須の現在状態snapshot
+
+同じ[実TCPテスト](<../tests/directorBridge.test.ts>)で[状態契約](<gameState.md>)を確認する。
+
+- 空のstate、必須fieldの欠損、未対応version、不正型・件数を拒否する。
+- 36 main slotと7 named equipmentを要求し、body slotの省略も許さない。
+- 明示的な`biomeId: null`、不完全なblock coverage、entityの打切りflagは値を変えず返す。
+- 未対応queryはModへ要求を転送する前に拒否する。
+- 729 blocks / 64 entities、上限長の文字列、大きな数値を持つ応答を実TCPで返す。
+  多バイト文字・JSON escape、最大長のbindingと`RpcPeer`が生成する数値request IDで1 MiB frame内と確認する。
+  codec自体は任意長の文字列IDも許すが、それらを含む全応答のframe適合を保証するテストではない。
+
+不完全なstateと未知のqueryを通してしまう**19件の失敗**を再現してから修正した。
+これはschema・binding・frame境界の検証であり、Modのcollectorや実ゲームでの取得性能・正確性の検証ではない。
+
 ### bridge-only CLIの起動・終了
 
 [packaged CLIのテスト](<../tests/cli.test.ts>)はビルド成果物を実際の子プロセスとして起動する。
@@ -91,7 +106,7 @@ Minecraftを起動せず、EULAに同意せず、既存ワールドを使用し�
 
 - アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。
 - 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
-- `get_game_state`のquery形式、Modが実際に広告するイベント部分集合。
+- Modが実際に広告するイベント部分集合と、baseline以外の状態queryを追加する際の取得範囲。
 - Pi会話の保存先・再開方法、ワールドUUIDの保存方法。履歴と接続情報の配置は確定済み。
 - ポーリングはactive play中60秒を仮値とし、優先順位、要求タイムアウト、フレームサイズを接続検証で決める。
 - ゲームのランチャー環境での接続先読込と、CLI起動環境でのPiのPATH解決。

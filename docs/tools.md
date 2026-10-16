@@ -12,10 +12,11 @@ CLIがPiのTool実行イベントを見て後から結果を注入する方式�
 | `list_response_hooks` | `after?`, `limit?` | CLIの登録内容をページングして返す |
 | `list_event_types` | なし | 接続Modが収集するイベント、確度、schema、filterフィールドを返す |
 | `get_recent_events` | `event?`, `filter?`, `since?`, `after?`, `through?`, `limit?` | CLIのイベント履歴を検索 |
-| `get_game_state` | `query` | Modから必要な生データを取得 |
+| `get_game_state` | `query: {}` | Modから必須baselineのsnapshotを取得 |
 
-`get_game_state`の対象には、所持数、周辺、ブロック、エンティティ、Mod環境などを想定する。
-最初に公開するqueryの形式は、対象バージョンで取得できるデータを調べて確定する。
+bridgeの`game.state.get`は[version 1の必須snapshot](<gameState.md>)を検証する。
+所持数と装備、位置・時刻・体力、範囲限定の周辺を返す契約で、未知のqueryキーは拒否する。
+Modの状態取得とPiのTool登録はまだ未接続。任意のNBT・Mod環境の取得は未対応。
 必要資材の計算と、現在の所持数との比較はLLMが行う。
 レシピ専用Toolは作らず、静的なゲームファイルの参照と、実行中の状態・イベント検索を分ける。
 OS上の読取Toolの具体的な権限は未確定であり、暗黙に有効にはしない。

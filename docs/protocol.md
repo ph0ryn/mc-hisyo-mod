@@ -68,14 +68,12 @@ SQLiteの検査はopen前のmetadata検査であり、稼働中にSQLiteのfile�
 CLIからModへの要求例。
 
 ```json
-{"jsonrpc":"2.0","id":"game-19","method":"game.state.get","params":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","query":{"inventory":true}}}
+{"jsonrpc":"2.0","id":"game-19","method":"game.state.get","params":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","query":{}}}
 ```
 
-Modからの応答例。
-
-```json
-{"jsonrpc":"2.0","id":"game-19","result":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","runId":"run-1","state":{"tick":12040,"inventory":[{"itemId":"minecraft:cobblestone","count":7}]}}}
-```
+応答の`result`は、要求と同じ4つのbinding fieldと`state`を持つ。
+`state`全体は[共有fixture](<../tests/fixtures/protocol/gameSnapshot.json>)、必須fieldと範囲は[現在状態の契約](<gameState.md>)を参照。
+一部のfieldだけを返す応答は受け付けない。
 
 Modからのイベント通知例。
 
@@ -116,7 +114,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 ## 実装済みの認証・binding bridge
 
 [DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
-[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。CLIの起動・接続情報公開・Piのabortはまだ接続していない。
+[実TCPテスト](<../tests/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済みで、Piのabortはまだ接続していない。
 
 - loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。
 - helloは`protocolVersion: 1`、`role: "game" | "agent"`、43文字のbase64url tokenを厳密に検証する。
@@ -131,8 +129,8 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
   ゲームスレッドへ渡した処理の直前にも、Modが同じ検証を行う必要がある。
 - game eventのscopeとsessionを検証し、raw保存の後でhook照合を通知する。偽のscopeは保存せず接続を閉じる。
   イベント一覧・hook追加は、接続Modが広告したcapabilityに制限する。
-- 転送結果はbinding付きの厳密な外側envelope。状態は`state`、表示成功は`displayed: true`。
-  状態queryと`state`内部の具体的な形式はMod接続時に確定する。
+- 転送結果はbinding付きの厳密なenvelope。表示成功は`displayed: true`。
+  状態は[version 1の必須snapshot](<gameState.md>)を検証し、不完全な`state`を拒否する。queryは`{}`のみ。
 - 起動途中の`close()`もlistenerの解放まで待つ。閉じたbridgeは再起動せず、新しいinstanceを使う。
 
 ## 主な通信メソッド
@@ -156,7 +154,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 | `director.events.list` | Pi拡張 → CLI | 対応イベント、schema、照合可能フィールドの一覧 |
 
 `director.context.get`以外はbridge側にhandlerまたは送信処理がある。
-この表はMod / Pi側のhandlerやCLI起動処理の完成を意味しない。
+この表はMod / Pi側のhandlerの完成を意味しない。CLI起動はbridge-onlyのみ実装済み。
 
 ## 切断・失敗時の扱い
 
