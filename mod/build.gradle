@@ -68,8 +68,14 @@ tasks.register('rpcPeerTest', JavaExec) {
     mainClass = 'io.github.ph0ryn.mchisyo.transport.RpcPeerChecks'
 }
 
+tasks.register('gameSessionTest', JavaExec) {
+    dependsOn tasks.named('observerTestClasses')
+    classpath = sourceSets.observerTest.runtimeClasspath
+    mainClass = 'io.github.ph0ryn.mchisyo.session.GameSessionChecks'
+}
+
 tasks.named('check') {
-    dependsOn tasks.named('observerTest'), tasks.named('transportTest'), tasks.named('rpcPeerTest')
+    dependsOn tasks.named('observerTest'), tasks.named('transportTest'), tasks.named('rpcPeerTest'), tasks.named('gameSessionTest')
 }
 
 processResources {
