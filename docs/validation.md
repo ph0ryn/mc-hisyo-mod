@@ -136,6 +136,20 @@ preflight中のidle abortが後から始まる判断を止めない失敗を実�
 OSがSIGKILL後も終了を返さない条件は再現していない。終了確認失敗時にleaseと予約を残す分岐はコードレビューで確認した。
 CLI schedulerやFabricへの配線試験ではない。
 
+### 判断理由の保留キュー
+
+[隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)の17ケースを通常の`verify`へ含める。
+公開queue APIと実SQLiteの履歴・hook照合を使い、Piやproviderは起動しない。
+
+- hookのない通常観測は保存だけを行い、開始・pollは各1予約、同文を含むチャットは受信順に保持する。
+- 発火済みhookの削除後も指示とイベント本文が変わらず、後から登録したhookは過去イベントへ発火しない。
+- 非一致イベントや欠けた連番を発火元へ混入させず、複数hookが一致してもイベント本文を複製しない。
+- batch取得後の入力・呼出側による変更を分離し、別world / player / 接続sessionを拒否する。
+- UTF-8・JSON escapeを含む正確な容量境界、単一hookの反復発火・複数hookの一括超過での継続拒否。
+- 超過した観測のraw履歴は残る。履歴をpending配送用の永続inboxとして再利用しない。
+
+初回の未実装moduleでの失敗から実装した。RPC受付・single-flight実行制御・timer・Pi取消には未接続で、その接続検証とは区別する。
+
 ### Production Pi拡張
 
 `pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
@@ -162,7 +176,8 @@ bootstrap不正と認証失敗はreadyにならず、後続promptでもモデル
 - 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
 - Modが実際に広告するイベント部分集合と、baseline以外の状態queryを追加する際の取得範囲。
 - ワールドUUIDの保存方法。Pi会話はprivateなworld / player別scopeで再開し、履歴と接続情報の配置も確定済み。
-- ポーリングはactive play中60秒を仮値とし、優先順位、処理待ち入力の上限時の扱い、要求タイムアウト、フレームサイズを接続検証で決める。
+- ポーリングはactive play中60秒を仮値とし、優先順位と容量・要求タイムアウト・フレームサイズの妥当性を接続検証で確認する。
+  保留入力の上限超過は明示エラーで停止し、黙示的な破棄や永続inboxは導入しない。
 - ゲームのランチャー環境での接続先読込と、CLI起動環境でのPiのPATH解決。
 
 レシピ専用機構や目標管理state machineは作らない。

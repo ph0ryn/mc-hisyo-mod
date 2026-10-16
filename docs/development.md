@@ -14,6 +14,7 @@
 - ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
+- [保留キュー](<scheduling.md#保留キュー実行制御未接続>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
 
 **scheduler、CLIとModへの配線はまだ未実装。**
 `--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
@@ -168,7 +169,8 @@ SQLiteにはschema versionを保存し、未対応versionは自動変換せず�
 
 bridge-only CLI、Pi拡張、stdio driver、隔離sessionの起動管理は実装済み。[通信の契約](<protocol.md>)を基に、
 単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
-schedulerの処理待ち入力が上限へ達した場合の方針は、黙示的な破棄を避けるため実装前に確定する。
+処理待ち入力の上限超過は明示エラーで判断停止する方針に確定し、保留キューへ実装した。
+RPC受付での拒否と、失敗時の実行取消はscheduler接続時に検証する。
 レシピ専用Toolや独立した目標管理state machineは作らず、
 ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
 OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。
