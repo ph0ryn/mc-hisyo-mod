@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.indexion/cache/
+mod/.gradle/
+mod/build/
+mod/run/
+*.log
+.DS_Store
