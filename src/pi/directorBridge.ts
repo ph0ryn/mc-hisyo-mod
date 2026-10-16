@@ -18,7 +18,7 @@ import {
   type RunBinding,
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
-import { physicalModelApis } from "./piPolicy.js";
+import { directorToolNames, physicalModelApis } from "./piPolicy.js";
 
 const strict = { additionalProperties: false } as const;
 const BootstrapSchema = Type.Object(
@@ -43,7 +43,6 @@ export default function directorBridge(pi: ExtensionAPI): void {
   let retired = false;
   let active = false;
   let abortActive: (() => void) | undefined;
-  const names: string[] = [];
 
   function retire(ctx?: ExtensionContext): void {
     // Abort is synchronous; throwing from a Pi context handler alone is not fail-closed.
@@ -65,7 +64,7 @@ export default function directorBridge(pi: ExtensionAPI): void {
     if (ctx.mode !== "rpc" || !ctx.model || !physicalModelApis.has(ctx.model.api))
       throw new Error("Director requires RPC mode and a validated physical model API");
     const actual = pi.getActiveTools().toSorted();
-    if (JSON.stringify(actual) !== JSON.stringify(names.toSorted()))
+    if (JSON.stringify(actual) !== JSON.stringify(directorToolNames.toSorted()))
       throw new Error("Director requires exactly its seven game tools");
   }
 
@@ -95,13 +94,12 @@ export default function directorBridge(pi: ExtensionAPI): void {
   }
 
   function tool<T extends TObject>(
-    name: string,
+    name: (typeof directorToolNames)[number],
     description: string,
     parameters: T,
     method: string,
     payload: (args: Static<T>) => Record<string, unknown> = (args) => args,
   ) {
-    names.push(name);
     pi.registerTool({
       name,
       label: name,
