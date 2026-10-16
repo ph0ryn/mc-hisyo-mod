@@ -1,7 +1,7 @@
 # ポーリングと応答hook
 
 保留キューと開始・チャット・一致hookのsingle-flight実行制御はcheckpoint実装済み。
-Piの通信容量との整合は未解決で、タイマー・CLI / Modへの配線も未完了。[実装状況](<development.md>)を参照。
+既定batchのPi通信容量回帰はunit testで修正を確認した。タイマー・CLI / Modへの配線は未完了。[実装状況](<development.md>)を参照。
 
 ## AIを起動する入口
 
@@ -128,10 +128,13 @@ hook受付時点でrawイベントは保存済みなので、容量超過でも`
 [隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
 ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
 実際の取消・子プロセス終了の旧境界suiteは削除済み。stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
-26ケース中25ケースが成功したが、quoteを多く含む受付済みbatchの通信容量を確認する1ケースは**RED**である。
-同じunit test内で、保留JSON約544 KBがPiのprompt envelopeで再escapeされると1 MiBを超えることを再現する。
-実Piは入力を受信イベントにも含めて返すため、送信側だけの拡張では解決しない。
-通信上限の方針確認と回帰修正まで、このcheckpointは利用可能なschedulerの完成ではない。
+26ケースが成功し、既知のquote-heavy通信容量回帰も修正した。同じ17件の入力・順序・raw容量のassertionを維持し、
+保留JSON 544,215 bytesがpromptで1,088,312 bytesになるケースをproductionと同じPi専用codecへ渡している。
+[純粋なframing unit test](<../src/pi/piFraming.test.ts>)では、既定上限ちょうど1 MiBの受付済みbatch、
+user echoと代表的な`agent_end`の受信、有限上限の境界・超過拒否、global codecの1 MiB維持も確認する。
+Pi送受信だけを2 MiB + 256 bytesへ分離し、キューの1 MiBと過負荷停止方針は変更していない。
+任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
+Pi側上限超過は引き続き明示失敗で停止する。これらのunit結果だけでscheduler全体の完成とは扱わない。
 active-play timer、CLI / Mod接続、実Piでのscheduler受入は未実装・未実施である。
 
 ## 推論設定

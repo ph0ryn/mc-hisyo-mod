@@ -6,9 +6,10 @@
 
 実TCP・HTTP・provider・子プロセス・実SQLiteを使う8 suiteを削除した。
 専用の偽実行file・provider・接続harness、任意Pi用のscriptと別設定も削除し、opt-inの形では残していない。
-本番の実装・容量方針・依存build承認は変更していない。
+そのcleanupでは本番の実装・容量方針・依存build承認を変更しなかった。
+続く修正ではPi専用の有限framingだけを分離し、キュー・TCPの1 MiB、送信待ち4 MiB、過負荷停止方針は維持した。
 
-残る発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`に一致する次の3 suiteだけである。
+現在の発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`に一致する次の4 suiteだけである。
 実行前にfixtureと依存portを監査し、実接続・実子プロセス・実DBを使わないことを確認した。
 静的な共有JSONの読込は行う。
 
@@ -16,15 +17,16 @@
 | --- | --- | --- |
 | [イベント契約](<../src/protocol/gameEvent.test.ts>) | 13種の共有fixture、schema/catalog、scalar filterと純粋な完全一致 | 22成功 |
 | [保留キュー](<../src/runtime/judgmentQueue.test.ts>) | literalの`StoredEvent`とhookを公開APIへ渡す | 17成功 |
-| [scheduler](<../src/runtime/judgmentScheduler.test.ts>) | bridgeイベント・同期受付とPi session factoryだけをstub化 | 25成功、既知RED 1件 |
+| [scheduler](<../src/runtime/judgmentScheduler.test.ts>) | bridgeイベント・同期受付とPi session factoryだけをstub化 | 26成功 |
+| [Pi framing](<../src/pi/piFraming.test.ts>) | 公開queueとpure codecで送受信サイズ・有限上限を検証 | 6成功 |
 
 依存配置済みのlocal runnerを直接使った今回の結果：
 
 - `./node_modules/.bin/vp check`：format・型検査付きlint成功。
 - `./node_modules/.bin/vp pack`：ESMビルド成功。CLIやPiは起動していない。
-- `./node_modules/.bin/vp test`：**65件中64成功・1失敗**、3 suite、skipや名前filterなし。
+- `./node_modules/.bin/vp test --run`：**71件全成功**、4 suite、skipや名前filterなし。
 
-したがって`verify`相当は未完了。失敗を削除・緩和・skipしてgreenにはしていない。
+`verify`相当のcheck・pack・全unit testは成功した。実接続や実Piの受入確認とは区別する。
 先の`pnpm install --frozen-lockfile --prefer-offline`はgenai/protobufjsの未承認buildで終了1となり、
 pnpm経由のfocused testも収集前に同じ問題で停止した。その時点ではテストは実行されていない。
 その後は再install・依存build承認をせず、既存local runnerだけを用いた。
@@ -41,7 +43,8 @@ pnpm経由のfocused testも収集前に同じ問題で停止した。その時�
 
 ### Single-flight scheduler checkpoint
 
-scheduler suiteは変更せず、ファイル・SQLite・TCP・子プロセスなしで次を確認する。
+scheduler suiteの既存入力・assertionは維持し、quote-heavyケースのcodecだけをproductionのPi専用helperへ接続した。
+ファイル・SQLite・TCP・子プロセスなしで次を確認する。
 
 - ready前は起動せず、ready済みworldの開始理由を1回取り込む。初期pauseと設定snapshot。
 - 同文チャット順序、渡された発火hookと保存ID、通常観測をpromptへ混ぜないこと。
@@ -50,10 +53,21 @@ scheduler suiteは変更せず、ファイル・SQLite・TCP・子プロセス�
 - close promiseの解決まで次所有者を起動せず、旧worldの揮発入力を再送しないこと。
 - 起動途中の退出・close、起動失敗、曖昧な判断失敗、cleanup失敗、同期close再入。
 
-quote-heavy batchの通信容量回帰1件は**REDのまま**独立再現した。
-受付済み約544 KBのJSONを公開codecでPi prompt envelopeへ包むだけで1 MiBを超え、
-`JSONL frame exceeds byte limit`になる。これはI/Oなしの互換性回帰であり、このcleanupで容量は修正していない。
-実Piの入力echoも容量評価の論点だが、今回の実行対象ではない。
+cleanup直後のbaselineは65件中64成功・既知RED 1件で、同じ結果を再実行した。
+受付済みJSON 544,215 bytesがprompt envelopeでは1,088,312 bytesとなり、従来の共通1 MiBでは拒否された。
+Pi helper分離・境界test追加後も旧上限のままでは71件中66成功・5失敗となるREDを先に確認し、修正後は71件全成功となった。
+元の17件のquote-heavy入力、順序、raw容量assertionを削除・緩和・skipしていない。
+
+### Pi専用framing
+
+- 判断messageのraw上限を既定batchと同じ1 MiBへ揃え、送受信frameだけを2 MiB + 256 bytesへ分離した。
+- 上限ちょうど1 MiBの公開queue受付済みbatchで、promptとuser echoをproductionのpure codec / decoderへ通す。
+- quote-heavy入力のuser start / endと、user + 小さなassistant応答の`agent_end`をdecodeし、大きな応答を含む集約frameは超過として拒否する。
+- Piの改行を除くbyte上限ちょうどを許可し、1 byte超過は送信・改行あり受信・未完了frame受信のいずれも拒否する。
+- raw制御文字の再escapeが上限を超える場合は明示拒否し、6 MiBへの拡大を行わない。共通codecの1 MiB超過拒否も維持する。
+
+入力echoの形はPi 1.2.0のsourceと照合したが、実Piは今回起動していない。
+任意の`maxPendingBytes`拡大、任意raw文字列、全ての集約event / Tool結果 / モデル出力の配送保証ではなく、超過は明示失敗のままである。
 タイマー、CLI / Modの配線、実Piでのscheduler受入は未実装・未実施。
 
 ## 削除したcoverage
@@ -101,7 +115,7 @@ Java 21 / Loom 1.17.21 / Gradle 9.7.1で`build`を確認した過去の記録が
 
 13種類のobserverと、Minecraft / Fabricをclasspathから除外した純Java `observerTest`の**93 assertions**は過去に成功した。
 共有fixtureのserialize、snapshot差分、プレイヤー別baseline、sample、reset、DTOの不変性・明示nullを対象とした。
-今回Gradleは実行しておらず、上のTypeScript 65件には含めない。
+今回Gradleは実行しておらず、上のTypeScript 71件には含めない。
 
 observerはclient initializerに未登録で、ゲーム内callbackの発火確認ではない。
 Minecraftの起動、EULA同意、既存ワールドの利用も行っていない。[観測の契約と限界](<observations.md>)を参照。

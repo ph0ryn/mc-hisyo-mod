@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { EventEmitter } from "node:events";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { defaultMaxFrameBytes, encodeJsonLine, JsonLineDecoder } from "../transport/jsonLines.js";
+import { createPiJsonLineDecoder, encodePiJsonLine, maxPiJudgmentBytes } from "./piFraming.js";
 import { physicalModelApis, supportedPiVersion } from "./piPolicy.js";
 
 export interface PiLaunchOptions {
@@ -127,7 +127,7 @@ export async function startPiRpcClient(options: PiLaunchOptions): Promise<PiRpcC
 
 /** Pi's own stdio protocol, NOT the authenticated bridge's JSON-RPC protocol. */
 class PiRpcClient extends EventEmitter {
-  readonly #decoder = new JsonLineDecoder();
+  readonly #decoder = createPiJsonLineDecoder();
   readonly #pending = new Map<string, Pending>();
   readonly #exited = deferred<void>();
   readonly #child: ChildProcessWithoutNullStreams;
@@ -195,7 +195,7 @@ class PiRpcClient extends EventEmitter {
     if (
       typeof message !== "string" ||
       !message.length ||
-      Buffer.byteLength(message) > defaultMaxFrameBytes - 256
+      Buffer.byteLength(message) > maxPiJudgmentBytes
     )
       return Promise.reject(new PiRunError("Invalid Pi judgment message", false));
     const slot: JudgmentSlot = {
@@ -315,7 +315,7 @@ class PiRpcClient extends EventEmitter {
     if (this.#failure) return Promise.reject(this.#failure);
     return new Promise((resolve, reject) => {
       const id = String(++this.#nextId);
-      const frame = encodeJsonLine({ id, type: command, ...args });
+      const frame = encodePiJsonLine({ id, type: command, ...args });
       if (
         this.#pending.size >= 64 ||
         this.#child.stdin.writableLength + frame.length > 4 * 1024 * 1024

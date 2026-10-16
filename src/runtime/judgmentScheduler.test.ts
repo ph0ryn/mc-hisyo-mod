@@ -5,7 +5,7 @@ import type { StoredEvent } from "../events/eventLog.js";
 import type { ResponseHook } from "../hooks/responseHooks.js";
 import type { PiJudgment } from "../pi/piRpcClient.js";
 import type { WorldBinding } from "../protocol/bridge.js";
-import { encodeJsonLine } from "../transport/jsonLines.js";
+import { encodePiJsonLine } from "../pi/piFraming.js";
 import { RpcError } from "../transport/rpcPeer.js";
 import type { JudgmentBatch } from "./judgmentQueue.js";
 import { JudgmentQueueFullError } from "./judgmentQueue.js";
@@ -538,6 +538,6 @@ test("the Pi envelope budget accommodates an admitted quote-heavy judgment", asy
   const message = f.session.judge.mock.calls[1]![0];
   expect(f.session.batches()[1]!.playerMessages).toEqual(messages);
   expect(Buffer.byteLength(message)).toBeLessThanOrEqual(1024 * 1024);
-  // Compatibility regression, not a codec defect: the Pi driver currently uses this default.
-  expect(() => encodeJsonLine({ id: "1", type: "prompt", message })).not.toThrow();
+  // Exercise the same Pi-only framing used by the production stdio driver.
+  expect(() => encodePiJsonLine({ id: "1", type: "prompt", message })).not.toThrow();
 });

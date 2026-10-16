@@ -1,7 +1,7 @@
 # 通信プロトコル
 
 codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driver、隔離Pi sessionの起動管理は実装済み。
-schedulerは[checkpoint実装](<scheduling.md#実行制御checkpoint>)で通信容量の整合が未解決。タイマーとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
+schedulerは[checkpoint実装](<scheduling.md#実行制御checkpoint>)で、既定batchのPi framing整合はunit testで確認した。タイマーとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
 [実装済みの範囲](<development.md>)は別に管理する。
 
 | 接続 | 方式 | 用途 |
@@ -30,7 +30,13 @@ slotは本物のsettledと取消RPCが揃うまで保持する。状態が不明
 これらはTool集合の証明にはならず、認証済みのbundled拡張のreadyが別途必要。
 OS Toolや自動探索を無効化する起動policyも、stdioだけでは証明できない。
 
-フレーム上限は改行を除き1 MiB、UTF-8は不正byteを拒否する。送信待ち4 MiB、未完了request 64件を上限とする。
+[Pi専用framing](<../src/pi/piFraming.ts>)の送受信上限はLFを除き**2 MiB + 256 bytes（2,097,408 bytes）**。
+判断messageはraw UTF-8で1 MiBまでとし、serialized batch JSONの再escapeは最大2倍となる。
+従来の256-byte予約はmessageから差し引かず、既知のprompt / user echo envelope用に確保する。
+[unit test](<../src/pi/piFraming.test.ts>)の条件ではprompt 61 bytes、user start / end 117 / 115 bytes、userだけの`agent_end` 134 bytesである。
+キューとTCP / 共通codecの1 MiBは変更しない。送信待ち4 MiB、未完了request 64件も維持し、Piの最大1 frameはLF込みでも4 MiB未満となる。
+任意raw制御文字の最大6倍escapeや、拡張した`maxPendingBytes`、全ての集約`agent_end`・Tool結果・モデル出力が収まる保証はしない。
+送信frame超過は書込前に拒否し、受信frame超過は引退・停止する。不正UTF-8も引き続き拒否する。
 既定の期限は要求5秒、判断5分、終了の各段階1秒。version検査も期限付きで強制終了する。
 backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの診断に限り、assistant本文とともにゲーム表示しない。
 
