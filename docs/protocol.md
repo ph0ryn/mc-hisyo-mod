@@ -122,7 +122,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 [JSON-RPC schema](<../src/protocol/jsonRpc.ts>)、[JSONL framing](<../src/transport/jsonLines.ts>)、
 [RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
-[実TCPテスト](<../src/transport/rpcPeer.test.ts>)で確認する。認証bridgeでもこのpeerを使う。
+認証bridgeでもこのpeerを使う。旧実TCP suiteはunit-only化で削除済みで、以下は実装契約であり現行unit suiteの通信検証実績ではない。
 
 - JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
 - UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
@@ -144,8 +144,8 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 ## 実装済みの認証・binding bridge
 
-[DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)を
-[実TCPテスト](<../src/bridge/directorBridge.test.ts>)で確認する。bridge-only CLIへ組込済み。
+[DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)はbridge-only CLIへ組込済み。
+旧実TCP suiteは削除済みで、以下の認証・binding契約を現行unit suiteが実接続で確認したとは扱わない。
 [Pi session所有者](<../src/runtime/piSession.ts>)がrun無効化通知をstdioのabortへ渡す。CLI schedulerとModへの配線は未実装。
 Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 

@@ -1,24 +1,14 @@
-# Pi 1.2.0のローカル境界検証
+# Pi 1.2.0のローカル境界調査（過去の設計根拠）
 
-## 目的と実行方法
+## この記録の位置づけ
 
-PATH上の実Piを使い、明示的ESM拡張の読込と、必須の最新状態を取得できない場合の停止を確認する任意テスト。
-通常の単体テストとは分離し、実モデル・有料API・Minecraftには接続しない。
+以下はunit-only化より前の調査記録であり、今回再実行した結果ではない。
+実Pi・loopback HTTPを使うsuite、専用fixture、実行scriptと別設定は削除済みで、任意テストとしても残さない。
+現行の自動テストや再現手順の説明ではなく、Piのversion/API制限と停止条件を決めた根拠だけを残す。
+現在の確認範囲と失われたcoverageは[検証状況](<validation.md>)を参照。
 
-プロジェクト指定のNode.jsとPi **1.2.0**を用意し、リポジトリ直下で実行する。
-Piの別バージョンは拒否する。APIとシナリオは検証済みの固定matrixで、Vitestを使う。
-
-```bash
-pnpm run verify:pi
-
-# Vitestのテスト名でAPIとシナリオを限定する場合
-pnpm run verify:pi -t 'anthropic-messages: abort-(first|second)'
-```
-
-実行時には、OSの一時ディレクトリに`mkdtempSync`で毎回新しい領域を作る。
-最後の`RESULTS`行に集約結果への絶対パスを出力し、シナリオ別に起動引数・RPC・HTTP・終了コードも残す。
-証跡はリポジトリに生成せず、自動削除もしない。
-[Vitestテスト](<../src/pi/directorProbe.test.ts>)は、Piへ渡す[ESM fixture](<../src/pi/fixtures/directorProbe.mjs>)の場所を`import.meta.url`から解決する。
+当時はPi **1.2.0**の明示的ESM拡張と、必須の最新状態を取得できない場合の停止を調査した。
+実モデル・有料API・Minecraftには接続せず、以下の隔離条件で固定matrixを用いた。
 
 ## 隔離と前提条件
 

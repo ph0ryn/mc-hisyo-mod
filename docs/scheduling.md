@@ -106,8 +106,8 @@ hookは発火時のID・指示・正確な保存イベントIDを保持し、同
 - 保留は接続session内の揮発状態。crash・退出・明示停止を超えた配送保証や、次のsessionへの再送は行わない。
   永続する履歴・hook登録とは分ける。
 
-[隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)は、実SQLiteのhook照合・履歴と公開queue APIで確認する。
-queue単体の検証であり、single-flightは次のscheduler unit test、Pi取消は所有者の境界検証で区別する。
+[隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)は、literalの`StoredEvent`・hook入力と公開queue APIだけを使うunit testである。
+DB保存・hook登録や照合は検証しない。single-flightは次のscheduler unit testと区別し、実Pi取消の旧境界suiteは削除済み。
 
 ## 実行制御checkpoint
 
@@ -127,7 +127,7 @@ hook受付時点でrawイベントは保存済みなので、容量超過でも`
 
 [隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
 ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
-実際の取消・子プロセス終了は[所有者の既存境界検証](<../src/runtime/piSession.test.ts>)へ分離する。
+実際の取消・子プロセス終了の旧境界suiteは削除済み。stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
 26ケース中25ケースが成功したが、quoteを多く含む受付済みbatchの通信容量を確認する1ケースは**RED**である。
 同じunit test内で、保留JSON約544 KBがPiのprompt envelopeで再escapeされると1 MiBを超えることを再現する。
 実Piは入力を受信イベントにも含めて返すため、送信側だけの拡張では解決しない。

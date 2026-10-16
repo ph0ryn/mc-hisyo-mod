@@ -1,235 +1,139 @@
 # 検証状況と未確定事項
 
-## 検証済み事項
-
 実装範囲と通常の開発コマンドは[開発資料](<development.md>)にまとめる。
 
-### TypeScriptと永続化
+## 現在の自動テスト：unit testのみ
 
-`pnpm run verify`でformat、型検査付きlint、ESMビルド、実行境界のテストを確認する。
-現在は下記scheduler checkpointの通信容量回帰がREDで、全体検証は未完了。
+実TCP・HTTP・provider・子プロセス・実SQLiteを使う8 suiteを削除した。
+専用の偽実行file・provider・接続harness、任意Pi用のscriptと別設定も削除し、opt-inの形では残していない。
+本番の実装・容量方針・依存build承認は変更していない。
 
-- ビルドしたCLIのヘルプ、未知の引数の拒否。
-- hookなしでのイベント保存、SQLite再open後のイベント・hook復元。
-- world / playerの隔離、hook削除と履歴保持、完全一致AND条件。
-- 仮の新イベントを定義だけで追加して、保存・検索・照合する回帰テスト。
-- boolean / number / null / 未設定の区別、未対応payload・filterの拒否。
-- ページング上限、重複・逆順拒否、連番欠損とfilterをまたぐ欠損通知。
-- 未対応のdatabase schema versionでの停止。
+残る発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`に一致する次の3 suiteだけである。
+実行前にfixtureと依存portを監査し、実接続・実子プロセス・実DBを使わないことを確認した。
+静的な共有JSONの読込は行う。
 
-### ローカルTCP codec
+| suite | 内容 | 今回の結果 |
+| --- | --- | --- |
+| [イベント契約](<../src/protocol/gameEvent.test.ts>) | 13種の共有fixture、schema/catalog、scalar filterと純粋な完全一致 | 22成功 |
+| [保留キュー](<../src/runtime/judgmentQueue.test.ts>) | literalの`StoredEvent`とhookを公開APIへ渡す | 17成功 |
+| [scheduler](<../src/runtime/judgmentScheduler.test.ts>) | bridgeイベント・同期受付とPi session factoryだけをstub化 | 25成功、既知RED 1件 |
 
-[実TCPテスト](<../src/transport/rpcPeer.test.ts>)で次を確認した。CLI・Pi・Modの接続試験ではない。
+依存配置済みのlocal runnerを直接使った今回の結果：
 
-- 双方向要求、順序が入れ替わる応答、通知の受信順。
-- TCPで分割されたUTF-8、多フレーム同時受信、壊れたJSONへの明示エラー。
-- 切断・timeoutでの未完了要求の失敗、副作用の自動再送がないこと。
-- 途中EOF、フレーム上限、要求数上限、不明response ID、不正UTF-8の拒否。
-- 不正notificationの後で後続観測を続行しないこと。
-- 結果未返却や結果上限超過を空データの成功扱いにしないこと。
+- `./node_modules/.bin/vp check`：format・型検査付きlint成功。
+- `./node_modules/.bin/vp pack`：ESMビルド成功。CLIやPiは起動していない。
+- `./node_modules/.bin/vp test`：**65件中64成功・1失敗**、3 suite、skipや名前filterなし。
 
-### 認証・binding bridge
+したがって`verify`相当は未完了。失敗を削除・緩和・skipしてgreenにはしていない。
+先の`pnpm install --frozen-lockfile --prefer-offline`はgenai/protobufjsの未承認buildで終了1となり、
+pnpm経由のfocused testも収集前に同じ問題で停止した。その時点ではテストは実行されていない。
+その後は再install・依存build承認をせず、既存local runnerだけを用いた。
 
-[bridgeの実TCPテスト](<../src/bridge/directorBridge.test.ts>)で次を確認した。CLI・Mod・Piの配線試験ではない。
+### 判断理由の保留キュー
 
-- token・role・version、認証前の操作、重複role、capabilityの制限。
-- attach応答後の`game.ready`までrunを開始せず、game / agent両方のbind ACKを待つこと。
-- raw保存後のhook照合、偽scopeの拒否、履歴・hookのscope隔離。
-- pause後の即時拒否、無効化後もsettled確認までslotを保持すること。
-- world交換後の遅い状態応答を破棄し、表示は`displayed: true`を要求すること。
-- 起動と同時のcloseでlistenerを残さないこと。
-- 16,000文字の指示を持つ70 hooksを最大8件ずつ列挙できること。
-- ready前とdetach・終了後の`readyWorld`不在、snapshotの変更分離、pause状態の反映。
-- 同期受付がないチャットの明示拒否、同文・pause中の入力順、未ready・古いbinding・空白・異なるroleの拒否。
-- 受付の排他登録・解除、古い解除操作が新しい登録を消さないこと、受付側の明示エラーを継続して返すこと。
-- 拒否されたチャットnotificationで切断し、同じ接続の後続観測を保存しないこと。
+- hook一致を渡さない通常観測は判断を予約しない。開始・pollは各1予約、同文チャットも受信順に保持する。
+- 入力済みhook指示とイベント本文をsnapshot化し、呼出側の後からの変更を反映しない。
+- 明示的に渡した発火IDだけを保持し、欠けた連番を捏造せず、複数hookのイベント本文を重複させない。
+- batch取得後の入力を分離し、別world / player / 接続sessionを拒否する。
+- UTF-8・JSON escapeのbyte境界、反復発火・一括超過での継続拒否を確認する。
 
-起動・終了競合と大量hook一覧は、失敗を再現してから修正した。
-チャットの未処理ACKと受付・ready境界も8ケースの失敗を確認してから修正した。
-保留キューやPi取消への接続・過負荷のゲーム表示は、このbridge単体の検証には含まれない。
+このunit testはhook登録・照合やDB保存を行わない。hook削除・後登録、raw履歴の保持、scope別検索の保証には読み替えない。
 
-### 必須の現在状態snapshot
+### Single-flight scheduler checkpoint
 
-同じ[実TCPテスト](<../src/bridge/directorBridge.test.ts>)で[状態契約](<gameState.md>)を確認する。
+scheduler suiteは変更せず、ファイル・SQLite・TCP・子プロセスなしで次を確認する。
 
-- 空のstate、必須fieldの欠損、未対応version、不正型・件数を拒否する。
-- 36 main slotと7 named equipmentを要求し、body slotの省略も許さない。
-- 明示的な`biomeId: null`、不完全なblock coverage、entityの打切りflagは値を変えず返す。
-- 未対応queryはModへ要求を転送する前に拒否する。
-- 729 blocks / 64 entities、上限長の文字列、大きな数値を持つ応答を実TCPで返す。
-  多バイト文字・JSON escape、最大長のbindingと`RpcPeer`が生成する短い10進数字列のrequest IDで1 MiB frame内と確認する。
-  codec自体は任意長の文字列IDも許すが、それらを含む全応答のframe適合を保証するテストではない。
+- ready前は起動せず、ready済みworldの開始理由を1回取り込む。初期pauseと設定snapshot。
+- 同文チャット順序、渡された発火hookと保存ID、通常観測をpromptへ混ぜないこと。
+- pause解除とsettledの順序、`not_started` batchの保持と後着入力の分離。
+- 過負荷でcloseを要求してからfaultを通知し、以後の受付・自動再開を拒否すること。
+- close promiseの解決まで次所有者を起動せず、旧worldの揮発入力を再送しないこと。
+- 起動途中の退出・close、起動失敗、曖昧な判断失敗、cleanup失敗、同期close再入。
 
-不完全なstateと未知のqueryを通してしまう**19件の失敗**を再現してから修正した。
-これはschema・binding・frame境界の検証であり、Modのcollectorや実ゲームでの取得性能・正確性の検証ではない。
+quote-heavy batchの通信容量回帰1件は**REDのまま**独立再現した。
+受付済み約544 KBのJSONを公開codecでPi prompt envelopeへ包むだけで1 MiBを超え、
+`JSONL frame exceeds byte limit`になる。これはI/Oなしの互換性回帰であり、このcleanupで容量は修正していない。
+実Piの入力echoも容量評価の論点だが、今回の実行対象ではない。
+タイマー、CLI / Modの配線、実Piでのscheduler受入は未実装・未実施。
 
-### bridge-only CLIの起動・終了
+## 削除したcoverage
 
-[packaged CLIのテスト](<../src/cli.test.ts>)はビルド成果物を実際の子プロセスとして起動する。
-PiやModの代わりに、偽gameを認証付き実TCPで接続する。
+旧suiteをunit testと呼び替えたり、case数維持のための偽TCP/Pi基盤を追加したりはしていない。
+現在のunit結果は次のcoverageを代替しない。
 
-- `--help`でstateを作らずPiを起動しないこと、通常起動で未実装のPiを黙って省略しないこと。
-- privateな接続情報のfield、tokenの非ログ出力、`0700` / `0600`と所有UID。
-- 実TCPの観測をSQLiteへ保存し、SIGINT / SIGTERM後も履歴が残ること。
-- 同じ保存先の二重起動を拒否し、再起動ではtokenを更新すること。
-- 既存の接続情報、directory symlink、unsafeなmode、SQLiteのsymlink・hardlinkを変更せず拒否すること。
-- 接続情報をrenameまたはunlink / recreateで差し替えると、replacementを削除せずエラー終了すること。
-- stdoutのpipeが起動表示前に閉じても、明示的に失敗し、接続情報とSQLiteの終了処理を行うこと。
-- 未対応DB versionではversionを変えず、接続情報やtempを残さないこと。
+- 実TCP codecの分割UTF-8、切断・timeout・framing・要求相関と再送拒否。
+- 認証bridgeのrole・ready・両bind ACK、状態snapshotの形式・frame境界、scope隔離、チャット受付。
+- ビルド済みCLIの引数・signal・終了処理、接続情報公開、POSIX mode・symlink/hardlink・差替え拒否。
+- SQLiteの再open、migration拒否、履歴・hook永続化、ページング、連番欠損とscope別検索・照合。
+- 実stdio偽Piのversion/metadata gate、ACK/settled/abort、EOF・timeout・SIGKILLと子の終了確認。
+- 隔離sessionのprivate設定・会話再開・lease、保存先のfilesystem安全性、実取消と終了順。
+- 実Pi・偽HTTP provider・偽gameでの7 Tool、context注入、driver/sessionの接続。
 
-閉じたstdout pipeの`EPIPE`がcleanupを迂回して接続情報・WAL・SHMを残す失敗を再現し、修正後の成功を確認した。
-inodeを保持するfdはPOSIXの再利用規則に基づく対策で、ホスト上でのinode再利用自体は再現していない。
-Windows、拡張ACL、電源断時の公開耐久性、敵対的な同UIDの操作は未検証。
+schema/catalogの純粋な検証は残したが、保存・検索・hook登録との結合ケースは除去した。
+実装契約は[通信](<protocol.md>)、[状態](<gameState.md>)、[実行制御](<scheduling.md>)に残す。
+
+## 過去の検証記録（今回は再実行していない）
+
+以下はunit-only化前の設計根拠であり、現行suiteの成功数・coverageではない。
+
+### Piのローカル境界とproduction拡張
+
+Pi 1.2.0の3 physical APIで、独立probeは4シナリオずつ12件、production拡張・driver/sessionの接続は30件の成功記録がある。
+当時は一時HOME・設定・会話・作業場所、dummy keyとloopback偽providerだけを使用した。
+実モデルやMinecraftでの確認ではなく、今回再実行もしていない。
+
+設計根拠として残す事項：
+
+- `openai-completions`、`openai-responses`、`anthropic-messages`だけを許可し、Pi versionとprompt前metadataを検査する。
+- 例外を投げるだけでは必須context取得失敗後の推論を止められず、binding無効化と同期abortが必要。
+- ACK / `agent_end`をsettledと同一視せず、slot・取消・所有権を分ける。
+- 各provider要求前に最新snapshotを取得し、一時contextを会話へ永続化しない。
+- compaction・cache warming・自動resource探索・組込OS Toolを無効化し、既知の明示拡張だけを使う。
+
+任意provider、差替えstream実装、別Pi version、実モデルの性能や実ゲームの保証ではない。
+[Pi境界調査](<piFeasibility.md>)に当時の条件・結果と保証の限界を残す。再現scriptは廃止済み。
 
 ### Fabricビルド
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11を固定し、
-Java 21 / Loom 1.17.21 / Gradle 9.7.1で`build`を確認した。
-配布JARのclient-only metadata、entrypoint、Java 21 class formatも確認した。
+Java 21 / Loom 1.17.21 / Gradle 9.7.1で`build`を確認した過去の記録がある。
+配布JARのclient-only metadata、entrypoint、Java 21 class formatも当時確認した。
 
-13種類のobserverをコンパイルし、`observerTest`の純Java **93 assertions**が成功した。
-共有fixtureのserialize、snapshot差分、プレイヤー別baseline、sample、reset、DTOの不変性・明示nullを確認する。
-実行classpathからMinecraft / Fabricを除外していることも検証する。
+13種類のobserverと、Minecraft / Fabricをclasspathから除外した純Java `observerTest`の**93 assertions**は過去に成功した。
+共有fixtureのserialize、snapshot差分、プレイヤー別baseline、sample、reset、DTOの不変性・明示nullを対象とした。
+今回Gradleは実行しておらず、上のTypeScript 65件には含めない。
 
 observerはclient initializerに未登録で、ゲーム内callbackの発火確認ではない。
-[観測の契約と限界](<observations.md>)を参照。
-Minecraftを起動せず、EULAに同意せず、既存ワールドを使用していない。
-
-### Piのローカル境界
-
-既存の任意Pi検証2ファイルは`.test.ts`へ統一し、通常のunit testとは別設定で維持する。
-移行時は42ケースの収集と元のassert / expect文120件の保持を確認した。実Piでの再実行はしておらず、以下の成功実績は移行前のもの。
-
-`pnpm run verify:pi`はPATH上の実Pi **1.2.0**と、ローカルの偽providerを使う任意テスト。
-3つの組込APIで4シナリオずつ、**12/12成功、全子プロセス終了コード0**を確認した。
-
-- 明示的ESM拡張の読込、起動ACK、実行binding ACK。
-- prompt前のmetadata確認、`handled` / `started`の区別、`agent_settled`までの完了待機。
-- 各provider呼出し前の最新状態取得と、会話へ永続化しない注入。
-- 必須状態取得に失敗した際のbinding無効化と同期abort、後続provider HTTPゼロ。
-- 例外を投げるだけでは推論を止められない負例。
-
-詳細・実行方法・保証の制限は[Pi境界検証](<piFeasibility.md>)を参照。
-**production bundle、任意Pi version / provider、実モデル、実ゲームを検証したものではない。**
-
-### Pi stdio driver
-
-[隣接するVitestテスト](<../src/pi/piRpcClient.test.ts>)は通常の`verify`へ含める。
-ローカルの[偽実行file](<../src/pi/fixtures/fakePi.mjs>)との実stdin / stdoutを使い、Piやproviderは起動しない。
-47ケースで次を検証する。
-
-- exact version、認証ready、指定model / physical API、mediumの対応・実選択、compaction・実行状態・queueのgate。
-- ACK / `agent_end`だけでは解放しない単一slot、ACK前のsettled、分割UTF-8・複数frameの一括受信、次回の再検査。
-- 書込前取消の`not_started`、abort ACK後も未settledな状態、prompt preflightをまたぐ再abort。
-- 書込後のACK欠落・未settled・切断では開始済みの可能性を保持し、引退した子プロセスを再利用しない。
-- 不正JSON・UTF-8・batch・過大frame・途中EOF・相関違反・失敗応答・重複／不正終端を拒否する。
-- queue残存、要求・判断・version検査のtimeout、EOFとSIGTERMを無視する子へのSIGKILL、診断の容量制限。
-
-preflight中のidle abortが後から始まる判断を止めない失敗を実パイプで再現し、started ACK後の再abortで修正した。
-これは取消RPCの完了であり、実行終了の代用ではない。ownerによるbinding無効化と異常終了待機は別の責務。
-
-### 隔離Pi session所有者
-
-[隣接するVitestテスト](<../src/runtime/piSession.test.ts>)の21ケースを通常の`verify`へ含める。
-実子プロセスの偽Piと認証付きTCPを使い、実Piやproviderは起動しない。
-
-- 起動引数・環境・settings・7 Tool・privateな会話pathとmode、同じscopeの再開と別scopeの分離。
-- 二重所有の拒否、EOF / SIGTERMを無視する子の終了待ち中もleaseを保持し、終了後だけ別所有者へ渡すこと。
-- 設定と異なる許可済みAPIへのすり替えを、prompt送信前に拒否すること。
-- pauseによる無効化とabortの順序、game側／agent側bind ACK待ち・metadata検査中の取消、実settledまでのsingle-flight。
-- idle agent切断、detach、開始済みか不明な失敗、ready / version失敗での終了・再起動。
-- unsafeなmode、symlink、hardlink、foreign cwdの会話を変更せず拒否すること。
-- 起動中に呼出側のworld bindingが変わっても、所有者のsnapshotが変わらないこと。
-
-同期callbackからの`close()`再入で二重cleanupと`EBADF`になる失敗を再現し、
-無効化・取消より前に同じshutdown promiseを公開して修正した。
-OSがSIGKILL後も終了を返さない条件は再現していない。終了確認失敗時にleaseと予約を残す分岐はコードレビューで確認した。
-CLI schedulerやFabricへの配線試験ではない。
-
-### 判断理由の保留キュー
-
-[隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)の17ケースを通常の`verify`へ含める。
-公開queue APIと実SQLiteの履歴・hook照合を使い、Piやproviderは起動しない。
-
-- hookのない通常観測は保存だけを行い、開始・pollは各1予約、同文を含むチャットは受信順に保持する。
-- 発火済みhookの削除後も指示とイベント本文が変わらず、後から登録したhookは過去イベントへ発火しない。
-- 非一致イベントや欠けた連番を発火元へ混入させず、複数hookが一致してもイベント本文を複製しない。
-- batch取得後の入力・呼出側による変更を分離し、別world / player / 接続sessionを拒否する。
-- UTF-8・JSON escapeを含む正確な容量境界、単一hookの反復発火・複数hookの一括超過での継続拒否。
-- 超過した観測のraw履歴は残る。履歴をpending配送用の永続inboxとして再利用しない。
-
-初回の未実装moduleでの失敗から実装した。queue単体の境界確認で、次のscheduler接続検証とは区別する。
-
-### Single-flight scheduler checkpoint
-
-[隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は26ケースのunit testである。
-bridgeの公開イベント・同期受付とPi session factoryだけを置き換え、ファイル・SQLite・TCP・子プロセスを使わない。
-既存の実境界テストをunit testと呼び替えるのではなく、scheduler自身の入力・出力と非同期所有権を分離して検証する。
-
-- ready前は起動せず、ready済みworldは開始理由を1回取り込む。初期pauseと設定snapshotを確認する。
-- 同文チャットの順序、発火時のhook・保存ID、通常観測をpromptへ混ぜないことを確認する。
-- pause解除よりsettledが遅くても重複実行せず、`not_started`は元batchを次の入力と別に保持する。
-- チャット／hook超過で所有者のcloseを要求してからfaultを通知し、以後の受付・自動再開を拒否する。
-- 所有者のcloseが解決する前は次を起動せず、退出前の揮発入力を次worldへ再送しない。
-- 起動途中の退出・close、起動失敗、曖昧な判断失敗、cleanup失敗、同期callbackからのclose再入を扱う。
-- 次worldの開始batchが容量超過しても前所有者の終了待ちを失わず、不正な容量設定を拒否する。
-
-raw保存はqueueとbridge、実際のbinding無効化・abort・子プロセス終了は所有者の既存境界検証で確認する。
-その検証をschedulerのunit testが実行したとは扱わない。
-
-25ケースは成功し、quote-heavy batchの通信容量回帰1ケースは**RED**のまま保持する。
-受付済み約544 KBのJSONを公開codecでPi envelopeへ包むだけで1 MiBを超えることを、I/Oなしで再現する。
-通常の`verify`はformat・型検査付きlint・buildが成功し、216テスト中215成功・この1件失敗である。
-通信上限の方針確認前にテストを削除・緩和せずcheckpointへ残す。実Piの入力echoも修正時の検証対象とする。
-タイマー、CLI / Modの配線、実Piでのscheduler受入は確認していない。
-
-### Production Pi拡張
-
-`pnpm run verify:pi:built`は、[production拡張](<../src/pi/directorBridge.ts>)をビルドして実Pi 1.2.0に読み込ませる。
-[隣接するVitestテスト](<../src/pi/directorBridge.acceptance.test.ts>)は認証付きTCP bridge、SQLite、偽game、loopback偽providerを使う。
-開発依存のPiはAPI型の検査用で、実行時はPATHのPiを正確なバージョン検査後に使う。
-
-3 physical APIすべてで7 Toolの実行、イベント検索、hook CRUD、scope注入の拒否、明示的な表示だけがgameへ届くことを確認する。
-各モデル呼出しの直前にsnapshotを取得し直し、古い状態と一時contextが会話へ残らないこと、settled後の別runも検証する。
-bootstrap不正と認証失敗はreadyにならず、後続promptでもモデル・gameを呼ばない。
-必須状態の初回／Tool後の欠損、古いbinding、pause、detach、切断、timeoutは、abortして後続のモデル呼出し・表示を止める。
-停止後に意図的に再送したpromptも、引退済み拡張は拒否する。
-
-同じsuiteのstdio driverと隔離session所有者も3 APIで検証し、合計30ケースが成功した。
-実Piのmetadataを通った後の2回の判断と、model不一致／実際のthinkingがlowの場合のprovider呼出しゼロを確認する。
-実際に保存した会話を同じworld / playerで再開し、別playerには混ざらず、pause中はproviderを呼ばないことも確認する。
-`!`と`$`を含むdummy keyが変化せずHTTP認証へ届き、一時snapshotが会話へ永続化されないことを検証する。
-
-一時HOME・設定・会話・作業ディレクトリ、dummy keyと偽providerだけを使い、実モデルには接続しない。
-これは拡張・driver・隔離session所有者の接続検証であり、CLI scheduler・Fabric adapterの受け入れ完了ではない。
+Minecraftの起動、EULA同意、既存ワールドの利用も行っていない。[観測の契約と限界](<observations.md>)を参照。
 
 ## 接続実装で確定する事項
 
 - アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。
 - 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
-- Modが実際に広告するイベント部分集合と、baseline以外の状態queryを追加する際の取得範囲。
-- ワールドUUIDの保存方法。Pi会話はprivateなworld / player別scopeで再開し、履歴と接続情報の配置も確定済み。
-- ポーリングはactive play中60秒を仮値とし、優先順位と容量・要求タイムアウト・フレームサイズの妥当性を接続検証で確認する。
-  保留入力の上限超過は明示エラーで停止し、黙示的な破棄や永続inboxは導入しない。
-- ゲームのランチャー環境での接続先読込と、CLI起動環境でのPiのPATH解決。
+- Modが広告するイベント部分集合と、baseline以外の状態queryの取得範囲。
+- ワールドUUIDの保存方法。Pi会話はprivateなworld / player別scopeで再開する。
+- ポーリングはactive play中60秒が仮値。容量・要求timeout・frameサイズの妥当性は未確定。
+  保留上限超過は明示エラーで停止し、黙示的破棄や永続inboxは導入しない。
+- ランチャー環境の接続先読込と、CLI起動環境でのPiのPATH解決。
 
 レシピ専用機構や目標管理state machineは作らない。
 ゲームの静的ファイル参照と、生の状態・豊富なイベント履歴・拡張可能なhookを優先する。
 
-## 未実施の接続受入シナリオ
+## 未確認の利用要件
 
-1. Mod接続後、`/ai`の入力がPiへ渡り、`send_message`だけがローカルHUDへ表示される。
+以下は設計上の要件であり、現行自動テストや実接続の実行許可ではない。
+
+1. `/ai`入力がPiへ渡り、`send_message`だけがローカルHUDへ表示される。
 2. `get_game_state`が実際の所持数を返す。
-3. 定期判断がactive play中だけ起動し、pause・切断中は新しい判断を開始しない。
-4. LLMがhookを登録し、イベントで起動し、Toolで削除できる。
-5. Pi実行中の全イベントを保存し、hookの発火理由だけを次の判断へまとめられる。
-6. 退出後、古いbindingの状態取得・表示・hook変更が新しいワールドへ届かない。
-7. 切断・タイムアウトが明示的な失敗になり、不明な表示要求が自動再送されない。
-8. 再起動後、同じworld / playerのPi会話・hook・履歴を再開し、別scopeとは混ざらない。
+3. 定期判断はactive play中のみで、pause・切断中は新しい判断を始めない。
+4. hook登録・イベント起動・Toolからの削除が接続全体で成立する。
+5. 全観測を保存し、発火理由だけを次判断へまとめる。
+6. 退出後の古いbindingが新worldの状態・表示・hookを操作できない。
+7. 切断・timeoutは明示失敗とし、不明な表示要求は再送しない。
+8. 再起動後、同scopeのPi会話・hook・履歴を再開し、別scopeとは混ざらない。
 
-初版はローカルの1ゲーム接続を扱う。
-遠隔接続、複数ゲーム対応、ModからのCLI自動起動、ゲーム操作の代行は含めない。
-実モデルの料金が生じる試験や実ワールドでの受入れは、別途確認してから行う。
+初版はローカル1ゲーム接続のみ。遠隔・複数ゲーム・ModからのCLI自動起動・操作代行は対象外。
+実モデルの料金が生じる試験や実ワールドでの受入れは、別途確認なしに行わない。
 
 ## 関連資料
 

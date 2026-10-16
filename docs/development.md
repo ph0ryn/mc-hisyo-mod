@@ -6,12 +6,12 @@
 - 独立したFabricプロジェクトをJava 21でビルドする。
 - イベントと応答hookをSQLiteへ保存し、worldId / playerId単位で再読込する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
-- JSONL / JSON-RPC codecを、実際のlocalhost TCPで双方向要求・通知・切断・timeoutまで検証する。
+- JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
 - 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
-- 認証付きloopback bridgeで、role・ready・world / run binding・古い応答の拒否を実TCPで検証する。
+- 認証付きloopback bridgeで、role・ready・world / run bindingを管理し、古い応答を拒否する。
 - 必須の[現在状態snapshot](<gameState.md>)を検証し、空の状態、欠損field、未対応queryを拒否する。
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
-- ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供し、実Pi・偽provider・偽gameで接続検証する。
+- ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供する。
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
 - [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
@@ -31,19 +31,22 @@ Node.js 24.15以降の24系、または26以降、pnpm 11、Java 21を使用す�
 ```bash
 pnpm install --frozen-lockfile
 pnpm run verify
-node dist/cli.mjs --help
 ```
 
-任意の`pnpm run verify:pi`はPATHのPi 1.2.0とローカル偽providerで、独立した境界probeを実行する。
-`pnpm run verify:pi:built`は再ビルドしたproduction拡張を同じPiへ読み込み、3 APIで7 Tool・context・stdio driver・隔離sessionの再開を検証する。
-どちらも一時HOME・会話・設定とloopbackを使い、実モデルやユーザー設定は使用しない。
-[Pi境界検証](<piFeasibility.md>)と[production拡張の検証](<validation.md#production-pi拡張>)に条件と制限をまとめる。
-通常の`verify`はPiを起動しない。Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
+自動テストはunit testのみ。実TCP・HTTP・provider・子プロセス・SQLiteを使うsuiteは削除し、任意実行の別設定としても残さない。
+現在の3 suiteはschema/catalog/filter、literal入力のqueue、依存portを置き換えたschedulerである。
+静的JSON fixtureの読込は行うが、CLI・Pi・偽実行fileの起動や実接続は行わない。
+[検証状況](<validation.md>)に実行結果と失われたcoverageを記す。既知のquote-heavy unit回帰1件がREDのため、`verify`は未完了。
+[Pi境界調査](<piFeasibility.md>)は過去の設計根拠であり、現行テストの実行手順ではない。
+Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
+
+既に依存が配置済みなら、`./node_modules/.bin/vp check`、`./node_modules/.bin/vp pack`、`./node_modules/.bin/vp test`を直接使える。
+今回のcheckpointではこの3コマンドを使用し、依存buildの承認や再installはしていない。
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
 追加するテストは対象コードの隣の`*.test.ts`にunit testとして書く。
-既存の実Pi境界検証も同じ拡張子へ統一するが、unit testとは区別し、別設定で明示実行する。
+拡張子だけでunitと判断せず、fixture・helperも含め実接続・実子プロセス・実DBを使わないことを確認する。
 共通JSON fixtureも[protocolの隣](<../src/protocol/fixtures/gameSnapshot.json>)に置き、Javaから同じファイルを参照する。
 [pnpm設定](<../pnpm-workspace.yaml>)は依存解決と供給網ポリシー用で、monorepo構成ではない。
 Vite+ coreのバージョン表記に対するpeer例外は、検証したバージョンのみに限定している。
@@ -82,8 +85,7 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 
 起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
 CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
-[ビルド済みCLIのsubprocessテスト](<../src/cli.test.ts>)は、一時保存先と偽gameの実TCP接続を使う。
-ModやPiの起動、ゲーム内の動作確認ではない。
+上記はCLIの実装契約であり、現在のunit suiteはCLIを起動しない。旧subprocess・偽game接続suiteは削除済み。
 
 ## Pi stdio driver（CLI未配線）
 
@@ -119,7 +121,7 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 
 これはPiの起動・Tool policyであり、OSやネットワークのsandboxではない。`--offline`も推論先へのHTTPを禁止しない。
 ファイル読取・コマンド実行の権限は未決定で、有効化していない。
-[隣接するVitestテスト](<../src/runtime/piSession.test.ts>)は実子プロセスと認証付きTCPで境界を確認する。
+実子プロセス・認証付きTCP・ファイル権限の旧境界suiteは削除済み。現在のscheduler unit testはこの所有者をstub化し、実取消・子の終了や保存先の安全性は検証しない。
 
 ## イベントの追加
 
@@ -135,8 +137,8 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 登録されていないイベント、schema違反、非対応フィールドのfilterはエラーにする。
 任意の外部pluginをロードする仕組みは導入していない。
 
-[履歴とhookのテスト](<../src/events/eventLog.test.ts>)では、
-`example:machine_completed`を定義だけで追加し、永続化・検索・hook照合が動くことを確認する。
+[イベント契約のunit test](<../src/protocol/gameEvent.test.ts>)で共有fixture、payload schema、公開scalar filterを確認する。
+実SQLiteを使う永続化・検索・hook登録／照合の旧suiteは削除し、schema検証がそのcoverageを代替するとは扱わない。
 現在は13種類の組込定義と対応observerがある。
 observerは未配線なので、実際の接続Modが収集・送信した実績とは区別する。
 

@@ -1,8 +1,8 @@
 # 現在状態のsnapshot
 
 [状態schema](<../src/protocol/gameSnapshot.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
-[実TCPテスト](<../src/bridge/directorBridge.test.ts>)は偽gameの応答を検証する。
-[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装・ローカル検証済み。
+偽gameとの実TCP suiteはunit-only化で削除済み。現在のunit suiteはこの接続境界を検証しない。
+[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装済みで、過去のローカル検証と現在のcoverageは[検証状況](<validation.md>)で区別する。
 **Modの取得・送信はまだ未接続。** 以下の取得方法はMod側で満たす契約であり、ゲーム内の動作実績ではない。
 
 ## 要求と検証
