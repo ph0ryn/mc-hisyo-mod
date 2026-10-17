@@ -118,9 +118,9 @@ hookは発火時のID・指示・正確な保存イベントIDを保持し、同
   永続する履歴・hook登録とは分ける。
 
 [隣接するVitest](<../src/runtime/judgmentQueue.test.ts>)は、literalの`StoredEvent`・hook入力と公開queue APIだけを使うunit testである。
-DB保存・hook登録や照合は検証しない。single-flightは次のscheduler unit testと区別し、実Pi取消の旧境界suiteは削除済み。
+DB保存・hook登録や照合は検証しない。single-flightは次のscheduler unit testと区別する。
 
-## 実行制御checkpoint
+## 実行制御
 
 [JudgmentScheduler](<../src/runtime/judgmentScheduler.ts>)はready済みworldから開始理由を1回取り込み、
 チャット・一致hook・期限到達pollのbatchをPi session所有者へ順番に渡す。通常観測は保存だけを行う。
@@ -138,16 +138,11 @@ RPCの明示エラーとruntimeの`fault`で失敗を伝える。独立したゲ
 
 [隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
 ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
-実際の取消・子プロセス終了の旧境界suiteは削除済み。stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
-初期26ケースと8件追加の34件成功は過去checkpoint。現在の最終件数・範囲は[検証資料](<validation.md>)を正とする。
-[clock unit](<../src/runtime/activePlayClock.test.ts>)の10ケースはactive時間・遅延集約・不正時刻を確認する。
-既知のquote-heavy通信容量回帰も修正済みで、同じ17件の入力・順序・raw容量のassertionを維持し、
-保留JSON 544,215 bytesがpromptで1,088,312 bytesになるケースをproductionと同じPi専用codecへ渡している。
-[純粋なframing unit test](<../src/pi/piFraming.test.ts>)では、既定上限ちょうど1 MiBの受付済みbatch、
-user echoと代表的な`agent_end`の受信、有限上限の境界・超過拒否、global codecの1 MiB維持も確認する。
-Pi送受信だけを2 MiB + 256 bytesへ分離し、キューの1 MiBと過負荷停止方針は変更していない。
+stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
+[clock unit](<../src/runtime/activePlayClock.test.ts>)はactive時間・遅延集約・不正時刻を確認する。
+[framing unit test](<../src/pi/piFraming.test.ts>)は、受付済みbatchのprompt・user echo、frame容量の境界・超過拒否を確認する。
+Pi送受信の上限は2 MiB + 256 bytes、キューの上限は1 MiBとし、超過は明示失敗で停止する。
 任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
-Pi側上限超過は引き続き明示失敗で停止する。これらのunit結果だけで実接続受入れ済みとは扱わない。
 定期timer・CLI / Mod接続は実装済みだが、実Piでのscheduler受入れは未実施。
 判断理由は`judge`前に保存する。要求記録はprovider実行の証拠ではない。
 native-first取消の待機は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
@@ -155,7 +150,7 @@ native-first取消の待機は[通信契約](<protocol.md#native側が先にrun�
 ## 推論設定
 
 現在は全判断で`medium`固定。Pi 1.2.0のcatalog・対応thinking levels・実際のidle stateを毎判断前に検査し、未対応なら停止する。
-`quick` / `high`切替や即応後の別laneは初期案に留まり、実装していない。応答時間の保証もない。
+`quick` / `high`切替や即応後の別laneは実装していない。応答時間の保証もない。
 
 ## 一次資料
 
@@ -167,4 +162,3 @@ native-first取消の待機は[通信契約](<protocol.md#native側が先にrun�
 
 - [Tool一覧と呼び出し](tools.md)
 - [通信プロトコル](protocol.md)
-- [検証状況と未確定事項](validation.md)

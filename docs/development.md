@@ -1,6 +1,6 @@
 # 開発と実装状況
 
-## この段階でできること
+## 実装範囲
 
 - ルートの単一TypeScriptパッケージをVite+で検査・ビルド・テストする。
 - 独立したFabricプロジェクトをJava 21でビルドする。
@@ -15,13 +15,13 @@
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
 - [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
-- [scheduler checkpoint](<scheduling.md#実行制御checkpoint>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
+- [scheduler](<scheduling.md#実行制御>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
 
 **CLI通常モード・1秒timer・single-flight scheduler・Mod登録 / 通信は実装済み。**
 `--bridge-only`はPiも判断も起動しない。Pi用flagとの併用は拒否する。
 通常モードは設定を検証してからbridge資源を開き、ready worldでPiを開始する。
-実ゲーム、実Pi / provider、実SQLite / TCP / Files境界の受入れは今回行っていない。
-実装済みと動作受入れ済みを混同しない。[検証状況](<validation.md>)を参照。
+実ゲーム、実Pi / provider、実SQLite / TCP / Files境界の受入れは未実施。
+実装済みと動作受入れ済みを混同しない。
 
 ## 検証コマンド
 
@@ -33,15 +33,11 @@ pnpm install --frozen-lockfile
 pnpm run verify
 ```
 
-自動テストはunit testのみ。実TCP・HTTP・provider・子プロセス・SQLiteを使うsuiteは削除し、任意実行の別設定としても残さない。
-現在は13ファイルのunit suiteで、設定・runtime・model gate・静的参照・履歴・host / 拡張の取消も対象にする。
+自動テストはunit testのみ。設定・runtime・model gate・静的参照・履歴・host / 拡張の取消も対象にする。
 依存portと手動peerを使い、CLI・Pi・provider・実接続・実DBは起動しない。
-[f559634でのlead検証](<validation.md>)はcheck・packと307件全成功。今回のdocs作業で再実行した結果ではない。
-[Pi境界調査](<piFeasibility.md>)は過去の設計根拠であり、現行テストの実行手順ではない。
 Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
 
 既に依存が配置済みなら、`./node_modules/.bin/vp check`、`./node_modules/.bin/vp pack`、`./node_modules/.bin/vp test`を直接使える。
-上記は既存依存での手動開発用コマンド。今回のdocs作業では実行・再install・依存build承認をしていない。
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
@@ -60,9 +56,8 @@ GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew --offline \
 ```
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
-Wrapper本体と配布zipは公式SHA-256で確認した。
 このビルドはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
-`--offline`には既存cacheが必要。上記は手動手順で、docs作業中に実行していない。
+`--offline`には既存cacheが必要。
 Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は上記5つの純Java checkを実行する。
 生成物は`mod/build/libs/mc_hisyo-0.1.0.jar`（実行用）と`mc_hisyo-0.1.0-sources.jar`。
 Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
@@ -70,7 +65,7 @@ Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsna
 
 ## 通常CLIとModの手動起動
 
-以下はoperator向け手順であり、今回実行した受入れ結果ではない。Node / pnpm / Java、Pi 1.2.0、依存cacheは別途準備する。
+Node / pnpm / Java、Pi 1.2.0、依存cacheは別途準備する。
 ルートでbuild後、`dist/cli.mjs`とbundled `dist/directorBridge.mjs`を同じ配布物に保つ。
 
 ```bash
@@ -131,7 +126,7 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 
 起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
 CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
-上記はCLIの実装契約であり、現在のunit suiteはCLIを起動しない。旧subprocess・偽game接続suiteは削除済み。
+現在のunit suiteはCLIを起動しない。
 
 ## Pi stdio driver
 
@@ -167,7 +162,7 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 
 これはPiの起動・Tool policyであり、OSやネットワークのsandboxではない。`--offline`も推論先へのHTTPを禁止しない。
 一般OSファイル・コマンド実行Toolは無効。静的ゲーム参照だけを[boundedな読取Tool](<tools.md#静的ゲームファイルの境界>)で許可する。
-実子プロセス・認証付きTCP・ファイル権限の旧境界suiteは削除済み。現在のscheduler unit testはこの所有者をstub化し、実取消・子の終了や保存先の安全性は検証しない。
+scheduler unit testはこの所有者をstub化し、実取消・子の終了や保存先の安全性は検証しない。
 
 ## イベントの追加
 
@@ -184,7 +179,7 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 任意の外部pluginをロードする仕組みは導入していない。
 
 [イベント契約のunit test](<../src/protocol/gameEvent.test.ts>)で共有fixture、payload schema、公開scalar filterを確認する。
-実SQLiteを使う永続化・検索・hook登録／照合の旧suiteは削除し、schema検証がそのcoverageを代替するとは扱わない。
+schema検証は、実SQLiteを使う永続化・検索・hook登録／照合の検証を代替しない。
 現在は32種類の組込定義と接続済みobserverがある。
 unit / compile結果は、実ゲームで収集・送信できた実績とは区別する。
 
@@ -230,9 +225,3 @@ hook CRUDとその事実は同一transaction。ゲームイベントは保存 �
 一件だけでも収まらないrecordは明示エラーで、詳細を落としたり空ページで隠したりしない。
 attach前 / ready前と最終観測後はunknown。CLI attach / detachはnative JOIN / LEAVEではなく、
 `hasKnownGaps: false`でも終端や切断中の完全性を意味しない。
-
-## 次の段階
-
-実装接続は完了し、残るのは[明示的に未実施の受入れ](<validation.md#未確認の利用要件>)。
-実ゲーム・実Pi / provider・永続化・通信・権限境界をunit / build結果だけで承認しない。
-レシピ専用Tool、独立した目標state machine、一般OS Toolは追加していない。

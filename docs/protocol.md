@@ -1,7 +1,7 @@
 # 通信プロトコル
 
 codec、認証bridge、通常 / bridge-only CLI、Pi拡張、stdio driver、隔離session、scheduler / timer、Mod接続は実装済み。
-以下は実装契約であり、実TCP / Pi / provider / ゲームによる受入実績ではない。[検証範囲](<validation.md>)を参照。
+以下は実装契約であり、実TCP / Pi / provider / ゲームによる受入実績ではない。
 
 | 接続 | 方式 | 用途 |
 | --- | --- | --- |
@@ -31,11 +31,11 @@ OS Toolや自動探索を無効化する起動policyも、stdioだけでは証�
 
 [Pi専用framing](<../src/pi/piFraming.ts>)の送受信上限はLFを除き**2 MiB + 256 bytes（2,097,408 bytes）**。
 判断messageはraw UTF-8で1 MiBまでとし、serialized batch JSONの再escapeは最大2倍となる。
-従来の256-byte予約はmessageから差し引かず、既知のprompt / user echo envelope用に確保する。
+256-byte予約はmessageから差し引かず、既知のprompt / user echo envelope用に確保する。
 [unit test](<../src/pi/piFraming.test.ts>)の条件ではprompt 61 bytes、user start / end 117 / 115 bytes、userだけの`agent_end` 134 bytesである。
-キューとTCP / 共通codecの1 MiBは変更しない。送信待ち4 MiB、未完了request 64件も維持し、Piの最大1 frameはLF込みでも4 MiB未満となる。
+キューとTCP / 共通codecの上限は1 MiB。送信待ち4 MiB、未完了request 64件とし、Piの最大1 frameはLF込みでも4 MiB未満となる。
 任意raw制御文字の最大6倍escapeや、拡張した`maxPendingBytes`、全ての集約`agent_end`・Tool結果・モデル出力が収まる保証はしない。
-送信frame超過は書込前に拒否し、受信frame超過は引退・停止する。不正UTF-8も引き続き拒否する。
+送信frame超過は書込前に拒否し、受信frame超過は引退・停止する。不正UTF-8も拒否する。
 既定の期限は要求5秒、判断5分、終了の各段階1秒。version検査も期限付きで強制終了する。
 backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの診断に限り、assistant本文とともにゲーム表示しない。
 
@@ -128,7 +128,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 [JSON-RPC schema](<../src/protocol/jsonRpc.ts>)、[JSONL framing](<../src/transport/jsonLines.ts>)、
 [RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
-認証bridgeでもこのpeerを使う。旧実TCP suiteはunit-only化で削除済みで、以下は実装契約であり現行unit suiteの通信検証実績ではない。
+認証bridgeでもこのpeerを使う。以下は実装契約であり、unit testによる実TCPの通信検証実績ではない。
 
 - JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
 - UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
@@ -151,7 +151,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 ## 実装済みの認証・binding bridge
 
 [DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)は通常 / bridge-only CLIへ組込済み。
-旧実TCP suiteは削除済みで、以下の認証・binding契約を現行unit suiteが実接続で確認したとは扱わない。
+unit testは認証・binding契約の実接続検証を行わない。
 [Pi session所有者](<../src/runtime/piSession.ts>)がrun無効化通知をstdioのabortへ渡す。CLI schedulerとModも接続済み。
 Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 

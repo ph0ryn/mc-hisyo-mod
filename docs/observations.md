@@ -1,18 +1,18 @@
 # ゲームの観測
 
-## この段階の範囲
+## 観測範囲
 
 [ServerObservations](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerObservations.java>)は、
-統合サーバーのcallback・Mixin・tick snapshotから32種類（従来13 + 9 + 7 + menu 3）のイベントを作る。
+統合サーバーのcallback・Mixin・tick snapshotから32種類のイベントを作る。
 [定義](<../src/protocol/gameEvent.ts>)にはpayload schema、観測の確度、filter対象のscalarフィールドを宣言する。
 [client](<../mod/src/client/java/io/github/ph0ryn/mchisyo/DirectorClient.java>)への一度だけの登録とTCP送信は接続済み。
 実ゲームでの発火、native Mixin適用、配送の受入確認は未実施。
 
 観測対象は、ブロック破壊、inventory slot・体力・空腹・経験値・手持ち・位置の変化、
 dimension移動、死亡・respawn・接続状態、damage処理、entityへのuse試行。
-追加分は次表のとおり。対応一覧は`ServerObservations.supportedEvents()`、payload / scalar filterは上記schemaを正とする。
+状態・周辺、操作、menuの観測は次表のとおり。対応一覧は`ServerObservations.supportedEvents()`、payload / scalar filterは上記schemaを正とする。
 
-| 分類 | 追加した観測 | 断定しないこと |
+| 分類 | 観測内容 | 断定しないこと |
 | --- | --- | --- |
 | 状態・周辺（9） | effects baseline / 変化、装備、周辺、包含構造物、天候、半日phase、進捗criterion / 完了 | baselineを獲得・発見としない。視認・全世界の完全観測ではない |
 | 操作（7） | 設置、拾得、drop、grid / furnace結果取得、block / item use試行 | net増加、全recipe・全modded経路、操作試行の成功は保証しない |

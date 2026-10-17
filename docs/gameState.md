@@ -1,8 +1,8 @@
 # 現在状態のsnapshot
 
 [状態schema](<../src/protocol/gameSnapshot.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
-偽gameとの実TCP suiteはunit-only化で削除済み。現在のunit suiteはこの接続境界を検証しない。
-[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装済みで、過去のローカル検証と現在のcoverageは[検証状況](<validation.md>)で区別する。
+現在のunit suiteは実TCPの接続境界を検証しない。
+[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装済み。
 [Mod producer](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerGameState.java>)と接続済み。
 以下は実装契約であり、ゲーム内の動作実績ではない。
 

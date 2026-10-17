@@ -1,6 +1,6 @@
 # 構成と責務
 
-以下は実装済みの構成。[起動手順と実装状況](<development.md>)、[未実施の実接続受入れ](<validation.md>)を参照。
+以下は実装済みの構成。[起動手順と実装状況](<development.md>)を参照。
 CLIは単一のTypeScript / Node.jsパッケージ、Modは独立したJava / Fabricプロジェクトとする。
 Pi拡張はCLI側でESMの`directorBridge.mjs`へビルドして同梱し、Piから明示的に読み込む。
 
