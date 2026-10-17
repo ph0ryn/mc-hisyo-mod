@@ -14,12 +14,15 @@ import {
   protocolVersion,
   RunBindingSchema,
   sameRunBinding,
+  staleRunErrorCode,
   SendMessageResultSchema,
   SendMessageSchema,
   type RunBinding,
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import { directorToolNames, physicalModelApis } from "./piPolicy.js";
+
+class CancelledRun extends Error {}
 
 const strict = { additionalProperties: false } as const;
 const BootstrapSchema = Type.Object(
@@ -36,10 +39,34 @@ const eventArgs = Type.Object({ query: EventSearchRequestSchema.properties.query
 const messageArgs = Type.Object({ text: SendMessageSchema.properties.text }, strict);
 const removeArgs = Type.Object({ id: HookRemoveSchema.properties.id }, strict);
 
+async function connectHost(): Promise<RpcPeer> {
+  const bootstrap: unknown = JSON.parse(process.env.MC_HISYO_BRIDGE ?? "null");
+  if (!Check(BootstrapSchema, bootstrap)) throw new Error("Invalid MC_HISYO_BRIDGE bootstrap");
+  const socket = createConnection({ host: bootstrap.host, port: bootstrap.port });
+  const peer = new RpcPeer(socket);
+  try {
+    await once(socket, "connect", { signal: AbortSignal.timeout(5000) });
+    await peer.call("bridge.hello", { protocolVersion, role: "agent", token: bootstrap.token });
+    return peer;
+  } catch (error) {
+    peer.close(error instanceof Error ? error : new Error("Director connection failed"));
+    throw error;
+  }
+}
+
 /** Explicitly loaded Pi extension. The owning host supplies authenticated, scoped runs. */
-export default function directorBridge(pi: ExtensionAPI): void {
-  let peer: RpcPeer | undefined;
+export default function directorBridge(
+  pi: ExtensionAPI,
+  connect: () => Promise<
+    Pick<RpcPeer, "handle" | "call" | "close"> & {
+      on(event: "close", listener: () => void): unknown;
+    }
+  > = connectHost,
+): void {
+  let peer: Awaited<ReturnType<typeof connect>> | undefined;
   let binding: RunBinding | undefined;
+  let settledBinding: RunBinding | undefined;
+  let invalidated: RunBinding | undefined;
   let ready = false;
   let retired = false;
   let active = false;
@@ -56,9 +83,16 @@ export default function directorBridge(pi: ExtensionAPI): void {
   }
 
   function requireRun(captured = binding, signal?: AbortSignal): RunBinding {
-    if (retired || !ready || !captured || captured !== binding || signal?.aborted)
+    if (retired || !ready || !captured || captured !== binding)
       throw new Error("No active director run binding");
+    if (captured === invalidated || signal?.aborted)
+      throw new CancelledRun("Director run cancelled");
     return captured;
+  }
+
+  function stop(ctx: ExtensionContext, error: unknown): void {
+    if (error instanceof CancelledRun) ctx.abort();
+    else retire(ctx);
   }
 
   function requireHost(ctx: ExtensionContext): void {
@@ -76,9 +110,19 @@ export default function directorBridge(pi: ExtensionAPI): void {
     signal?: AbortSignal,
   ): Promise<unknown> {
     requireRun(captured, signal);
-    const result = await peer!.call(method, { ...args, ...captured });
-    requireRun(captured, signal);
-    return result;
+    try {
+      // Callers validate fulfilled payloads before checking cancellation.
+      return await peer!.call(method, { ...args, ...captured });
+    } catch (error) {
+      if (
+        error instanceof RpcError &&
+        error.code === staleRunErrorCode &&
+        Check(RunBindingSchema, error.data) &&
+        sameRunBinding(error.data, captured)
+      )
+        requireRun(captured, signal);
+      throw error;
+    }
   }
 
   async function getState(ctx: ExtensionContext, signal?: AbortSignal) {
@@ -87,9 +131,10 @@ export default function directorBridge(pi: ExtensionAPI): void {
       const result = await request(captured, "game.state.get", { query: {} }, signal);
       if (!Check(GameStateResultSchema, result) || !sameRunBinding(result, captured))
         throw new Error("Invalid required game state or binding");
+      requireRun(captured, signal);
       return result.state;
     } catch (error) {
-      retire(ctx);
+      stop(ctx, error);
       throw error;
     }
   }
@@ -191,19 +236,35 @@ export default function directorBridge(pi: ExtensionAPI): void {
       if (retired || peer)
         throw new Error("Director extension cannot restart in the same Pi session");
       requireHost(ctx);
-      const bootstrap: unknown = JSON.parse(process.env.MC_HISYO_BRIDGE ?? "null");
-      if (!Check(BootstrapSchema, bootstrap)) throw new Error("Invalid MC_HISYO_BRIDGE bootstrap");
-      const socket = createConnection({ host: bootstrap.host, port: bootstrap.port });
-      peer = new RpcPeer(socket);
+      peer = await connect();
       peer.on("close", () => retire());
       peer.handle("director.run.bind", (params) => {
         if (retired || !ready || active || !Check(RunBindingSchema, params))
           throw new RpcError(-32001, "Director is not ready to bind an idle run");
         binding = Object.freeze({ ...params });
+        settledBinding = undefined;
+        invalidated = undefined;
         return binding;
       });
-      await once(socket, "connect", { signal: AbortSignal.timeout(5000) });
-      await peer.call("bridge.hello", { protocolVersion, role: "agent", token: bootstrap.token });
+      peer.handle("director.run.invalidate", (params) => {
+        const owned = binding ?? settledBinding;
+        if (
+          retired ||
+          !ready ||
+          !Check(RunBindingSchema, params) ||
+          !owned ||
+          !sameRunBinding(params, owned)
+        ) {
+          retire();
+          throw new RpcError(-32001, "Invalid director run cancellation");
+        }
+        // A late invalidation of the just-settled run is harmless; never bind over an active run.
+        if (binding) {
+          invalidated = binding;
+          abortActive?.();
+        }
+        return {};
+      });
       // No stdio ACK here: Pi installs its RPC stdin reader only after session_start completes.
       // The host can bind as soon as it handles ready, before this call's ACK arrives.
       ready = true;
@@ -221,7 +282,7 @@ export default function directorBridge(pi: ExtensionAPI): void {
       requireHost(ctx);
       requireRun();
     } catch (error) {
-      retire(ctx);
+      stop(ctx, error);
       throw error;
     }
   });
@@ -242,12 +303,13 @@ export default function directorBridge(pi: ExtensionAPI): void {
         ],
       };
     } catch (error) {
-      retire(ctx);
+      stop(ctx, error);
       throw error;
     }
   });
   // agent_end is intentionally ignored; only agent_settled releases the extension-side slot.
   pi.on("agent_settled", () => {
+    settledBinding = binding;
     binding = undefined;
     active = false;
     abortActive = undefined;
