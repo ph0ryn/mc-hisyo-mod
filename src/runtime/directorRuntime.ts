@@ -90,6 +90,9 @@ export async function startDirectorRuntime(
         dataDirectory: config.dataDirectory,
         executable: config.executable,
         model: config.model,
+        ...(config.oauthAgentDirectory === undefined
+          ? {}
+          : { oauthAgentDirectory: config.oauthAgentDirectory }),
         bridge: base.bridge,
         connection: base.connection,
         bundledExtension,

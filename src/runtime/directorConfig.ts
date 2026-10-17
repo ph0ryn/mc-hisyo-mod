@@ -6,10 +6,11 @@ const messages = {
   read: "Unable to read Pi configuration.",
   json: "Pi configuration requires strict JSON; JSONC is not supported.",
   schema: "Invalid Pi configuration fields.",
-  pair: "Configure both defaultProvider and defaultModel, or specify --provider and --model.",
+  pinned: "Project Pi is pinned to openai/gpt-6-luna.",
   native: "Selected provider configuration is unsupported; use native models without overrides.",
-  credential: "Selected credential is unsupported; use an API key literal or whole ${NAME}.",
-  key: "No API key is available from the selected credential source.",
+  credential:
+    "Selected credential is unsupported; use ChatGPT OAuth or an API key literal or whole ${NAME}.",
+  key: "No credential is available from the selected credential source.",
   selector: "Invalid native provider/model selection.",
   path: "Pi configuration paths must be nonempty.",
 } as const;
@@ -31,6 +32,7 @@ export interface TrustedDirectorConfig {
   readonly agentDirectory: string;
   readonly executable: string;
   readonly model: Readonly<NativePiModel>;
+  readonly oauthAgentDirectory?: string;
 }
 export const validEnvName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function object(value: unknown): Record<string, unknown> {
@@ -81,7 +83,7 @@ function credential(value: unknown, input: ConfigInput): string {
   return value;
 }
 
-/** Host-selected, read-only snapshot. No Pi resolver, catalog, project discovery or writes. */
+/** Host-selected snapshot. OAuth refresh is delegated to Pi, never copied into the child. */
 export function resolveTrustedConfig(
   options: CliOptions,
   input: ConfigInput,
@@ -92,14 +94,13 @@ export function resolveTrustedConfig(
       join(input.homeDirectory, ".pi", "agent"),
     input.homeDirectory,
   );
-  let provider: unknown = options.provider;
-  let id: unknown = options.model;
-  if (provider === undefined && id === undefined) {
-    const settings = readConfig(input, join(agentDirectory, "settings.json"));
-    provider = settings.defaultProvider;
-    id = settings.defaultModel;
-  }
-  if (!nonempty(provider) || !nonempty(id)) throw new DirectorConfigError("pair");
+  const provider = "openai";
+  const id = "gpt-6-luna";
+  if (
+    (options.provider !== undefined && options.provider !== provider) ||
+    (options.model !== undefined && options.model !== id)
+  )
+    throw new DirectorConfigError("pinned");
   const models = readConfig(input, join(agentDirectory, "models.json"));
   const providers = models.providers === undefined ? {} : object(models.providers);
   const entry = selected(providers, provider);
@@ -109,17 +110,30 @@ export function resolveTrustedConfig(
   if (native.apiKey !== undefined && typeof native.apiKey !== "string")
     throw new DirectorConfigError("schema");
   let apiKey: string;
+  let oauthAgentDirectory: string | undefined;
   if (options.apiKeyEnv !== undefined) apiKey = environmentKey(options.apiKeyEnv, input);
   else {
     const stored = selected(readConfig(input, join(agentDirectory, "auth.json")), provider);
     if (stored !== undefined) {
       const auth = object(stored);
-      if (
-        auth.type !== "api_key" ||
-        Object.keys(auth).some((field) => field !== "type" && field !== "key")
-      )
-        throw new DirectorConfigError("credential");
-      apiKey = credential(auth.key, input);
+      if (auth.type === "oauth") {
+        if (
+          !nonempty(auth.access) ||
+          !nonempty(auth.refresh) ||
+          typeof auth.expires !== "number" ||
+          !Number.isFinite(auth.expires)
+        )
+          throw new DirectorConfigError("credential");
+        apiKey = auth.access;
+        oauthAgentDirectory = agentDirectory;
+      } else {
+        if (
+          auth.type !== "api_key" ||
+          Object.keys(auth).some((field) => field !== "type" && field !== "key")
+        )
+          throw new DirectorConfigError("credential");
+        apiKey = credential(auth.key, input);
+      }
     } else if (native.apiKey !== undefined) apiKey = credential(native.apiKey, input);
     else throw new DirectorConfigError("key");
   }
@@ -139,5 +153,6 @@ export function resolveTrustedConfig(
       ? path(options.executable, input.homeDirectory)
       : options.executable,
     model,
+    ...(oauthAgentDirectory === undefined ? {} : { oauthAgentDirectory }),
   });
 }

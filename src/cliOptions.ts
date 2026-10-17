@@ -22,13 +22,14 @@ Options:
   --data-dir PATH     Private state directory (default: ~/.mc-hisyo).
                       Its parent must exist; existing directories must be owned 0700.
   --pi PATH           Pi executable (default: pi on PATH).
-  --provider P        Native provider; specify together with --model.
-  --model ID          Native model ID; otherwise use the global Pi default pair.
-  --pi-agent-dir DIR  Read-only input config (default: PI_CODING_AGENT_DIR or ~/.pi/agent).
+  --provider P        Must be openai; specify together with --model.
+  --model ID          Must be gpt-6-luna (project default; global defaults are ignored).
+  --pi-agent-dir DIR  Pi credential source (default: PI_CODING_AGENT_DIR or ~/.pi/agent).
   --api-key-env NAME  Use this environment variable instead of stored credentials.
 
-Pi options cannot be combined with --bridge-only. Only native API-key chat models
-supporting medium thinking are supported; OAuth, custom models and commands are not.
+Pi options cannot be combined with --bridge-only. Pi is pinned to openai/gpt-6-luna
+with medium thinking. ChatGPT OAuth is refreshed by Pi in the original credential store;
+API keys are also supported. Custom models, overrides and credential commands are rejected.
 Private discovery currently requires POSIX permissions. Keep parent directories trusted.
 Stop with Ctrl-C or SIGTERM. Stale connection.json requires manual recovery after its owner stops.
 `;

@@ -6,7 +6,7 @@ import type { WorldBinding } from "../protocol/bridge.js";
 import { startDirectorRuntime, type DirectorRuntimePorts } from "./directorRuntime.js";
 
 const world: WorldBinding = { worldId: "w", playerId: "p", worldSessionId: "s" };
-function fixture(args = ["--provider", "p", "--model", "m", "--api-key-env", "KEY"]) {
+function fixture(args = ["--api-key-env", "KEY"]) {
   const order: string[] = [];
   let sample!: () => void;
   let readyWorld: { binding: WorldBinding } | undefined;
@@ -100,6 +100,27 @@ test("config fails before acquiring any resource", async () => {
   expect(f.ports.startBridge).not.toHaveBeenCalled();
 });
 
+test("default launch forwards the OAuth source without its refresh grant", async () => {
+  const f = fixture([]);
+  f.ports.readText = (path) =>
+    path.endsWith("auth.json")
+      ? JSON.stringify({
+          openai: { type: "oauth", access: "access-token", refresh: "refresh-secret", expires: 1 },
+        })
+      : "{}";
+  const runtime = (await startDirectorRuntime(f.options, f.ports))!;
+  expect(f.ports.createScheduler).toHaveBeenCalledWith(
+    expect.objectContaining({
+      model: { provider: "openai", id: "gpt-6-luna", apiKey: "access-token" },
+      oauthAgentDirectory: "/home/unit/.pi/agent",
+    }),
+  );
+  expect(JSON.stringify(vi.mocked(f.ports.createScheduler).mock.calls)).not.toContain(
+    "refresh-secret",
+  );
+  await runtime.close();
+});
+
 test("normal composition snapshots config before bridge, polls only current binding, routes faults", async () => {
   const f = fixture();
   const runtime = (await startDirectorRuntime(f.options, f.ports))!;
@@ -109,7 +130,7 @@ test("normal composition snapshots config before bridge, polls only current bind
       bridge: f.base.bridge,
       executable: "pi",
       bundledExtension: "/trusted/directorBridge.mjs",
-      model: { provider: "p", id: "m", apiKey: "SECRET_SENTINEL" },
+      model: { provider: "openai", id: "gpt-6-luna", apiKey: "SECRET_SENTINEL" },
     }),
   );
   f.sample();
@@ -202,7 +223,7 @@ test("trusted config and bundled path are captured before resource acquisition",
     expect.objectContaining({
       executable: "pi",
       bundledExtension: "/trusted/directorBridge.mjs",
-      model: { provider: "p", id: "m", apiKey: "SECRET_SENTINEL" },
+      model: { provider: "openai", id: "gpt-6-luna", apiKey: "SECRET_SENTINEL" },
     }),
   );
   await runtime.close();

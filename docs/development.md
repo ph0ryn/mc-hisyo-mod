@@ -69,21 +69,23 @@ Node / pnpm / Java、Pi 1.2.0、依存cacheは別途準備する。
 ルートでbuild後、`dist/cli.mjs`とbundled `dist/directorBridge.mjs`を同じ配布物に保つ。
 
 ```bash
-# PROVIDER_NAME / NATIVE_MODEL_IDはPi組込catalogの正確な値へ置換する。
-# DIRECTOR_API_KEYは呼出元で安全に設定済みとする。key自体を引数へ書かない。
-node dist/cli.mjs --pi /absolute/path/to/pi \
-  --provider 'PROVIDER_NAME' --model 'NATIVE_MODEL_ID' \
-  --pi-agent-dir /absolute/private/pi-agent --api-key-env DIRECTOR_API_KEY
+# 既存のChatGPTログインを使い、openai/gpt-6-lunaで起動する。
+node dist/cli.mjs --pi /absolute/path/to/pi
+# 別のPi認証保存先を使う場合は --pi-agent-dir /absolute/private/pi-agent を追加する。
+# API keyを使う場合は、安全に設定した環境変数を --api-key-env DIRECTOR_API_KEY で指定する。
 ```
 
 引数の正は[parser / usage](<../src/cliOptions.ts>)、設定解決は[directorConfig.ts](<../src/runtime/directorConfig.ts>)。
 
-- `--pi`の既定はPATH上の`pi`。`--provider` / `--model`は両方指定し、IDにprovider prefixを付けない。
-  両方省略時だけPi設定の`defaultProvider` / `defaultModel`を使う。
-- 設定入力先は`--pi-agent-dir` → `PI_CODING_AGENT_DIR` → `~/.pi/agent`。読み取り専用の入力で、子のprivate設定先とは別。
-  strict JSONのみ。credentialは`--api-key-env NAME`、選択providerの`auth.json`、`models.json`の`apiKey`の順。
-  `auth.json`の選択provider entryは`{"type":"api_key","key":"..."}`だけ。keyはliteralまたは全体が`${NAME}`の環境変数参照。
-  コマンド、部分補間、OAuth、custom model / API overrideは拒否する。選択provider設定は`apiKey`以外を許さない。
+- `--pi`の既定はPATH上の`pi`。このプロジェクトのPiは`openai/gpt-6-luna`に固定し、グローバルのモデル設定は読み書きしない。
+  `--provider` / `--model`を指定する場合も両方が必要で、`openai` / `gpt-6-luna`以外は拒否する。
+- 認証保存先は`--pi-agent-dir` → `PI_CODING_AGENT_DIR` → `~/.pi/agent`。子のprivate設定先とは別。
+  strict JSONのみ。credentialは`--api-key-env NAME`、`auth.json`の`openai` entry、`models.json`の`apiKey`の順。
+  既存のChatGPT OAuthログイン、または`{"type":"api_key","key":"..."}`を使う。API keyはliteralまたは全体が`${NAME}`の環境変数参照。
+  コマンド、部分補間、custom model / API overrideは拒否する。選択provider設定は`apiKey`以外を許さない。
+  OAuthは子起動前・各判断前にPi標準の`auth print-bearer-token --provider openai`で有効期間を確認し、必要なら元の保存先で更新する。
+  更新失敗時はpromptを送らない。取消時もrefresh tokenの保存完了を待つため、停止が遅れることがある。
+  `openai-codex`は別の旧OAuth方式であり、このログインの代替providerにはしない。
 - Piのnative catalogでprovider / IDが一意、physical APIが`openai-completions` / `openai-responses` / `anthropic-messages`、
   `medium`対応を要求する。毎判断前に同一model / API、実選択`medium`、非streaming・非compacting・自動compaction無効・pending 0を検査する。
   不一致でfallbackしない。起動・各promptのready gateには認証済みbundled拡張と正確な10 Toolも必要。
@@ -154,7 +156,9 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 - scopeごとに空の`0700`作業ディレクトリを保持し、明示的なsession pathでPiを起動する。最近の会話を自動探索しない。
 - 起動ごとにHOME・agent設定・一時領域を新設し、子の終了確認後に削除する。親の環境変数はPATH以外を引き継がない。
 - 自動resource探索、context file、組込OS Tool、compaction、cache warmingを無効にし、bundled拡張と10 game Toolだけを明示する。
-- credentialは専用環境変数で渡す。設定fileは固定の変数参照だけを保持し、keyを引数へ出さない。
+- API keyは専用環境変数で渡し、設定fileは固定の変数参照だけを保持する。
+  OAuthは各判断の期限に余裕を加えた有効期間を要求し、access tokenだけをprivateな`0600`認証fileへatomicに渡す。
+  refresh tokenや他providerの認証は子へ渡さず、いずれのkey / tokenも引数や診断へ出さない。
 - モデル定義はPiの組込catalogを消さない。毎判断で正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
 - scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
 - pauseはbinding無効化後に取消し、実settledまで予約を保つ。detach・agent切断・開始済みか不明な失敗では子を終了する。

@@ -2,6 +2,31 @@ import { expect, test } from "vite-plus/test";
 import { parseOptions, cliErrorMessage } from "../cliOptions.js";
 import { resolveTrustedConfig } from "./directorConfig.js";
 
+test("default launch pins Luna regardless of global Pi settings and accepts ChatGPT OAuth", () => {
+  const source = input({
+    "/home/unit/.pi/agent/settings.json":
+      '{"defaultProvider":"openai","defaultModel":"gpt-6.1-sol"}',
+    ...auth({
+      openai: { type: "oauth", access: "access-token", refresh: "refresh-secret", expires: 1 },
+    }),
+  });
+  const resolved = resolveTrustedConfig(parseOptions([]), source);
+  expect(resolved.model).toEqual({ provider: "openai", id: "gpt-6-luna", apiKey: "access-token" });
+  expect(resolved.oauthAgentDirectory).toBe("/home/unit/.pi/agent");
+  expect(source.reads).not.toContain("/home/unit/.pi/agent/settings.json");
+  expect(JSON.stringify(resolved)).not.toContain("refresh-secret");
+});
+
+test("alternate explicit model is rejected even with a valid credential", () => {
+  const source = input({}, { KEY: "key" });
+  expect(() =>
+    resolveTrustedConfig(
+      parseOptions(["--provider", "openai", "--model", "gpt-6.1-sol", "--api-key-env", "KEY"]),
+      source,
+    ),
+  ).toThrow("pinned");
+});
+
 const key = " SECRET_SENTINEL ";
 function input(files: Record<string, string> = {}, env: Record<string, string> = {}) {
   const reads: string[] = [];
@@ -21,32 +46,33 @@ function input(files: Record<string, string> = {}, env: Record<string, string> =
     },
   };
 }
-const pair = ["--provider", "p", "--model", "m"];
+const pair = ["--provider", "openai", "--model", "gpt-6-luna"];
 const auth = (value: unknown) => ({ "/home/unit/.pi/agent/auth.json": JSON.stringify(value) });
 const models = (value: unknown) => ({ "/home/unit/.pi/agent/models.json": JSON.stringify(value) });
 
 test("snapshots explicit selector/key and skips settings and unused auth", () => {
   const source = input(
     {
-      ...auth({ p: { type: "oauth" } }),
-      ...models({ providers: { p: { apiKey: "!unused" }, other: { models: "ignored" } } }),
+      ...auth({ openai: { type: "oauth" } }),
+      ...models({ providers: { openai: { apiKey: "!unused" }, other: { models: "ignored" } } }),
     },
     { KEY: key },
   );
   const resolved = resolveTrustedConfig(parseOptions([...pair, "--api-key-env", "KEY"]), source);
-  expect(resolved.model).toEqual({ provider: "p", id: "m", apiKey: key });
+  expect(resolved.model).toEqual({ provider: "openai", id: "gpt-6-luna", apiKey: key });
   expect(Object.isFrozen(resolved)).toBe(true);
   expect(Object.isFrozen(resolved.model)).toBe(true);
   expect(source.reads).toEqual(["/home/unit/.pi/agent/models.json"]);
   expect(source.variables).not.toContain("unused");
 });
 
-test("global pair and stored key take precedence over unused models credential", () => {
+test("stored key takes precedence over unused models credential", () => {
   const source = input(
     {
-      "/home/unit/.pi/agent/settings.json": '{"defaultProvider":"p","defaultModel":"m"}',
-      ...auth({ p: { type: "api_key", key: "${KEY}" }, ignored: { type: "oauth" } }),
-      ...models({ providers: { p: { apiKey: "!unused" } } }),
+      "/home/unit/.pi/agent/settings.json":
+        '{"defaultProvider":"openai","defaultModel":"gpt-6-luna"}',
+      ...auth({ openai: { type: "api_key", key: "${KEY}" }, ignored: { type: "oauth" } }),
+      ...models({ providers: { openai: { apiKey: "!unused" } } }),
     },
     { KEY: key },
   );
@@ -55,14 +81,14 @@ test("global pair and stored key take precedence over unused models credential",
 
 test("models credential is the last source and unrelated expressions are never evaluated", () => {
   const source = input(
-    models({ providers: { p: { apiKey: key }, other: { apiKey: "!never", models: [] } } }),
+    models({ providers: { openai: { apiKey: key }, other: { apiKey: "!never", models: [] } } }),
   );
   expect(resolveTrustedConfig(parseOptions(pair), source).model.apiKey).toBe(key);
 });
 
 test.each([undefined, ""])("explicit missing/empty env has no fallback: %s", (value) => {
   const source = input(
-    auth({ p: { type: "api_key", key } }),
+    auth({ openai: { type: "api_key", key } }),
     value === undefined ? {} : { KEY: value },
   );
   expect(() =>
@@ -73,7 +99,7 @@ test.each([undefined, ""])("explicit missing/empty env has no fallback: %s", (va
 
 test("input directory precedence and canonical snapshot paths", () => {
   const source = input(
-    { "/flag/auth.json": JSON.stringify({ p: { type: "api_key", key } }) },
+    { "/flag/auth.json": JSON.stringify({ openai: { type: "api_key", key } }) },
     { PI_CODING_AGENT_DIR: "/ambient" },
   );
   const resolved = resolveTrustedConfig(
@@ -87,7 +113,7 @@ test("input directory precedence and canonical snapshot paths", () => {
   });
   expect(source.variables).not.toContain("PI_CODING_AGENT_DIR");
   const ambient = input(
-    { "/ambient/auth.json": JSON.stringify({ p: { type: "api_key", key } }) },
+    { "/ambient/auth.json": JSON.stringify({ openai: { type: "api_key", key } }) },
     { PI_CODING_AGENT_DIR: "/ambient" },
   );
   expect(resolveTrustedConfig(parseOptions(pair), ambient).agentDirectory).toBe("/ambient");
@@ -105,7 +131,7 @@ test.each([
   null,
 ])("selected unsupported/malformed credentials fail redacted: %j", (credential) => {
   try {
-    resolveTrustedConfig(parseOptions(pair), input(auth({ p: credential })));
+    resolveTrustedConfig(parseOptions(pair), input(auth({ openai: credential })));
     throw new Error("unexpected success");
   } catch (error) {
     expect(cliErrorMessage(error)).not.toContain("SECRET_SENTINEL");
@@ -124,7 +150,7 @@ test.each([
   "oauth",
   "authHeader",
 ])("selected %s override is rejected even with explicit key", (field) => {
-  const source = input(models({ providers: { p: { apiKey: "!unused", [field]: {} } } }), {
+  const source = input(models({ providers: { openai: { apiKey: "!unused", [field]: {} } } }), {
     KEY: key,
   });
   expect(() =>
@@ -137,17 +163,20 @@ test.each([
   "// JSONC\n{}",
   "[]",
   "null",
-  '{"defaultProvider":"p"}',
-  '{"defaultProvider":"","defaultModel":"m"}',
-  '{"defaultProvider":1,"defaultModel":"m"}',
-])("invalid settings do not become empty defaults: %s", (text) => {
-  try {
-    resolveTrustedConfig(parseOptions([]), input({ "/home/unit/.pi/agent/settings.json": text }));
-    throw new Error("unexpected success");
-  } catch (error) {
-    expect(cliErrorMessage(error)).not.toContain("SECRET_SENTINEL");
-    expect(cliErrorMessage(error)).not.toBe("Director operation failed.");
-  }
+  '{"defaultProvider":"openai"}',
+  '{"defaultProvider":"","defaultModel":"gpt-6-luna"}',
+  '{"defaultProvider":1,"defaultModel":"gpt-6-luna"}',
+])("global settings are never interpreted, including malformed settings: %s", (text) => {
+  const source = input({
+    "/home/unit/.pi/agent/settings.json": text,
+    ...auth({ openai: { type: "api_key", key } }),
+  });
+  expect(resolveTrustedConfig(parseOptions([]), source).model).toEqual({
+    provider: "openai",
+    id: "gpt-6-luna",
+    apiKey: key,
+  });
+  expect(source.reads).not.toContain("/home/unit/.pi/agent/settings.json");
 });
 
 test.each(["auth.json", "models.json"])(
@@ -177,7 +206,7 @@ test("only actual ENOENT is optional; read failures retain a fixed config diagno
 });
 
 test("models accepts whole env references and preserves literal/environment key bytes", () => {
-  const source = input(models({ providers: { p: { apiKey: "${KEY}" } } }), {
+  const source = input(models({ providers: { openai: { apiKey: "${KEY}" } } }), {
     KEY: " !SECRET_SENTINEL${not_recursive} ",
   });
   expect(resolveTrustedConfig(parseOptions(pair), source).model.apiKey).toBe(
@@ -187,14 +216,14 @@ test("models accepts whole env references and preserves literal/environment key 
   expect(
     resolveTrustedConfig(
       parseOptions(pair),
-      input(auth({ p: { type: "api_key", key: "literal}key" } })),
+      input(auth({ openai: { type: "api_key", key: "literal}key" } })),
     ).model.apiKey,
   ).toBe("literal}key");
 });
 
 test("selected models credential type is validated without resolving unused expressions", () => {
   for (const apiKey of [null, 123, {}]) {
-    const source = input(models({ providers: { p: { apiKey } } }), { KEY: key });
+    const source = input(models({ providers: { openai: { apiKey } } }), { KEY: key });
     expect(() =>
       resolveTrustedConfig(parseOptions([...pair, "--api-key-env", "KEY"]), source),
     ).toThrow();
@@ -205,7 +234,7 @@ test("missing credentials and provider-prefixed model never fall back", () => {
   expect(() => resolveTrustedConfig(parseOptions(pair), input())).toThrow();
   expect(() =>
     resolveTrustedConfig(
-      parseOptions(["--provider", "p", "--model", "p/m", "--api-key-env", "KEY"]),
+      parseOptions(["--provider", "openai", "--model", "p/m", "--api-key-env", "KEY"]),
       input({}, { KEY: key }),
     ),
   ).toThrow();

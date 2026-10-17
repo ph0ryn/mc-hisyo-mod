@@ -23,6 +23,7 @@ import { PiRunError, startPiRpcClient, type PiJudgment } from "../pi/piRpcClient
 import { sameWorldBinding, type RunBinding, type WorldBinding } from "../protocol/bridge.js";
 import type { ConnectionInfo } from "./connectionFile.js";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
+import { refreshPiOAuth } from "./piOAuth.js";
 
 export interface PiSessionOptions {
   dataDirectory: string;
@@ -35,6 +36,8 @@ export interface PiSessionOptions {
   /** Trusted executable wrapper; never untrusted game/model arguments. */
   prefixArgs?: readonly string[];
   model: NativePiModel;
+  /** Original host credential store; only Pi's auth command may refresh it. */
+  oauthAgentDirectory?: string;
   readyTimeoutMs?: number;
   requestTimeoutMs?: number;
   judgmentTimeoutMs?: number;
@@ -129,10 +132,14 @@ function prepareFiles(options: PiSessionOptions) {
       { flag: "wx", mode: 0o600 },
     );
     const model = options.model;
-    writeFileSync(join(agent.path, "models.json"), JSON.stringify(nativePiModelsConfig(model)), {
-      flag: "wx",
-      mode: 0o600,
-    });
+    writeFileSync(
+      join(agent.path, "models.json"),
+      JSON.stringify(options.oauthAgentDirectory ? { providers: {} } : nativePiModelsConfig(model)),
+      {
+        flag: "wx",
+        mode: 0o600,
+      },
+    );
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
       HOME: home.path,
@@ -142,7 +149,7 @@ function prepareFiles(options: PiSessionOptions) {
       PI_OFFLINE: "1",
       PI_SKIP_VERSION_CHECK: "1",
       PI_TELEMETRY: "0",
-      MC_HISYO_MODEL_API_KEY: model.apiKey,
+      ...(options.oauthAgentDirectory ? {} : { MC_HISYO_MODEL_API_KEY: model.apiKey }),
       MC_HISYO_BRIDGE: JSON.stringify({
         protocolVersion: options.connection.protocolVersion,
         host: options.connection.host,
@@ -181,7 +188,14 @@ function prepareFiles(options: PiSessionOptions) {
       "--thinking",
       "medium",
     ];
-    return { cwd: cwd.path, sessionPath, env, args, close };
+    return {
+      cwd: cwd.path,
+      sessionPath,
+      authPath: join(agent.path, "auth.json"),
+      env,
+      args,
+      close,
+    };
   } catch (error) {
     try {
       close();
@@ -199,6 +213,11 @@ export async function startPiSession(options: PiSessionOptions): Promise<PiSessi
   if (!isAbsolute(options.bundledExtension))
     throw new Error("Bundled Pi extension path must be absolute");
   assertNativePiModel(options.model);
+  if (
+    options.oauthAgentDirectory !== undefined &&
+    (!isAbsolute(options.oauthAgentDirectory) || options.model.provider !== "openai")
+  )
+    throw new Error("Invalid ChatGPT credential source");
   if (
     options.readyTimeoutMs !== undefined &&
     (!Number.isSafeInteger(options.readyTimeoutMs) || options.readyTimeoutMs <= 0)
@@ -266,8 +285,22 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     return this.#client?.diagnostics ?? "";
   }
 
+  async #refreshAuth(signal: AbortSignal): Promise<void> {
+    const options = this.#options;
+    if (options.oauthAgentDirectory)
+      await refreshPiOAuth(
+        options.executable,
+        options.oauthAgentDirectory,
+        this.#files.authPath,
+        options.judgmentTimeoutMs ?? 300_000,
+        signal,
+      );
+  }
+
   async #start(): Promise<void> {
     const options = this.#options;
+    await this.#refreshAuth(this.#stop.signal);
+    this.#stop.signal.throwIfAborted();
     const signal = AbortSignal.any([
       this.#stop.signal,
       AbortSignal.timeout(options.readyTimeoutMs ?? 5_000),
@@ -319,6 +352,8 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
       const world = this.#options.bridge.currentWorld;
       if (!world || !sameWorldBinding(world.binding, this.#options.world))
         throw new Error("Pi world binding changed");
+      await this.#refreshAuth(signal);
+      if (signal.aborted) return { status: "not_started" };
       binding = await this.#options.bridge.beginRun();
       if (signal.aborted) return { status: "not_started" };
       return await this.#client!.run(message, signal);
@@ -366,6 +401,8 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     return this.#shutdown;
   }
   async #close(): Promise<void> {
+    // A rotating OAuth grant must be persisted before its helper exits and files are removed.
+    await this.ready.catch(() => {});
     const client = this.#client ?? (await this.#launch?.catch(() => undefined));
     // Do not release the scope/bridge lease if child termination could not be confirmed.
     await client?.close();
