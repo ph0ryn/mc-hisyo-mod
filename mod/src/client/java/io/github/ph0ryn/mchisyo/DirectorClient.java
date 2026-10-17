@@ -2,6 +2,7 @@ package io.github.ph0ryn.mchisyo;
 
 import com.google.gson.JsonObject;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import io.github.ph0ryn.mchisyo.observation.ObservedEvent;
 import io.github.ph0ryn.mchisyo.observation.ServerGameState;
 import io.github.ph0ryn.mchisyo.observation.ServerObservations;
 import io.github.ph0ryn.mchisyo.reference.PackagedReferences;
@@ -35,6 +36,7 @@ final class DirectorClient {
     private final ThreadPoolExecutor bootstrap = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(1), task -> { Thread thread = new Thread(task, "mc-hisyo-bootstrap"); thread.setDaemon(true); return thread; });
     private final ServerObservations observations;
+    private final GameSession.PendingJoin pendingJoin = new GameSession.PendingJoin();
     private volatile Attempt active;
     private volatile Attempt baselineOwner;
     private IntegratedServer seenServer; // Client-thread admission: once per world entry, never auto-reconnect.
@@ -53,6 +55,7 @@ final class DirectorClient {
     DirectorClient(Minecraft client, Path configDir) {
         this.client = client; this.configDir = configDir;
         observations = ServerObservations.register(player -> {
+            if (localServerPlayer(player)) pendingJoin.retain(player.level().getServer(), player, player.getUUID());
             Attempt a = active;
             if (a != null && a.server == player.level().getServer() && a.server.isPublished()) retire(a);
             return a != null && active == a && !a.retired && baselineOwner == a && a.session != null
@@ -61,11 +64,11 @@ final class DirectorClient {
             Attempt a = active;
             if (a != null && !a.retired && a.server.isSameThread() && !a.server.isPublished()
                     && baselineOwner == a && a.session != null) a.session.observation(event);
-        });
+        }, ServerObservations.DEFAULT_MOVEMENT_SAMPLING, this::nativeConnection);
         ClientTickEvents.END_CLIENT_TICK.register(ignored -> tick());
-        ClientPlayConnectionEvents.DISCONNECT.register((handler, minecraft) -> { retire(active); seenServer = null; });
-        ServerLifecycleEvents.SERVER_STOPPING.register(server -> { Attempt a = active; if (a != null && a.server == server) retire(a); });
-        ClientLifecycleEvents.CLIENT_STOPPING.register(ignored -> { stopping = true; retire(active); bootstrap.shutdownNow(); });
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, minecraft) -> { pendingJoin.retire(null); retire(active); seenServer = null; });
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> { pendingJoin.retire(server); Attempt a = active; if (a != null && a.server == server) retire(a); });
+        ClientLifecycleEvents.CLIENT_STOPPING.register(ignored -> { stopping = true; pendingJoin.retire(null); retire(active); bootstrap.shutdownNow(); });
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registry) -> {
             if (dispatcher.getRoot().getChild("ai") != null) throw new IllegalStateException("Client command /ai is already registered");
             dispatcher.register(ClientCommandManager.literal("ai")
@@ -73,6 +76,19 @@ final class DirectorClient {
                     .then(ClientCommandManager.argument("message", StringArgumentType.greedyString())
                             .executes(context -> submit(StringArgumentType.getString(context, "message")))));
         });
+    }
+    private static boolean localServerPlayer(ServerPlayer player) {
+        return player.level().getServer() instanceof IntegratedServer server && server.getSingleplayerProfile() != null
+                && server.getSingleplayerProfile().id().equals(player.getUUID());
+    }
+    private void nativeConnection(ServerPlayer player, ObservedEvent event) {
+        if (!localServerPlayer(player)) return;
+        IntegratedServer server = (IntegratedServer) player.level().getServer();
+        if (event.data().get("state").equals("leaving")) { pendingJoin.retire(server); return; }
+        Attempt a = active;
+        if (!server.isPublished() && (a == null || a.server != server || (!a.retired && baselineOwner != a))) {
+            pendingJoin.capture(server, player, player.getUUID(), event);
+        }
     }
     private boolean local(Attempt a) {
         return a != null && active == a && !a.retired && client.isSingleplayer() && client.getSingleplayerServer() == a.server
@@ -88,13 +104,14 @@ final class DirectorClient {
             retire(a); throw GameSession.stale();
         }
         ServerPlayer player = a.server.getPlayerList().getPlayer(a.player);
-        if (player == null) throw GameSession.stale();
+        if (player == null) { pendingJoin.retire(a.server); throw GameSession.stale(); }
+        pendingJoin.retain(a.server, player, a.player);
         return player;
     }
     private void tick() {
         if (stopping) return;
         if (!client.isSingleplayer() || client.player == null || client.level == null) {
-            retire(active); if (client.getSingleplayerServer() == null) seenServer = null; return;
+            retire(active); if (client.getSingleplayerServer() == null) { pendingJoin.retire(null); seenServer = null; } return;
         }
         IntegratedServer server = client.getSingleplayerServer(); Attempt a = active;
         if (a != null && (a.server != server || !a.player.equals(client.player.getUUID()))) { retire(a); a = null; }
@@ -135,7 +152,7 @@ final class DirectorClient {
             LoopbackConnection connection = new LoopbackConnection(files.connection().port());
             GameSession session = new GameSession(connection.peer(), new GameSession.GamePort() {
                 public CompletionStage<Void> initialize() {
-                    return serverTask(a, () -> { observations.clearBaselines(); baselineOwner = a; return null; });
+                    return serverTask(a, () -> { observations.clearBaselines(); baselineOwner = null; return null; });
                 }
                 public CompletionStage<JsonObject> snapshot(GameSession.Capture capture) {
                     return serverTask(a, () -> {
@@ -194,7 +211,18 @@ final class DirectorClient {
             });
             session.start(connection.start(), files.connection().token()).whenComplete((ignored, error) -> {
                 if (error != null) { retire(a); client.execute(() -> feedbackIfCurrentWorld(a, "Director connection failed. Check the CLI and settings, then rejoin.")); }
-                else client.execute(() -> { if (local(a)) feedback("Director connected. Observations while disconnected are not recorded."); });
+                else serverTask(a, () -> {
+                    ServerPlayer player = requireServer(a);
+                    if (a.session != session || !session.isReady()) throw GameSession.stale();
+                    ObservedEvent joined = pendingJoin.take(a.server, player, a.player);
+                    if (joined != null) session.observation(joined);
+                    // Sending can synchronously fail/retire the owner; never reopen its baseline afterwards.
+                    if (requireServer(a) != player || a.session != session || !session.isReady()) throw GameSession.stale();
+                    baselineOwner = a; return null;
+                }).whenComplete((admitted, failure) -> {
+                    if (failure != null) retire(a);
+                    else client.execute(() -> { if (local(a)) feedback("Director connected. Observations while disconnected are not recorded."); });
+                });
             });
         } catch (RuntimeException error) { failed(a); }
     }
@@ -226,6 +254,7 @@ final class DirectorClient {
         synchronized (a) { if (a.retired) return; a.retired = true; }
         // Fence captured work before cleanup. No waits, file/socket operations, or joins on game threads.
         synchronized (this) { if (active == a) active = null; }
+        pendingJoin.retire(a.server);
         if (a.session != null) a.session.close();
         if (a.connection != null) a.connection.close();
         a.server.execute(() -> { if (baselineOwner == a) { observations.clearBaselines(); baselineOwner = null; } });

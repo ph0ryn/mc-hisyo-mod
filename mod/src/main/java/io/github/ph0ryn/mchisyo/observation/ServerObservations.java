@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -82,9 +83,16 @@ public final class ServerObservations {
 
     public static ServerObservations register(Predicate<ServerPlayer> isScopedPlayer, Consumer<ObservedEvent> sink,
             SnapshotDeltaTracker.MovementSampling movementSampling) {
+        return register(isScopedPlayer, sink, movementSampling, (player, event) -> {});
+    }
+
+    /** Native connection facts reach this callback before ready-only observation admission. */
+    public static ServerObservations register(Predicate<ServerPlayer> isScopedPlayer, Consumer<ObservedEvent> sink,
+            SnapshotDeltaTracker.MovementSampling movementSampling, BiConsumer<ServerPlayer, ObservedEvent> nativeConnection) {
+        Objects.requireNonNull(nativeConnection);
         ServerObservations observations = new ServerObservations(isScopedPlayer, sink, movementSampling);
         if (active != null) throw new IllegalStateException("Server observations already registered");
-        observations.registerCallbacks();
+        observations.registerCallbacks(nativeConnection);
         active = observations;
         return observations;
     }
@@ -99,7 +107,7 @@ public final class ServerObservations {
         tracker.clear();
     }
 
-    private void registerCallbacks() {
+    private void registerCallbacks(BiConsumer<ServerPlayer, ObservedEvent> nativeConnection) {
         PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
             if (player instanceof ServerPlayer serverPlayer && scoped(serverPlayer)) {
                 emit(serverPlayer, "block_broken", Map.of(
@@ -142,19 +150,25 @@ public final class ServerObservations {
             }
         });
         ServerPlayerEvents.JOIN.register(player -> {
+            requireServerThread(player.level().getServer());
+            ObservedEvent joined = fact(player, "player_connection_changed", Map.of("state", "joined"));
+            nativeConnection.accept(player, joined);
             forgetMenu(player);
             tracker.clearMenuContext(player);
             tracker.reset(player.getUUID());
             if (scoped(player)) {
-                emit(player, "player_connection_changed", Map.of("state", "joined"));
+                sink.accept(joined);
                 tracker.rebaseline(player.getUUID(), snapshot(player));
             }
         });
         ServerPlayerEvents.LEAVE.register(player -> {
+            requireServerThread(player.level().getServer());
+            ObservedEvent leaving = fact(player, "player_connection_changed", Map.of("state", "leaving"));
+            nativeConnection.accept(player, leaving);
             forgetMenu(player);
             tracker.clearMenuContext(player);
             tracker.reset(player.getUUID());
-            if (scoped(player)) emit(player, "player_connection_changed", Map.of("state", "leaving"));
+            if (scoped(player)) sink.accept(leaving);
         });
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
             forgetMenu(oldPlayer);
@@ -456,8 +470,12 @@ public final class ServerObservations {
     }
 
     private void emit(ServerPlayer player, String name, Map<String, Object> data) {
-        sink.accept(new ObservedEvent(name, player.level().dimension().identifier().toString(),
-                position(player.position()), player.level().getGameTime(), System.currentTimeMillis(), data));
+        sink.accept(fact(player, name, data));
+    }
+
+    private static ObservedEvent fact(ServerPlayer player, String name, Map<String, Object> data) {
+        return new ObservedEvent(name, player.level().dimension().identifier().toString(),
+                position(player.position()), player.level().getGameTime(), System.currentTimeMillis(), data);
     }
 
     private static PlayerSnapshot snapshot(ServerPlayer player) {

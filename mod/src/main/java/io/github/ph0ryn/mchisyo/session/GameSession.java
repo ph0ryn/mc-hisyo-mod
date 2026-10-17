@@ -12,6 +12,27 @@ import java.util.concurrent.*;
 
 /** One directly composed RPC attachment. No game objects, scheduling, reconnect, or replay. */
 public final class GameSession implements AutoCloseable {
+    /** One genuine native JOIN, retained only until admission or identity/lifetime invalidation. */
+    public static final class PendingJoin {
+        private Object server, player;
+        private UUID id;
+        private ObservedEvent fact;
+        public synchronized void capture(Object server, Object player, UUID id, ObservedEvent fact) {
+            this.server = Objects.requireNonNull(server); this.player = Objects.requireNonNull(player);
+            this.id = Objects.requireNonNull(id); this.fact = Objects.requireNonNull(fact);
+        }
+        public synchronized void retain(Object server, Object player, UUID id) {
+            if (this.server == server && (this.player != player || !Objects.equals(this.id, id))) retire(server);
+        }
+        public synchronized ObservedEvent take(Object server, Object player, UUID id) {
+            if (this.server != server) return null;
+            ObservedEvent taken = this.player == player && Objects.equals(this.id, id) ? fact : null;
+            retire(server); return taken;
+        }
+        public synchronized void retire(Object server) {
+            if (server == null || this.server == server) { this.server = null; player = null; id = null; fact = null; }
+        }
+    }
     public interface GamePort {
         CompletionStage<Void> initialize();
         CompletionStage<JsonObject> snapshot(Capture capture);

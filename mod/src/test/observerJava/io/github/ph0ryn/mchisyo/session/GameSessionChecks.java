@@ -30,7 +30,11 @@ public final class GameSessionChecks {
         final ArrayDeque<Runnable> queue = new ArrayDeque<>();
         int displayed;
         Runnable afterRead = () -> {};
-        public CompletionStage<Void> initialize() { return CompletableFuture.completedFuture(null); }
+        boolean queuedInitialize;
+        public CompletionStage<Void> initialize() {
+            if (!queuedInitialize) return CompletableFuture.completedFuture(null);
+            CompletableFuture<Void> result = new CompletableFuture<>(); queue.add(() -> result.complete(null)); return result;
+        }
         public CompletionStage<JsonObject> snapshot(GameSession.Capture capture) {
             CompletableFuture<JsonObject> result = new CompletableFuture<>();
             queue.add(() -> { try { capture.requireCurrent(); JsonObject copy = json("{\"version\":1}"); afterRead.run(); result.complete(copy); } catch (RuntimeException e) { result.completeExceptionally(e); } });
@@ -56,7 +60,79 @@ public final class GameSessionChecks {
         JsonObject frame = json("{\"jsonrpc\":\"2.0\"}"); frame.add("id", wire.last().get("id")); frame.add("result", result);
         peer.receive((frame + "\n").getBytes(StandardCharsets.UTF_8));
     }
+    private static void initialJoinChecks() {
+        Object server = new Object(), player = new Object(); UUID id = UUID.fromString(PLAYER);
+        GameSession.PendingJoin pending = new GameSession.PendingJoin();
+        List<Double> position = new ArrayList<>(List.of(3d, 4d, 5d));
+        Map<String, Object> data = new HashMap<>(Map.of("state", "joined"));
+        ObservedEvent joined = new ObservedEvent("player_connection_changed", "minecraft:the_nether", position, 17, 23, data);
+        pending.capture(server, player, id, joined); position.set(0, 99d); data.put("state", "leaving");
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game(); game.queuedInitialize = true;
+        GameSession session = new GameSession(peer, game, WORLD, PLAYER, List.of("player_connection_changed"), false);
+        boolean[] current = {true}, baseline = {false};
+        CompletionStage<Void> start = session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+        Runnable admission = () -> {
+            if (!current[0] || !session.isReady()) return;
+            ObservedEvent fact = pending.take(server, player, id);
+            if (fact != null) session.observation(fact);
+            if (current[0] && session.isReady()) baseline[0] = true;
+        };
+        start.thenRun(() -> game.queue.add(admission));
+        reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}")); reply(peer, wire, RUN.worldBinding().toJson());
+        receive(peer, "game.run.bind", RUN.toJson(), 501);
+        check(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+        check(!session.isReady()); check(!baseline[0]); game.queue.remove().run();
+        JsonElement readyId = wire.last().get("id");
+        check(session.isReady()); check(!start.toCompletableFuture().isDone()); check(!baseline[0]); check(game.queue.isEmpty());
+        receive(peer, "game.run.bind", RUN.toJson(), 502); check(wire.last().get("result").equals(RUN.toJson()));
+        JsonObject ack = json("{\"jsonrpc\":\"2.0\",\"result\":{\"ready\":true}}"); ack.add("id", readyId);
+        peer.receive((ack + "\n").getBytes(StandardCharsets.UTF_8)); check(!baseline[0]); check(game.queue.size() == 1);
+        game.queue.remove().run(); check(baseline[0]);
+        JsonObject admitted = wire.last().getAsJsonObject("params");
+        check(admitted.get("seq").getAsInt() == 1); check(admitted.get("dimension").getAsString().equals("minecraft:the_nether"));
+        check(admitted.get("tick").getAsLong() == 17); check(admitted.get("observedAt").getAsLong() == 23);
+        check(admitted.getAsJsonArray("position").get(0).getAsDouble() == 3);
+        check(admitted.getAsJsonObject("data").get("state").getAsString().equals("joined"));
+        check(pending.take(server, player, id) == null); // Unknown event ACK never retains/replays JOIN.
+        reply(peer, wire, json("{\"stored\":1}"));
+        session.observation(new ObservedEvent("health_changed", "minecraft:overworld", List.of(30d, 40d, 50d), 99, 101, Map.of("previous", 20, "current", 19)));
+        check(wire.last().getAsJsonObject("params").get("seq").getAsInt() == 2);
+        check(wire.last().getAsJsonObject("params").get("event").getAsString().equals("health_changed")); session.close();
+        pending.capture(server, player, id, joined); pending.retain(server, new Object(), id); check(pending.take(server, player, id) == null);
+        pending.capture(server, player, id, joined); check(pending.take(server, player, UUID.randomUUID()) == null); check(pending.take(server, player, id) == null);
+        pending.capture(server, player, id, joined); check(pending.take(new Object(), player, id) == null); check(pending.take(server, player, id) == joined);
+        pending.capture(server, player, id, joined); pending.retire(server); check(pending.take(server, player, id) == null);
+        pending.capture(server, player, id, joined); pending.retire(null); check(pending.take(server, player, id) == null);
+        // Retired queued admission cannot reopen a replacement owner, even with identical textual binding.
+        current[0] = false; baseline[0] = false; Object replacementServer = new Object();
+        pending.capture(replacementServer, player, id, joined); pending.retire(server); game.queue.add(admission);
+        game.queue.remove().run(); check(!baseline[0]); check(pending.take(replacementServer, player, id) == joined);
+        check(pending.take(new Object(), player, id) == null);
+        Wire failedWire = new Wire(); RpcPeer failedPeer = new RpcPeer(failedWire); Game failedGame = new Game();
+        GameSession failed = new GameSession(failedPeer, failedGame, WORLD, PLAYER, List.of(), false);
+        failed.start(CompletableFuture.completedFuture(failedPeer), "a".repeat(43));
+        reply(failedPeer, failedWire, json("{\"protocolVersion\":1,\"role\":\"game\"}")); reply(failedPeer, failedWire, RUN.worldBinding().toJson());
+        reply(failedPeer, failedWire, json("{\"ready\":true}"));
+        pending.capture(server, player, id, joined); baseline[0] = false;
+        failedWire.beforeSchedule = failed::close;
+        failedGame.queue.add(() -> {
+            ObservedEvent taken = pending.take(server, player, id); failed.observation(taken);
+            if (failed.isReady()) baseline[0] = true;
+        });
+        failedGame.queue.remove().run(); check(!baseline[0]);
+        check(!failed.isReady()); check(pending.take(server, player, id) == null); check(failedWire.sent.size() == 3);
+        Wire badWire = new Wire(); RpcPeer badPeer = new RpcPeer(badWire); Game badGame = new Game();
+        GameSession bad = new GameSession(badPeer, badGame, WORLD, PLAYER, List.of(), false);
+        pending.capture(server, player, id, joined);
+        CompletionStage<Void> badStart = bad.start(CompletableFuture.completedFuture(badPeer), "a".repeat(43));
+        badStart.whenComplete((ignored, error) -> { if (error != null) pending.retire(server); else badGame.queue.add(admission); });
+        reply(badPeer, badWire, json("{\"protocolVersion\":1,\"role\":\"game\"}")); reply(badPeer, badWire, RUN.worldBinding().toJson());
+        reply(badPeer, badWire, json("{\"ready\":false}"));
+        check(badStart.toCompletableFuture().isCompletedExceptionally()); check(!bad.isReady());
+        check(badGame.queue.isEmpty()); check(pending.take(server, player, id) == null);
+    }
     public static void main(String[] args) {
+        initialJoinChecks();
         try { Class.forName("net.minecraft.client.Minecraft"); throw new AssertionError("game runtime present"); } catch (ClassNotFoundException expected) { check(true); }
         String connection = "{\"protocolVersion\":1,\"host\":\"127.0.0.1\",\"port\":1234,\"token\":\"" + "a".repeat(43) + "\",\"pid\":1}";
         check(DirectorFiles.parseConnection(connection).port() == 1234);
