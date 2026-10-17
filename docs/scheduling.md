@@ -1,7 +1,7 @@
 # ポーリングと応答hook
 
-保留キュー、開始・チャット・一致hook・pollのsingle-flight実行制御と純粋なactive-play計時はcheckpoint実装済み。
-既定batchのPi通信容量回帰はunit testで修正を確認した。タイマー資源・CLI / Modへの配線は未完了。[実装状況](<development.md>)を参照。
+保留キュー、開始・チャット・一致hook・pollのsingle-flight実行制御、active-play計時と通常CLI / Modへの配線は実装済み。
+実接続・実Pi受入れは未実施。[実装・検証状況](<development.md>)を参照。
 
 ## AIを起動する入口
 
@@ -19,7 +19,7 @@
 接続中・プレイ中であることを確認
   → CLIの定期タイマーが発火
   → 判断を予約
-  → Piが空いたらmedium以上で実行
+  → Piが空いたら固定mediumで実行
   → 必要ならToolで確認
   → 発言・hook変更・無言で終了
 ```
@@ -36,7 +36,7 @@ schedulerはreadyのworldごとに時計を作り、attach時点から非pause�
 戻り値`true`は予約の受付・集約であり実行完了ではない。未到達・古いbinding・停止中は`false`、計時や受付の失敗は`fault`で明示して停止する。
 プレイヤー入力・hookは同じ次回batchに保持し、pollだけのために別slotや割込みを作らない。
 時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
-**定期的にこの入口を呼ぶタイマーとその破棄はruntimeの今後の配線であり、まだ動作しない。**
+[runtime](<../src/runtime/directorRuntime.ts>)は1,000 msごとにready worldへこの入口を呼び、shutdown時にtimerを最初に止める。
 
 pause・退出・切断は実行中のbindingも直ちに無効化する。CLIはPiへabortを要求し、
 `agent_settled`を確認するまでslotを解放しない。停止待ちの間に復帰しても判断を重ねない。
@@ -93,8 +93,8 @@ CLIが実行待ちを管理し、同じhookの発火はイベントを失わず�
 プレイヤーからの入力も保持し、定期判断を重ねて予約しない。
 処理待ち入力が容量上限を超えたら、明示エラーで判断処理を停止する。黙示的な破棄や永続inboxへの退避は行わない。
 
-即応を優先して割り込む場合は、現在の処理を中断し、停止を確認してから次を開始する。
-即応と通常処理の具体的な優先順位は、初期検証で確定する。
+現在は優先度別laneや入力割込みを設けず、同じqueueで順番に処理する。
+取消はpause・binding無効化・停止等で行い、入力到着だけで進行中の判断を中断しない。
 
 Piの`steer`は進行中のAPI応答を即座に中断する機能ではなく、次のLLM呼び出し前に入力を渡す仕組みである。
 実行の完了確認には`agent_settled`を使う。
@@ -130,7 +130,7 @@ pause中も入力は保持するが判断を開始しない。pause解除がsett
 容量超過は同期的に失敗を固定し、実行bindingを無効化・Piを取消してから`fault`を通知する。
 その後のチャットも`-32004`で拒否し、world再接続だけでは回復しない。
 hook受付時点でrawイベントは保存済みなので、容量超過でも`stored` ACKと履歴は維持する。停止後も観測保存を続けられる。
-ゲームへのエラー表示は未配線で、RPCの明示エラーとruntimeの`fault`を提供する段階である。
+RPCの明示エラーとruntimeの`fault`で失敗を伝える。独立したゲーム内scheduler診断HUDは提供しない。
 
 退出時は古い揮発入力を次のbindingへ移さず、起動途中のcleanupと実子プロセスの終了を待ってから次の所有者を起動する。
 起動中の明示`close()`は受付と新規実行を直ちに止め、既存の期限付き起動・cleanup完了を待つ。
@@ -139,7 +139,7 @@ hook受付時点でrawイベントは保存済みなので、容量超過でも`
 [隣接するVitest](<../src/runtime/judgmentScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
 ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
 実際の取消・子プロセス終了の旧境界suiteは削除済み。stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
-既存26ケースを維持し、手動時刻によるpoll・pause・再接続・停止の8ケースを加えた34ケースが成功した。
+初期26ケースと8件追加の34件成功は過去checkpoint。現在の最終件数・範囲は[検証資料](<validation.md>)を正とする。
 [clock unit](<../src/runtime/activePlayClock.test.ts>)の10ケースはactive時間・遅延集約・不正時刻を確認する。
 既知のquote-heavy通信容量回帰も修正済みで、同じ17件の入力・順序・raw容量のassertionを維持し、
 保留JSON 544,215 bytesがpromptで1,088,312 bytesになるケースをproductionと同じPi専用codecへ渡している。
@@ -147,22 +147,15 @@ hook受付時点でrawイベントは保存済みなので、容量超過でも`
 user echoと代表的な`agent_end`の受信、有限上限の境界・超過拒否、global codecの1 MiB維持も確認する。
 Pi送受信だけを2 MiB + 256 bytesへ分離し、キューの1 MiBと過負荷停止方針は変更していない。
 任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
-Pi側上限超過は引き続き明示失敗で停止する。これらのunit結果だけでscheduler全体の完成とは扱わない。
-active-play計時とpoll入口だけでは全体は動作しない。定期timer資源、CLI / Mod接続は未実装、実Piでのscheduler受入は未実施である。
+Pi側上限超過は引き続き明示失敗で停止する。これらのunit結果だけで実接続受入れ済みとは扱わない。
+定期timer・CLI / Mod接続は実装済みだが、実Piでのscheduler受入れは未実施。
+判断理由は`judge`前に保存する。要求記録はprovider実行の証拠ではない。
+native-first取消の待機は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
 
 ## 推論設定
 
-| 用途 | 初期案 |
-| --- | --- |
-| 定期的な進行判断 | `medium`以上 |
-| 短い即応判断 | `quick`というアプリ側の呼び名で、利用可能な低推論設定へ対応付ける |
-| 詳しい再検討 | 必要に応じて`high`で続ける |
-
-Piの推論設定に`instant`はない。
-`quick`の具体的な設定は選択モデルの対応状況を確認し、未対応の設定へ黙ってフォールバックしない。
-モデル・推論設定の変更は実行停止後に行う。
-即応後の詳しい判断は毎回必須にせず、必要な場合に予約する。
-低推論設定でも応答時間は保証されない。
+現在は全判断で`medium`固定。Pi 1.2.0のcatalog・対応thinking levels・実際のidle stateを毎判断前に検査し、未対応なら停止する。
+`quick` / `high`切替や即応後の別laneは初期案に留まり、実装していない。応答時間の保証もない。
 
 ## 一次資料
 

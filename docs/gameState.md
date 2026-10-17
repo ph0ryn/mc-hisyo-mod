@@ -3,7 +3,8 @@
 [状態schema](<../src/protocol/gameSnapshot.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
 偽gameとの実TCP suiteはunit-only化で削除済み。現在のunit suiteはこの接続境界を検証しない。
 [Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装済みで、過去のローカル検証と現在のcoverageは[検証状況](<validation.md>)で区別する。
-**Modの取得・送信はまだ未接続。** 以下の取得方法はMod側で満たす契約であり、ゲーム内の動作実績ではない。
+[Mod producer](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerGameState.java>)と接続済み。
+以下は実装契約であり、ゲーム内の動作実績ではない。
 
 ## 要求と検証
 
@@ -11,7 +12,8 @@
 現在は全baselineを返す方式のみ。投影queryや任意のNBT取得は提供せず、未知のqueryキーは`-32602`で拒否する。
 
 `state.version`は`1`。下記のfieldはすべて必須で、余分なfield、未対応version、型・件数の違反を許さない。
-不正な結果は`-32603`、無効なbindingは`-32001`。空の`state: {}`で成功扱いにしない。
+不正な結果は`-32603`、無効なbindingは`-32001`。host所有の取消済みrunにはbinding付き`-32005`を返す。
+空の`state: {}`で成功扱いにしない。[取消の順序](<protocol.md#native側が先にrunを無効化した場合>)を参照。
 応答のawait後にもbindingを再検証する。schemaは形式の検証であり、Modが報告した値の真正性や実世界との一致を証明するものではない。
 
 完全なJSON例は[共有fixture](<../src/protocol/fixtures/gameSnapshot.json>)を参照。
@@ -61,7 +63,7 @@ IDと個数のbaselineであり、enchantment、damage、custom component、cont
   近い順・固定順は保証しない。
 
 値はすべてサーバースレッドで同じ取得処理内にコピーする。通信へMinecraftの可変objectを渡さない。
-重い周辺走査はon-demandにし、毎tickのイベント差分snapshotへ追加しない。
+現在状態はon-demand。観測側のbounded周辺sampleは20 ticksごとで、毎tickのinventory差分とは分ける。
 biomeもchunk取得の待機や生成を伴わない経路を使い、取得できなければ`null`で表す。
 
 半径と件数は初期のcontext・frame予算で、実ゲームの性能計測による最適値ではない。

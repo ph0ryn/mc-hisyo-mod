@@ -7,21 +7,21 @@
 - イベントと応答hookをSQLiteへ保存し、worldId / playerId単位で再読込する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
-- 13種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
+- 32種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
 - 認証付きloopback bridgeで、role・ready・world / run bindingを管理し、古い応答を拒否する。
 - 必須の[現在状態snapshot](<gameState.md>)を検証し、空の状態、欠損field、未対応queryを拒否する。
 - ビルド済みCLIの`--bridge-only`でprivateな接続情報を公開し、イベントを永続化し、安全に終了する。
-- ビルド済みPi拡張で7 Toolと毎回の必須context取得を提供する。
+- ビルド済みPi拡張で10 Toolと毎回の必須context取得を提供する。
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
 - [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
 - [scheduler checkpoint](<scheduling.md#実行制御checkpoint>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
 
-**schedulerのPi通信容量回帰はunit testで修正を確認した。タイマー、CLIとModへの配線は未完了。**
-`--bridge-only`はPiも判断も起動しない。通常モードは未対応としてエラーにし、黙ってPiを省略しない。
-Modのobserverは空のclient initializerへまだ登録していない。
-実ゲーム、実モデル、有料APIでの受入確認は行っていない。
-設計資料のToolや通信メソッドは、実装済み機能の一覧ではない。
+**CLI通常モード・1秒timer・single-flight scheduler・Mod登録 / 通信は実装済み。**
+`--bridge-only`はPiも判断も起動しない。Pi用flagとの併用は拒否する。
+通常モードは設定を検証してからbridge資源を開き、ready worldでPiを開始する。
+実ゲーム、実Pi / provider、実SQLite / TCP / Files境界の受入れは今回行っていない。
+実装済みと動作受入れ済みを混同しない。[検証状況](<validation.md>)を参照。
 
 ## 検証コマンド
 
@@ -34,15 +34,14 @@ pnpm run verify
 ```
 
 自動テストはunit testのみ。実TCP・HTTP・provider・子プロセス・SQLiteを使うsuiteは削除し、任意実行の別設定としても残さない。
-現在の4 suiteはschema/catalog/filter、literal入力のqueue、依存portを置き換えたscheduler、pure Pi framingである。
-静的JSON fixtureの読込は行うが、CLI・Pi・偽実行fileの起動や実接続は行わない。
-[検証状況](<validation.md>)に実行結果と失われたcoverageを記す。既存local runnerを直接使ったcheck・pack・全unit testは成功し、71件全成功だった。
-今回`pnpm run verify`を実行した結果ではなく、実接続や実Piの受入確認でもない。
+現在は13ファイルのunit suiteで、設定・runtime・model gate・静的参照・履歴・host / 拡張の取消も対象にする。
+依存portと手動peerを使い、CLI・Pi・provider・実接続・実DBは起動しない。
+[f559634でのlead検証](<validation.md>)はcheck・packと307件全成功。今回のdocs作業で再実行した結果ではない。
 [Pi境界調査](<piFeasibility.md>)は過去の設計根拠であり、現行テストの実行手順ではない。
 Pi 1.2.0の開発依存は拡張APIの型検査用で、実行時のPi importは残さない。
 
 既に依存が配置済みなら、`./node_modules/.bin/vp check`、`./node_modules/.bin/vp pack`、`./node_modules/.bin/vp test`を直接使える。
-今回のcheckpointではこの3コマンドを使用し、依存buildの承認や再installはしていない。
+上記は既存依存での手動開発用コマンド。今回のdocs作業では実行・再install・依存build承認をしていない。
 
 Vite+はプロジェクトローカルの固定バージョンを使い、グローバル版は変更しない。
 [設定](<../vite.config.ts>)で、型検査付きlint、Vitest、tsdownによるESMビルドを管理する。
@@ -56,15 +55,61 @@ Fabricのビルドはリポジトリ内の専用キャッシュを使う。
 `mod`ディレクトリで次を実行する。
 
 ```bash
-GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew build
+GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew --offline \
+  observerTest transportTest rpcPeerTest gameSessionTest referenceTest build --rerun-tasks
 ```
 
-Minecraft 1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
+Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
 Wrapper本体と配布zipは公式SHA-256で確認した。
 このビルドはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
-Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は独立した`observerTest`を実行する。
+`--offline`には既存cacheが必要。上記は手動手順で、docs作業中に実行していない。
+Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は上記5つの純Java checkを実行する。
+生成物は`mod/build/libs/mc_hisyo-0.1.0.jar`（実行用）と`mc_hisyo-0.1.0-sources.jar`。
 Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
 登録API、明示nullのserialize、観測の限界は[観測資料](<observations.md>)を参照。
+
+## 通常CLIとModの手動起動
+
+以下はoperator向け手順であり、今回実行した受入れ結果ではない。Node / pnpm / Java、Pi 1.2.0、依存cacheは別途準備する。
+ルートでbuild後、`dist/cli.mjs`とbundled `dist/directorBridge.mjs`を同じ配布物に保つ。
+
+```bash
+# PROVIDER_NAME / NATIVE_MODEL_IDはPi組込catalogの正確な値へ置換する。
+# DIRECTOR_API_KEYは呼出元で安全に設定済みとする。key自体を引数へ書かない。
+node dist/cli.mjs --pi /absolute/path/to/pi \
+  --provider 'PROVIDER_NAME' --model 'NATIVE_MODEL_ID' \
+  --pi-agent-dir /absolute/private/pi-agent --api-key-env DIRECTOR_API_KEY
+```
+
+引数の正は[parser / usage](<../src/cliOptions.ts>)、設定解決は[directorConfig.ts](<../src/runtime/directorConfig.ts>)。
+
+- `--pi`の既定はPATH上の`pi`。`--provider` / `--model`は両方指定し、IDにprovider prefixを付けない。
+  両方省略時だけPi設定の`defaultProvider` / `defaultModel`を使う。
+- 設定入力先は`--pi-agent-dir` → `PI_CODING_AGENT_DIR` → `~/.pi/agent`。読み取り専用の入力で、子のprivate設定先とは別。
+  strict JSONのみ。credentialは`--api-key-env NAME`、選択providerの`auth.json`、`models.json`の`apiKey`の順。
+  `auth.json`の選択provider entryは`{"type":"api_key","key":"..."}`だけ。keyはliteralまたは全体が`${NAME}`の環境変数参照。
+  コマンド、部分補間、OAuth、custom model / API overrideは拒否する。選択provider設定は`apiKey`以外を許さない。
+- Piのnative catalogでprovider / IDが一意、physical APIが`openai-completions` / `openai-responses` / `anthropic-messages`、
+  `medium`対応を要求する。毎判断前に同一model / API、実選択`medium`、非streaming・非compacting・自動compaction無効・pending 0を検査する。
+  不一致でfallbackしない。起動・各promptのready gateには認証済みbundled拡張と正確な10 Toolも必要。
+- 無効な引数・設定はresource作成前に拒否する。`--help`はstate、SQLite、Piを開かない。
+
+実行用JARを、上記versionのFabric APIとともにFabricクライアントの`mods`へ配置する（sources JARではない）。
+ModはCLIを自動起動しない。上のCLIを先に起動してから、対応するclient Modでローカルsingleplayerへ入る。
+LAN公開・remote / dedicated serverは対象外。`/ai <message>`で入力し、`send_message`のliteral textだけをローカルHUDへ表示する。
+切断・起動失敗後は設定とCLIを確認して退出・再入場する。自動再接続・イベント再送はしない。
+
+Modの既定接続先はJavaの`user.home`配下の`.mc-hisyo/connection.json`。
+変更時はFabric config directoryの`mc-hisyo.json`へ**絶対path**だけを指定する。
+
+```json
+{"dataDirectory":"/absolute/private/state"}
+```
+
+この保存先をCLIの`--data-dir`と一致させる。Modは所有者・directory `0700`・接続file `0600`を検査し、symlinkを拒否する。
+接続JSONの厳密なキーは[通信契約](<protocol.md#cliの接続情報ファイル>)を参照。
+world rootの`mc-hisyo-world-id`へcanonical UUID + LFを排他新規作成し、以後再利用する。
+既存の不正なIDを修復・上書きしない。player UUIDと合わせて会話・hook・履歴の永続scopeにする。
 
 ## bridge-only CLI
 
@@ -88,7 +133,7 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 CLIの責務は引数・signal・診断、[runtime](<../src/runtime/bridgeRuntime.ts>)の責務はresourceの起動・終了とする。
 上記はCLIの実装契約であり、現在のunit suiteはCLIを起動しない。旧subprocess・偽game接続suiteは削除済み。
 
-## Pi stdio driver（CLI未配線）
+## Pi stdio driver
 
 [driver](<../src/pi/piRpcClient.ts>)は、実行fileのPi 1.2.0を検査した後にstdio子プロセスを起動する。
 各判断の前に、認証済み拡張のready、指定provider / modelとphysical API、mediumの対応と実際の選択、
@@ -103,9 +148,9 @@ compaction無効・非実行中・空queueを確認する。不一致はprompt�
 
 引数・環境変数・作業場所・ready判定は信頼されたsession所有者が渡す。
 このdriverだけでは、settings、cache warming、組込Tool、拡張・resourceの自動探索を隔離しない。
-起動policyは次のsession所有者が担う。schedulerを接続するまでは通常CLIを有効にしない。[通信境界](<protocol.md#pi-stdio>)を参照。
+起動policyは次のsession所有者が担い、通常CLIのschedulerから使用する。[通信境界](<protocol.md#pi-stdio>)を参照。
 
-## Pi session所有者（CLI未配線）
+## Pi session所有者
 
 [session所有者](<../src/runtime/piSession.ts>)は、信頼されたPi実行file、bundled拡張、明示的なmodel設定を受け取る。
 world / playerの組をhash化したprivateディレクトリへ会話を保存し、同じscopeだけで再開する。
@@ -113,7 +158,7 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 
 - scopeごとに空の`0700`作業ディレクトリを保持し、明示的なsession pathでPiを起動する。最近の会話を自動探索しない。
 - 起動ごとにHOME・agent設定・一時領域を新設し、子の終了確認後に削除する。親の環境変数はPATH以外を引き継がない。
-- 自動resource探索、context file、組込OS Tool、compaction、cache warmingを無効にし、bundled拡張と7 game Toolだけを明示する。
+- 自動resource探索、context file、組込OS Tool、compaction、cache warmingを無効にし、bundled拡張と10 game Toolだけを明示する。
 - credentialは専用環境変数で渡す。設定fileは固定の変数参照だけを保持し、keyを引数へ出さない。
 - モデル定義はPiの組込catalogを消さない。毎判断で正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
 - scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
@@ -121,7 +166,7 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
   終了を確認できなければleaseと予約を残し、別の所有者へ渡さない。
 
 これはPiの起動・Tool policyであり、OSやネットワークのsandboxではない。`--offline`も推論先へのHTTPを禁止しない。
-ファイル読取・コマンド実行の権限は未決定で、有効化していない。
+一般OSファイル・コマンド実行Toolは無効。静的ゲーム参照だけを[boundedな読取Tool](<tools.md#静的ゲームファイルの境界>)で許可する。
 実子プロセス・認証付きTCP・ファイル権限の旧境界suiteは削除済み。現在のscheduler unit testはこの所有者をstub化し、実取消・子の終了や保存先の安全性は検証しない。
 
 ## イベントの追加
@@ -140,8 +185,8 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
 
 [イベント契約のunit test](<../src/protocol/gameEvent.test.ts>)で共有fixture、payload schema、公開scalar filterを確認する。
 実SQLiteを使う永続化・検索・hook登録／照合の旧suiteは削除し、schema検証がそのcoverageを代替するとは扱わない。
-現在は13種類の組込定義と対応observerがある。
-observerは未配線なので、実際の接続Modが収集・送信した実績とは区別する。
+現在は32種類の組込定義と接続済みobserverがある。
+unit / compile結果は、実ゲームで収集・送信できた実績とは区別する。
 
 ### 観測と推測を分ける
 
@@ -168,14 +213,26 @@ slot差分から「拾った」「クラフトした」とは断定しない。
   履歴の`through`とは異なりsnapshotではない。[一覧の契約](<tools.md>)を参照。
 
 SQLiteにはschema versionを保存し、未対応versionは自動変換せず停止する。
-現在は初期version 1のみで、過去の公開schemaからの移行はまだない。
+現在はversion 2。新規version 0を初期化し、2を再利用する。version 1は拒否してDBを残す。
+自動migrationはないため、既存DBを削除せず退避し、別の空のdata directoryを使う。
+
+### ゲーム観測とCLI内部履歴
+
+[EventLog](<../src/events/eventLog.ts>)はゲーム観測と[CLI事実](<../src/events/directorActivity.ts>)を同じ単調増加`events.id`で保存する。
+ゲーム観測のSQL `seq`はsession内連番、CLI事実は`NULL`で、共通IDと混同しない。
+有効なplayer入力、正確な`displayed: true` ACK、hook CRUD・一致、開始 / poll / 入力 / hookの判断要求を記録する。
+hook CRUDとその事実は同一transaction。ゲームイベントは保存 → live hook照合 → 一致記録、判断理由は`judge`前に保存する。
+要求・一致はprovider実行や応答の証拠ではない。CLI事実は検索可能だがhook不可で、過去履歴を再照合しない。
+有効な古いbindingのHUD成功ACKは、stale fenceより先に記録する。結果が不明な表示は再送しない。
+
+履歴は完全なrecord単位でページングする。`nextCursor`を`after`へ、同じ`through`を次ページへ渡す。
+ページのproducer上限は697,770 bytes（TCP 1 MiB / Pi envelope・重複escape予算から4 KiB等を予約）。
+一件だけでも収まらないrecordは明示エラーで、詳細を落としたり空ページで隠したりしない。
+attach前 / ready前と最終観測後はunknown。CLI attach / detachはnative JOIN / LEAVEではなく、
+`hasKnownGaps: false`でも終端や切断中の完全性を意味しない。
 
 ## 次の段階
 
-bridge-only CLI、Pi拡張、stdio driver、隔離sessionの起動管理は実装済み。[通信の契約](<protocol.md>)を基に、
-単一実行scheduler、observerの登録・送信、pause・切断・再開を接続する。
-処理待ち入力の上限超過は明示エラーで判断停止する方針に確定し、保留キューへ実装した。
-RPC受付での拒否と、失敗時の実行取消はscheduler接続時に検証する。
-レシピ専用Toolや独立した目標管理state machineは作らず、
-ゲームの静的ファイルを読む方針と、実行中の生データ・履歴・hookを分ける。
-OS上のファイルやコマンドへアクセスするToolの権限は、接続実装時に明示する。
+実装接続は完了し、残るのは[明示的に未実施の受入れ](<validation.md#未確認の利用要件>)。
+実ゲーム・実Pi / provider・永続化・通信・権限境界をunit / build結果だけで承認しない。
+レシピ専用Tool、独立した目標state machine、一般OS Toolは追加していない。

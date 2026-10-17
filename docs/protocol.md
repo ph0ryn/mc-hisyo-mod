@@ -1,8 +1,7 @@
 # 通信プロトコル
 
-codec、認証・bindingを扱うbridge、bridge-only CLI、Pi拡張、stdio driver、隔離Pi sessionの起動管理は実装済み。
-schedulerは[checkpoint実装](<scheduling.md#実行制御checkpoint>)で、既定batchのPi framing整合はunit testで確認した。タイマーとCLI / Modへの配線は未完了。以下は通信契約と、全体接続時の起動案。
-[実装済みの範囲](<development.md>)は別に管理する。
+codec、認証bridge、通常 / bridge-only CLI、Pi拡張、stdio driver、隔離session、scheduler / timer、Mod接続は実装済み。
+以下は実装契約であり、実TCP / Pi / provider / ゲームによる受入実績ではない。[検証範囲](<validation.md>)を参照。
 
 | 接続 | 方式 | 用途 |
 | --- | --- | --- |
@@ -10,7 +9,7 @@ schedulerは[checkpoint実装](<scheduling.md#実行制御checkpoint>)で、既�
 | CLI ↔ Pi | stdin / stdout、Pi標準RPC | 判断開始、中断、状態・完了の確認 |
 | CLI ↔ Pi拡張 | Modと同じTCPサーバーへの別接続 | Tool要求・結果、コンテキスト取得 |
 
-Node.jsの`node:net`とJavaの`Socket`で双方向通信を実装できるため、初期案はTCPとする。
+Node.jsの`node:net`とJavaの`Socket`で双方向通信を実装できるため、TCPを使用する。
 Piの標準RPCと、独自のJSON-RPC 2.0は別のプロトコルであり、形式を混同しない。
 
 ## Pi stdio
@@ -42,19 +41,19 @@ backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの
 
 ## 接続手順
 
-1. ユーザーが`ai-director`を起動する。
+1. ユーザーが`node dist/cli.mjs`を[設定と一緒に起動する](<development.md#通常cliとmodの手動起動>)。
 2. CLIが`127.0.0.1`の空きポートで待ち受ける。
 3. 接続先、起動ごとのトークン、プロトコルバージョンを、ユーザー専用の接続情報ファイルへ保存する。
 4. Modが接続情報を読み、CLIへ接続する。
 5. `bridge.hello`でトークン、役割、プロトコルバージョンを確認する。
 6. Modが`game.attach`でworld / player・対応イベント・pausedを送り、新しいsession bindingを受け取る。
 7. Modがbindingと要求handlerを準備してから`game.ready`を送る。attach応答前にrunを開始しない。
-8. CLIがPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
+8. CLIが`--pi`またはPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
 9. Pi拡張も認証し、handlerの準備後に`director.ready`を送る。
 10. 両者がreadyかつunpausedなら、CLIが`game.run.bind`と`director.run.bind`のACKを待ち、判断を開始する。
 
-現在のCLIは`--bridge-only`で待受・接続情報公開と1〜7のbridge側処理を受け持つ。
-Mod側、Piの起動、判断開始は未配線。
+通常CLIは上記全体を接続する。`--bridge-only`では待受と永続化だけでPi・判断を起動しない。
+Modはローカルsingleplayerのみ対応し、CLIを自動起動しない。
 初版は1つのゲーム接続を扱う。
 
 `worldId`は保存されたワールドを、`worldSessionId`は今回の接続・入場を識別する。
@@ -69,9 +68,10 @@ hostは子プロセスの`MC_HISYO_BRIDGE`へ、`protocolVersion: 1`、`host: "1
 接続情報ファイルの`pid`など、追加キーは渡さない。bootstrap不正や認証失敗は拡張を引退させ、後続promptも拒否する。
 
 [Pi拡張](<../src/pi/directorBridge.ts>)は`session_start`中にbind handlerを登録してから接続・認証する。
-RPC mode、対応physical API、正確な7 Toolを確認してreadyを送る。ready ACKを待つ間にもhostからbindが届き得る。
+RPC mode、対応physical API、正確な10 Toolを確認してreadyを送る。ready ACKを待つ間にもhostからbindが届き得る。
 開始したrunは`agent_settled`だけでslotとbindingを解放する。Pi stdioのprompt ACKや`agent_end`は完了ではない。
-peer切断と必須snapshotの取得・検証失敗は、同期abort、binding破棄、接続の引退で判断を止める。
+peer切断と必須snapshotの不正・取得失敗は、同期abort、binding破棄、接続の引退で判断を止める。
+同じrunのhost所有取消は後述のtyped取消として扱い、接続を引退させない。
 
 ## CLIの接続情報ファイル
 
@@ -146,13 +146,13 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 
 上限値は開発用の仮値であり、実ゲームでのイベント量測定は未実施。
 切断で既に実行された副作用を取り消せるわけではない。
-認証・役割・world / run bindingは次のbridgeが担う。ゲームスレッド上の再検証はModへの配線時に実装する。
+認証・役割・world / run bindingは次のbridgeが担う。Modはゲームスレッドの実行直前・結果返却前にも再検証する。
 
 ## 実装済みの認証・binding bridge
 
-[DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)はbridge-only CLIへ組込済み。
+[DirectorBridge](<../src/bridge/directorBridge.ts>)と[要求schema](<../src/protocol/bridge.ts>)は通常 / bridge-only CLIへ組込済み。
 旧実TCP suiteは削除済みで、以下の認証・binding契約を現行unit suiteが実接続で確認したとは扱わない。
-[Pi session所有者](<../src/runtime/piSession.ts>)がrun無効化通知をstdioのabortへ渡す。CLI schedulerとModへの配線は未実装。
+[Pi session所有者](<../src/runtime/piSession.ts>)がrun無効化通知をstdioのabortへ渡す。CLI schedulerとModも接続済み。
 Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する。
 
 - loopbackの`127.0.0.1`のみ。全接続4本まで、認証期限は既定5秒。game / agentは各1接続。
@@ -170,7 +170,7 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
   clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。
 - 判断はsingle-flight。無効化してもslotを保持し、呼出側が`agent_settled`を確認して`finishRun`するまで次を開始しない。
 - Tool要求にはworld / player / session / runの完全一致が必要。Modからの応答もawait後にbindingを再確認する。
-  ゲームスレッドへ渡した処理の直前にも、Modが同じ検証を行う必要がある。
+  ゲームスレッドへ渡した処理の直前にも、Modが同じ検証を行う。
 - game eventのscopeとsessionを検証し、raw保存の後でhook照合を通知する。偽のscopeは保存せず接続を閉じる。
   イベント一覧・hook追加は、接続Modが広告したcapabilityに制限する。
 - 転送結果はbinding付きの厳密なenvelope。表示成功は`displayed: true`。
@@ -192,13 +192,29 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
 | `game.player_message` | Mod → CLI | プレイヤーからAIへのチャット入力 |
 | `game.state.get` | Pi拡張 → CLI → Mod | ゲーム状態の取得 |
 | `game.message.send` | Pi拡張 → CLI → Mod | AIの発言表示 |
-| `director.context.get`（予定） | Pi拡張 → CLI | 最新状態と起動理由などの取得 |
+| `game.files.list` / `read` / `search` | Pi拡張 → CLI → Mod | boundedな静的package参照 |
+| `director.run.invalidate` | CLI → Pi拡張 | 同じ判断の所有取消を結果より先に通知 |
 | `director.hooks.add` / `remove` / `list` | Pi拡張 → CLI | hookの管理とページング |
 | `director.events.get` | Pi拡張 → CLI | イベント履歴と既知の欠損の取得 |
 | `director.events.list` | Pi拡張 → CLI | 対応イベント、schema、照合可能フィールドの一覧 |
 
-`director.context.get`以外はbridge側にhandlerまたは送信処理がある。
-この表はMod / Pi側のhandlerの完成を意味しない。CLI起動はbridge-onlyのみ実装済み。
+表のhandler・送信処理は接続済み。`director.context.get`は実装せず、最新状態は`game.state.get`、起動理由は判断batchで渡す。
+
+## native側が先にrunを無効化した場合
+
+[host](<../src/bridge/directorBridge.ts>)は**現在のgame owner・同じrun**からのbare `-32001`（`data`なし）だけをnative-first取消として認識する。
+不確定状態の待機promiseを最初に設置してから、run無効化 → 拡張への`director.run.invalidate` → game clear / 所有者のabort →
+厳密な旧RunBindingを付けた`-32005`の順で処理する。任意の`-32001`や外国bindingを通常取消へ変換しない。
+[拡張](<../src/pi/directorBridge.ts>)は通知済みの同じrunと一致するtyped replyだけを取消扱いにし、active判断を同期abortするが引退しない。
+不正・異なるbinding・通知と一致しないエラーはfatal。例外を投げるだけで次provider要求を止めたことにしない。
+
+次の`beginRun`はnative bindを送る**前**にこの不確定状態を待つ。
+実際の`game.status`で解除し、pauseやstatus履歴を捏造しない。待機の取消はそのwaiterだけを起こし、共有状態を勝手に解除しない。
+`readyWorld`、チャット / hook受付、active-play時計はこの待機だけを理由に変更しない。
+pause・退出・closeのfenceもabort / cleanupより先で、slotは実settledまたは子の終了確認まで保持する。
+
+有効な`displayed: true`の同じcaptured binding ACKは、後着でstaleになっていても履歴へ保存してからstaleを返す。
+曖昧な表示・状態取得は再送せず、不正なACKを成功記録しない。
 
 ## 切断・失敗時の扱い
 

@@ -4,32 +4,49 @@
 
 ## 現在の自動テスト：unit testのみ
 
-実TCP・HTTP・provider・子プロセス・実SQLiteを使う8 suiteを削除した。
-専用の偽実行file・provider・接続harness、任意Pi用のscriptと別設定も削除し、opt-inの形では残していない。
-そのcleanupでは本番の実装・容量方針・依存build承認を変更しなかった。
-続く修正ではPi専用の有限framingだけを分離し、キュー・TCPの1 MiB、送信待ち4 MiB、過負荷停止方針は維持した。
+frozen source **`f559634c0b5c5f1646aa67ee3878e1a0f408e87f`**に対するleadのcomposed検証結果を以下に記録する。
+今回のdocs-only変更で再実行した結果ではない。依存install・build承認・downloadはしていない。
 
-現在の発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`に一致する次の4 suiteだけである。
-実行前にfixtureと依存portを監査し、実接続・実子プロセス・実DBを使わないことを確認した。
-静的な共有JSONの読込は行う。
-
-| suite | 内容 | 今回の結果 |
+| 検査 | leadが実行したコマンド / 範囲 | 結果 |
 | --- | --- | --- |
-| [イベント契約](<../src/protocol/gameEvent.test.ts>) | 13種の共有fixture、schema/catalog、scalar filterと純粋な完全一致 | 22成功 |
-| [保留キュー](<../src/runtime/judgmentQueue.test.ts>) | literalの`StoredEvent`とhookを公開APIへ渡す | 17成功 |
-| [scheduler](<../src/runtime/judgmentScheduler.test.ts>) | bridgeイベント・同期受付とPi session factoryだけをstub化 | 26成功 |
-| [Pi framing](<../src/pi/piFraming.test.ts>) | 公開queueとpure codecで送受信サイズ・有限上限を検証 | 6成功 |
+| TypeScript検査 | `./node_modules/.bin/vp check` | 49 format / 43 TypeScript、警告なし |
+| ESM build | `./node_modules/.bin/vp pack` | 12 artifacts |
+| unit | `./node_modules/.bin/vp test --run` | **307 / 307成功、13ファイル** |
+| 純Java + cached build | `observerTest transportTest rpcPeerTest gameSessionTest referenceTest build --rerun-tasks`、`--offline` | **749 assertions**、14 tasks再実行、BUILD SUCCESSFUL |
+| 文書 / whitespace | `rumdl check docs` / `git diff --check` | 11文書で問題なし / 成功（source基点の旧docs） |
 
-依存配置済みのlocal runnerを直接使った今回の結果：
+Java内訳はobserver 209、transport 181、rpcPeer 140、gameSession 173、reference 46。
+通常のGradle `test`は`NO-SOURCE`であり、この5つのcustom checkと取り違えない。
+実行routeは[既存cacheを使う手動コマンド](<development.md#検証コマンド>)を参照。
 
-- `./node_modules/.bin/vp check`：format・型検査付きlint成功。
-- `./node_modules/.bin/vp pack`：ESMビルド成功。CLIやPiは起動していない。
-- `./node_modules/.bin/vp test --run`：**71件全成功**、4 suite、skipや名前filterなし。
+TypeScriptの発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`。
+契約・queue・scheduler・clock・framingに加え、CLI parser / config / runtime / model gate、静的参照、履歴、host / 拡張の取消を含む。
+依存port・手動peer・in-memory SQL adapterを使うunitであり、CLI / Piの実行や実DB・接続を行わない。
+JavaもMinecraft / Fabricをruntime classpathに含めず、literal fixture・手動queue / streamを使う。
+古い実TCP・HTTP・provider・子プロセス・実SQLiteの8 suiteとfake実行harnessは削除済みで、任意実行設定にも残していない。
 
-`verify`相当のcheck・pack・全unit testは成功した。実接続や実Piの受入確認とは区別する。
-先の`pnpm install --frozen-lockfile --prefer-offline`はgenai/protobufjsの未承認buildで終了1となり、
-pnpm経由のfocused testも収集前に同じ問題で停止した。その時点ではテストは実行されていない。
-その後は再install・依存build承認をせず、既存local runnerだけを用いた。
+### 最終修正の検証とその限界
+
+- 初回JOINのcandidateは`AssertionError: check 18`でREDとなり、pending captureのtake-onceをatomicに修正した。
+  これは純Javaの再現であり、未変更productionの実ゲームで発見したREDではない。
+- owned context取消のfresh reviewはhost / test・Pi拡張 / test・protocolの**5ファイル**を確認して承認した。
+  Pi stdio driverはこの差分では不変で、別途sourceを追跡した。`-32005`を一律に再利用可能エラーとしたのではない。
+- native-firstのunitは実登録handler・拡張・schedulerを通るが、Pi ownerはmock、settledは手動、provider counterも偽物。
+  実Pi owner / provider wireの証明ではない。
+- 最後のadmission回帰は既存caseへ19行追加し、case数は不変、skip・弱化なし。guardを意図的に外すmutationで旧testはPASS、
+  強化したtestはnative bindが期待2回に対し実際1回でRED、正確なsource復元でGREENを確認し、異なるfresh reviewerが承認した。
+  これはmutationによる回帰感度であって、未変更productionのREDや実native受入れとは呼ばない。
+- cached compile / remap / JARは成功したが、`remapJar`の`Cannot remap hisyo$player` / `hisyo$removeCount`
+  （ResultSlot / FurnaceResultSlot）のadvisoryは残る。cached aliasやJAR生成はnative Mixinのruntime適用を保証しない。
+
+実ゲーム・launcher・Pi / provider・SQLite・TCP / HTTP / stdio・Files / archive / resource境界の受入れは**未実施**。
+unitのsuccess、source review、cached buildをその代用にしない。下の8項目も未実施のまま維持する。
+
+## 過去のunit checkpoint（最終件数ではない）
+
+以下は4 suite / 71件時点を含む過去のunit記録。現在の配線・件数・coverageは上記を正とする。
+当時のinstallは未承認dependency buildで終了1、focused testも収集前に停止し、既存runnerでcheck・pack・71件を実行した。
+再installやbuild承認はしなかった。
 
 ### 判断理由の保留キュー
 
@@ -68,9 +85,9 @@ Pi helper分離・境界test追加後も旧上限のままでは71件中66成功
 
 入力echoの形はPi 1.2.0のsourceと照合したが、実Piは今回起動していない。
 任意の`maxPendingBytes`拡大、任意raw文字列、全ての集約event / Tool結果 / モデル出力の配送保証ではなく、超過は明示失敗のままである。
-タイマー、CLI / Modの配線、実Piでのscheduler受入は未実装・未実施。
+この時点ではタイマー・CLI / Modが未配線だった。現在は実装済みで、実Pi受入れは引き続き未実施。
 
-## 削除したcoverage
+## 実境界では確認していないcoverage
 
 旧suiteをunit testと呼び替えたり、case数維持のための偽TCP/Pi基盤を追加したりはしていない。
 現在のunit結果は次のcoverageを代替しない。
@@ -81,9 +98,9 @@ Pi helper分離・境界test追加後も旧上限のままでは71件中66成功
 - SQLiteの再open、migration拒否、履歴・hook永続化、ページング、連番欠損とscope別検索・照合。
 - 実stdio偽Piのversion/metadata gate、ACK/settled/abort、EOF・timeout・SIGKILLと子の終了確認。
 - 隔離sessionのprivate設定・会話再開・lease、保存先のfilesystem安全性、実取消と終了順。
-- 実Pi・偽HTTP provider・偽gameでの7 Tool、context注入、driver/sessionの接続。
+- 実Pi・偽HTTP provider・偽gameでの全10 Tool、context注入、driver/sessionの接続。
 
-schema/catalogの純粋な検証は残したが、保存・検索・hook登録との結合ケースは除去した。
+現在はhost handlerやSQL adapterのunitもあるが、実SQLite・TCPでの保存・検索・hook結合coverageは復元していない。
 実装契約は[通信](<protocol.md>)、[状態](<gameState.md>)、[実行制御](<scheduling.md>)に残す。
 
 ## 過去の検証記録（今回は再実行していない）
@@ -115,23 +132,21 @@ Java 21 / Loom 1.17.21 / Gradle 9.7.1で`build`を確認した過去の記録が
 
 13種類のobserverと、Minecraft / Fabricをclasspathから除外した純Java `observerTest`の**93 assertions**は過去に成功した。
 共有fixtureのserialize、snapshot差分、プレイヤー別baseline、sample、reset、DTOの不変性・明示nullを対象とした。
-今回Gradleは実行しておらず、上のTypeScript 71件には含めない。
+この93 assertionsは過去値。最終sourceへのleadのJava 749 assertions / cached buildとは別の記録である。
 
-observerはclient initializerに未登録で、ゲーム内callbackの発火確認ではない。
+当時observerはclient initializerに未登録だった。現在は登録済みだが、ゲーム内callbackの発火確認ではない。
 Minecraftの起動、EULA同意、既存ワールドの利用も行っていない。[観測の契約と限界](<observations.md>)を参照。
 
-## 接続実装で確定する事項
+## 実装済みの選択と残る限界
 
-- アイテム破棄・入手、コンテナ閲覧などの正確な取得方法と必要最小限のMixin。
-- 発見の記録基準、Mod環境の取得範囲、OS上の読取Toolの権限。
-- Modが広告するイベント部分集合と、baseline以外の状態queryの取得範囲。
-- ワールドUUIDの保存方法。Pi会話はprivateなworld / player別scopeで再開する。
-- ポーリングはactive play中60秒が仮値。容量・要求timeout・frameサイズの妥当性は未確定。
-  保留上限超過は明示エラーで停止し、黙示的破棄や永続inboxは導入しない。
-- ランチャー環境の接続先読込と、CLI起動環境でのPiのPATH解決。
+UUID sidecar、bounded static reference、Mod広告32イベント、baseline query `{}`、10 Tool、OS Tool無効化は確定済み。
+具体的な境界は[開発資料](<development.md>)、[観測](<observations.md>)、[Tool](<tools.md>)を参照。
+active play 60秒、要求timeout、frame / queue上限は実装上固定した初期値で、実ゲームでの最適性は未計測。
+レシピ専用機構・目標state machine・黙示的破棄・永続inboxは導入しない。
 
-レシピ専用機構や目標管理state machineは作らない。
-ゲームの静的ファイル参照と、生の状態・豊富なイベント履歴・拡張可能なhookを優先する。
+過去のindexion reconcileは別source `166b802`で313行・21 groups / 127 symbols、vocabulary divergence 0だった。
+主にexport comment候補であり、意味・source正確性や現在sourceの適合証明ではない。coverage score目的でAPI commentを増やしていない。
+今回の文書更新はsource → docs（実装された公開境界の記載）とdocs → source（各現在主張の根拠）の両方向で照合した。
 
 ## 未確認の利用要件
 
