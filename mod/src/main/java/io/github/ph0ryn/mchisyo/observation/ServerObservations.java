@@ -2,12 +2,14 @@ package io.github.ph0ryn.mchisyo.observation;
 
 import com.google.gson.Gson;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import net.fabricmc.fabric.api.entity.event.v1.ServerEntityWorldChangeEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents;
@@ -29,6 +31,8 @@ import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.ContainerListener;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
@@ -53,7 +57,8 @@ public final class ServerObservations {
             "entity_use_attempted", "status_effects_sampled", "status_effect_changed", "equipment_slot_changed",
             "nearby_sampled", "structures_sampled", "weather_changed", "day_clock_phase_changed",
             "advancement_criterion_granted", "advancement_completed", "block_placed", "item_picked_up",
-            "item_dropped", "grid_result_taken", "furnace_result_taken", "block_use_attempted", "item_use_attempted");
+            "item_dropped", "grid_result_taken", "furnace_result_taken", "block_use_attempted", "item_use_attempted",
+            "container_opened", "container_slot_changed", "container_closed");
 
     private static volatile ServerObservations active;
     private static final Gson JSON = new Gson();
@@ -61,6 +66,8 @@ public final class ServerObservations {
     private final Predicate<ServerPlayer> isScopedPlayer;
     private final Consumer<ObservedEvent> sink;
     private final SnapshotDeltaTracker tracker;
+    private final Map<ServerPlayer, MenuWatch> menus = new IdentityHashMap<>();
+    private long nextMenuId;
 
     private ServerObservations(Predicate<ServerPlayer> isScopedPlayer, Consumer<ObservedEvent> sink,
             SnapshotDeltaTracker.MovementSampling movementSampling) {
@@ -88,6 +95,7 @@ public final class ServerObservations {
 
     /** Call on the server thread when attaching/detaching/replacing the external world/session binding. */
     public void clearBaselines() {
+        new ArrayList<>(menus.keySet()).forEach(this::forgetMenu);
         tracker.clear();
     }
 
@@ -124,6 +132,7 @@ public final class ServerObservations {
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             requireServerThread(server);
+            new ArrayList<>(menus.keySet()).forEach(player -> { if (!scoped(player)) forgetMenu(player); });
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (scoped(player)) {
                     PlayerSnapshot snapshot = snapshot(player);
@@ -133,6 +142,8 @@ public final class ServerObservations {
             }
         });
         ServerPlayerEvents.JOIN.register(player -> {
+            forgetMenu(player);
+            tracker.clearMenuContext(player);
             tracker.reset(player.getUUID());
             if (scoped(player)) {
                 emit(player, "player_connection_changed", Map.of("state", "joined"));
@@ -140,10 +151,16 @@ public final class ServerObservations {
             }
         });
         ServerPlayerEvents.LEAVE.register(player -> {
+            forgetMenu(player);
+            tracker.clearMenuContext(player);
             tracker.reset(player.getUUID());
             if (scoped(player)) emit(player, "player_connection_changed", Map.of("state", "leaving"));
         });
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
+            forgetMenu(oldPlayer);
+            forgetMenu(newPlayer);
+            tracker.clearMenuContext(oldPlayer);
+            tracker.clearMenuContext(newPlayer);
             tracker.reset(oldPlayer.getUUID());
             tracker.reset(newPlayer.getUUID());
             if (scoped(newPlayer)) {
@@ -152,6 +169,8 @@ public final class ServerObservations {
             }
         });
         ServerEntityWorldChangeEvents.AFTER_PLAYER_CHANGE_WORLD.register((player, origin, destination) -> {
+            forgetMenu(player);
+            tracker.clearMenuContext(player);
             tracker.reset(player.getUUID());
             if (scoped(player)) {
                 emit(player, "dimension_changed", Map.of(
@@ -183,7 +202,7 @@ public final class ServerObservations {
         });
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             requireServerThread(server);
-            tracker.clear();
+            clearBaselines();
         });
     }
 
@@ -309,6 +328,105 @@ public final class ServerObservations {
         observations.emit(player, furnace ? "furnace_result_taken" : "grid_result_taken", data);
     }
 
+    /** Lexical clicked-block context only; no second open event or world lookup. */
+    public static <T> T withMenuPosition(ServerPlayer player, BlockPos pos, Supplier<T> operation) {
+        ServerObservations observations = active;
+        return observations != null && observations.scoped(player)
+                ? observations.tracker.withMenuPosition(player, blockPosition(pos), operation) : operation.get();
+    }
+
+    /** initMenu RETURN uses the argument: ordinary openMenu assigns containerMenu only afterwards. */
+    public static void menuInitialized(ServerPlayer player, AbstractContainerMenu menu) {
+        ServerObservations observations = active;
+        if (observations == null || !observations.scoped(player) || menu == player.inventoryMenu) return;
+        MenuWatch old = observations.menus.get(player);
+        if (old != null && old.baseline.matches(player, menu)) return;
+        observations.forgetMenu(player);
+        Map<String, Object> initial = contents(player, menu);
+        MenuWatch watch = observations.new MenuWatch(player, menu, ++observations.nextMenuId, initial);
+        observations.menus.put(player, watch);
+        observations.emit(player, "container_opened", watch.data(initial));
+        // Native addSlotListener inherently broadcasts. Never request an extra sync/flush ourselves.
+        if (watch.available && observations.menus.get(player) == watch) menu.addSlotListener(watch);
+    }
+
+    /** Only normal doCloseContainer completion confirms an actual native close, including replacements/removal. */
+    public static void menuClosed(ServerPlayer player, AbstractContainerMenu oldMenu) {
+        ServerObservations observations = active;
+        if (observations == null || !observations.scoped(player) || player.containerMenu != player.inventoryMenu) return;
+        MenuWatch watch = observations.menus.get(player);
+        if (watch == null || !watch.baseline.matches(player, oldMenu)) return;
+        Map<String, Object> data = watch.data(contents(player, oldMenu));
+        data.put("finalState", "post_removal");
+        observations.forgetMenu(player);
+        observations.emit(player, "container_closed", data);
+    }
+
+    private void forgetMenu(ServerPlayer player) {
+        MenuWatch watch = menus.remove(player);
+        if (watch != null) {
+            watch.baseline.reset();
+            if (watch.available) watch.menu.removeSlotListener(watch);
+        }
+    }
+
+    private static SnapshotDeltaTracker.MenuSlot menuSlot(ServerPlayer player, AbstractContainerMenu menu, int index, ItemStack stack) {
+        Slot slot = menu.slots.get(index);
+        PlayerSnapshot.Item copied = item(stack);
+        return new SnapshotDeltaTracker.MenuSlot(slot.index, slot.getContainerSlot(), slot.container == player.getInventory(),
+                copied.itemId(), copied.count());
+    }
+
+    private static Map<String, Object> contents(ServerPlayer player, AbstractContainerMenu menu) {
+        return SnapshotDeltaTracker.menuContents(menu.slots.size(), i -> menuSlot(player, menu, i, menu.slots.get(i).getItem()));
+    }
+
+    private final class MenuWatch implements ContainerListener {
+        private final ServerPlayer player;
+        private final AbstractContainerMenu menu;
+        private final long menuId;
+        private final String menuType;
+        private final List<Integer> blockPos;
+        private final String positionSource;
+        private final SnapshotDeltaTracker.MenuBaseline baseline;
+        private final boolean available;
+
+        private MenuWatch(ServerPlayer player, AbstractContainerMenu menu, long menuId, Map<String, Object> initial) {
+            this.player = player; this.menu = menu; this.menuId = menuId;
+            menuType = SnapshotDeltaTracker.menuType(() -> BuiltInRegistries.MENU.getKey(menu.getType()).toString());
+            List<Integer> position = tracker.menuPosition(player);
+            String source = position == null ? "unknown" : "clicked_block";
+            // ponytail: inspect at most 256 already-available slot containers, never discover/re-read world blocks.
+            if (position == null && menu.slots.size() <= SnapshotDeltaTracker.MAX_MENU_SLOTS) {
+                for (Slot slot : menu.slots) {
+                    if (slot.container instanceof BlockEntity blockEntity) {
+                        position = blockPosition(blockEntity.getBlockPos()); source = "slot_block_entity"; break;
+                    }
+                }
+            }
+            blockPos = position; positionSource = source;
+            available = initial.get("status").equals("available");
+            baseline = new SnapshotDeltaTracker.MenuBaseline(player, menu, initial);
+        }
+        private Map<String, Object> data(Map<String, Object> contents) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("menuId", menuId); data.put("containerId", menu.containerId); data.put("menuType", menuType);
+            data.put("blockPosition", blockPos); data.put("positionSource", positionSource); data.put("contents", contents);
+            return data;
+        }
+        @Override public void slotChanged(AbstractContainerMenu changedMenu, int slot, ItemStack stack) {
+            if (menus.get(player) != this || changedMenu != menu || !isScopedPlayer.test(player)
+                    || slot < 0 || slot >= menu.slots.size()) return;
+            Map<String, Object> change = baseline.change(menuSlot(player, menu, slot, stack));
+            if (change != null) {
+                Map<String, Object> data = new LinkedHashMap<>(change);
+                data.put("menuId", menuId); data.put("containerId", menu.containerId);
+                emit(player, "container_slot_changed", data);
+            }
+        }
+        @Override public void dataChanged(AbstractContainerMenu ignored, int id, int value) { }
+    }
+
     private static Map<String, Object> usedItem(ServerPlayer player, InteractionHand hand) {
         PlayerSnapshot.Item held = item(player.getItemInHand(hand));
         Map<String, Object> data = new LinkedHashMap<>();
@@ -325,6 +443,8 @@ public final class ServerObservations {
     private boolean scoped(ServerPlayer player) {
         requireServerThread(player.level().getServer());
         if (isScopedPlayer.test(player)) return true;
+        forgetMenu(player);
+        tracker.clearMenuContext(player);
         tracker.reset(player.getUUID());
         return false;
     }

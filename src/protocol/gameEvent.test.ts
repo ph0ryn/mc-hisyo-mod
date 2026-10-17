@@ -16,9 +16,14 @@ function fixture(name: string): GameEvent {
 }
 
 describe("server observer event contracts", () => {
-  it("publishes one shared fixture for each of the 29 supported observation kinds", () => {
-    expect(fixtures).toHaveLength(29);
-    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(29);
+  it("publishes actual native menu initialization, natural deltas and post-removal close", () => {
+    expect(catalog.get("container_opened").description).toMatch(/initialization/i);
+    expect(catalog.get("container_slot_changed").description).toMatch(/coalesced/i);
+    expect(catalog.get("container_closed").description).toMatch(/post.removal/i);
+  });
+  it("publishes one shared fixture for each of the 32 supported observation kinds", () => {
+    expect(fixtures).toHaveLength(32);
+    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(32);
     expect(gameEventDefinitions.map((entry) => entry.name).toSorted()).toEqual(
       fixtures.map((entry) => entry.event).toSorted(),
     );
@@ -265,6 +270,72 @@ describe("server observer event contracts", () => {
     expect(
       matchesFilter(fixture("item_picked_up").data, { itemId: "minecraft:stone", count: 4 }),
     ).toBe(false);
+  });
+
+  it("keeps menu full/unavailable snapshots, native slot identity and AND filters strict", () => {
+    const open = fixture("container_opened");
+    expect(
+      matchesFilter(open.data, { menuId: 1, containerId: 2, menuType: "minecraft:generic_9x3" }),
+    ).toBe(true);
+    expect(matchesFilter(open.data, { menuId: 1, containerId: 3 })).toBe(false);
+    const unknown = fixture("container_opened");
+    unknown.data.menuType = null;
+    unknown.data.blockPosition = null;
+    unknown.data.positionSource = "unknown";
+    unknown.data.contents = {
+      status: "slot_limit",
+      slotCount: 257,
+      maxSlots: 256,
+      maxSerializedBytes: 65536,
+      slots: null,
+    };
+    expect(() => catalog.validateObservation(unknown)).not.toThrow();
+    for (const [name, change] of [
+      [
+        "container_opened",
+        {
+          contents: {
+            status: "slot_limit",
+            slotCount: 257,
+            maxSlots: 256,
+            maxSerializedBytes: 65536,
+            slots: [],
+          },
+        },
+      ],
+      [
+        "container_opened",
+        {
+          contents: {
+            status: "available",
+            slotCount: 257,
+            maxSlots: 256,
+            maxSerializedBytes: 65536,
+            slots: Array(257).fill({
+              slot: 0,
+              containerSlot: 0,
+              playerInventory: false,
+              itemId: "minecraft:air",
+              count: 0,
+            }),
+          },
+        },
+      ],
+      ["container_opened", { positionSource: "player_guess" }],
+      ["container_closed", { finalState: "last_viewed" }],
+      ["container_slot_changed", { containerSlot: -1 }],
+      ["container_slot_changed", { slot: 256 }],
+      ["container_slot_changed", { afterCount: -1 }],
+    ] as const) {
+      const observation = fixture(name);
+      Object.assign(observation.data, change);
+      expect(() => catalog.validateObservation(observation)).toThrow();
+    }
+    const delta = fixture("container_slot_changed");
+    expect(matchesFilter(delta.data, { playerInventory: false, afterCount: 0, menuId: 1 })).toBe(
+      true,
+    );
+    expect(matchesFilter(delta.data, { playerInventory: true, afterCount: 0 })).toBe(false);
   });
 
   it("requires explicit valid movement sampling policy instead of claiming a full path", () => {

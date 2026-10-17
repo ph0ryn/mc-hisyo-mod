@@ -34,6 +34,65 @@ const damageSourceFilterFields = [
   "directEntityType",
 ];
 
+const menuSlotIndex = Type.Integer({ minimum: 0, maximum: 255 });
+const menuSlot = Type.Object(
+  {
+    slot: menuSlotIndex,
+    containerSlot: counter,
+    playerInventory: Type.Boolean(),
+    itemId: identifier,
+    count: counter,
+  },
+  strict,
+);
+const menuContentsBounds = {
+  slotCount: counter,
+  maxSlots: Type.Literal(256),
+  maxSerializedBytes: Type.Literal(65536),
+};
+const menuContents = Type.Union([
+  Type.Object(
+    {
+      ...menuContentsBounds,
+      slotCount: Type.Integer({ minimum: 0, maximum: 256 }),
+      status: Type.Literal("available"),
+      slots: Type.Array(menuSlot, { maxItems: 256 }),
+    },
+    strict,
+  ),
+  Type.Object(
+    {
+      ...menuContentsBounds,
+      slotCount: Type.Integer({ minimum: 257, maximum: Number.MAX_SAFE_INTEGER }),
+      status: Type.Literal("slot_limit"),
+      slots: Type.Null(),
+    },
+    strict,
+  ),
+  Type.Object(
+    {
+      ...menuContentsBounds,
+      slotCount: Type.Integer({ minimum: 0, maximum: 256 }),
+      status: Type.Literal("serialized_limit"),
+      slots: Type.Null(),
+    },
+    strict,
+  ),
+]);
+const menuProperties = {
+  menuId: positiveCount,
+  containerId: counter,
+  menuType: nullableIdentifier,
+  blockPosition: Type.Union([blockPosition, Type.Null()]),
+  positionSource: Type.Union([
+    Type.Literal("clicked_block"),
+    Type.Literal("slot_block_entity"),
+    Type.Literal("unknown"),
+  ]),
+  contents: menuContents,
+};
+const menuFilterFields = ["menuId", "containerId", "menuType", "positionSource"];
+
 export const WorldScopeSchema = Type.Object(
   {
     worldId: identifier,
@@ -586,5 +645,55 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
     observation: "attempt",
     dataSchema: Type.Object({ hand, itemId: identifier, count: counter }, strict),
     filterFields: ["hand", "itemId", "count"],
+  },
+  {
+    name: "container_opened",
+    description:
+      "Completed native server menu initialization after server synchronization, not client render/ACK. Full initial native slots (<=256; <=65536 UTF-8 bytes for contents) copied before listener attachment, not acquisition. Clicked double-chest half only; unknown positions/type remain null. Item ID/count only, no cursor/data/components; unavailable is never truncated full contents.",
+    observation: "confirmed",
+    dataSchema: Type.Object(menuProperties, strict),
+    filterFields: menuFilterFields,
+  },
+  {
+    name: "container_slot_changed",
+    description:
+      "Natural native-broadcast/coalesced slot ID/count delta from our copied baseline, not every click/transient/component change, cursor or integer menu data; no inferred acquisition or recipe.",
+    observation: "snapshot_delta",
+    dataSchema: Type.Object(
+      {
+        menuId: positiveCount,
+        containerId: counter,
+        slot: menuSlotIndex,
+        containerSlot: counter,
+        playerInventory: Type.Boolean(),
+        beforeItemId: identifier,
+        beforeCount: counter,
+        afterItemId: identifier,
+        afterCount: counter,
+      },
+      strict,
+    ),
+    filterFields: [
+      "menuId",
+      "containerId",
+      "slot",
+      "containerSlot",
+      "playerInventory",
+      "beforeItemId",
+      "beforeCount",
+      "afterItemId",
+      "afterCount",
+    ],
+  },
+  {
+    name: "container_closed",
+    description:
+      "Normal native close/replacement/removal completed once; final old-menu slots are post-removal, not last-viewed contents or proof of a clicked close. Scope invalidation never invents a close.",
+    observation: "confirmed",
+    dataSchema: Type.Object(
+      { ...menuProperties, finalState: Type.Literal("post_removal") },
+      strict,
+    ),
+    filterFields: [...menuFilterFields, "finalState"],
   },
 ];

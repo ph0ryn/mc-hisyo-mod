@@ -1,5 +1,10 @@
 package io.github.ph0ryn.mchisyo.observation;
 
+import com.google.gson.Gson;
+import java.nio.charset.StandardCharsets;
+import java.util.IdentityHashMap;
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -20,6 +25,89 @@ public final class SnapshotDeltaTracker {
     }
 
     private record Baseline(PlayerSnapshot previous, PlayerSnapshot movementAnchor, long lastMovementSampleTick) {}
+
+    public static final int MAX_MENU_SLOTS = 256;
+    public static final int MAX_MENU_CONTENT_BYTES = 65536;
+    private static final Gson MENU_JSON = new Gson().newBuilder().serializeNulls().create();
+    private record MenuPosition(List<Integer> value) {}
+    private final Map<Object, MenuPosition> menuPositions = new IdentityHashMap<>();
+
+    public record MenuSlot(int slot, int containerSlot, boolean playerInventory, String itemId, int count) {
+        public MenuSlot {
+            if (slot < 0 || containerSlot < 0 || itemId == null || itemId.isEmpty() || itemId.length() > 128 || count < 0)
+                throw new IllegalArgumentException("Invalid copied menu slot");
+        }
+        public Map<String, Object> data() {
+            return Map.of("slot", slot, "containerSlot", containerSlot, "playerInventory", playerInventory,
+                    "itemId", itemId, "count", count);
+        }
+    }
+
+    /** Hard bound BEFORE invoking the copier; unavailable never masquerades as a truncated full snapshot. */
+    public static Map<String, Object> menuContents(int slotCount, IntFunction<MenuSlot> copySlot) {
+        if (slotCount < 0) throw new IllegalArgumentException("Negative slot count");
+        List<Map<String, Object>> slots = new ArrayList<>();
+        String status = slotCount > MAX_MENU_SLOTS ? "slot_limit" : "available";
+        if (status.equals("available")) {
+            for (int i = 0; i < slotCount; i++) {
+                MenuSlot slot = copySlot.apply(i);
+                if (slot.slot() != i) throw new IllegalArgumentException("Non-native menu index");
+                slots.add(slot.data());
+            }
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("status", status); result.put("slotCount", slotCount);
+        result.put("maxSlots", MAX_MENU_SLOTS); result.put("maxSerializedBytes", MAX_MENU_CONTENT_BYTES);
+        result.put("slots", status.equals("available") ? List.copyOf(slots) : null);
+        if (status.equals("available") && MENU_JSON.toJson(result).getBytes(StandardCharsets.UTF_8).length > MAX_MENU_CONTENT_BYTES) {
+            result.put("status", "serialized_limit"); result.put("slots", null);
+        }
+        return java.util.Collections.unmodifiableMap(result);
+    }
+
+    /** One copied baseline, bound to exact native objects rather than reusable numeric container IDs. */
+    public static final class MenuBaseline {
+        private final Object player, menu;
+        private final List<Map<String, Object>> slots;
+        private boolean active = true;
+        @SuppressWarnings("unchecked")
+        public MenuBaseline(Object player, Object menu, Map<String, Object> contents) {
+            this.player = Objects.requireNonNull(player); this.menu = Objects.requireNonNull(menu);
+            slots = contents.get("slots") == null ? null : new ArrayList<>((List<Map<String, Object>>)contents.get("slots"));
+        }
+        public boolean matches(Object player, Object menu) { return active && this.player == player && this.menu == menu; }
+        public void reset() { active = false; if (slots != null) slots.clear(); }
+        public Map<String, Object> change(MenuSlot next) {
+            if (!active || slots == null || next.slot() >= slots.size()) return null;
+            Map<String, Object> before = slots.set(next.slot(), next.data());
+            if (before.equals(next.data())) return null;
+            return Map.of("slot", next.slot(), "containerSlot", next.containerSlot(), "playerInventory", next.playerInventory(),
+                    "beforeItemId", before.get("itemId"), "beforeCount", before.get("count"),
+                    "afterItemId", next.itemId(), "afterCount", next.count());
+        }
+    }
+
+    /** Only the documented absent-menu-type exception is converted to explicit unknown. */
+    public static String menuType(Supplier<String> read) {
+        try { return read.get(); } catch (UnsupportedOperationException absentNativeType) { return null; }
+    }
+
+    public List<Integer> menuPosition(Object player) {
+        MenuPosition context = menuPositions.get(player);
+        return context == null ? null : context.value();
+    }
+    public <T> T withMenuPosition(Object player, List<Integer> position, Supplier<T> operation) {
+        List<Integer> copy = List.copyOf(position);
+        if (copy.size() != 3) throw new IllegalArgumentException("Block position requires three coordinates");
+        MenuPosition current = new MenuPosition(copy);
+        MenuPosition previous = menuPositions.put(player, current);
+        try { return operation.get(); }
+        finally {
+            if (menuPositions.get(player) == current) {
+                if (previous == null) menuPositions.remove(player); else menuPositions.put(player, previous);
+            }
+        }
+    }
 
     private final MovementSampling movementSampling;
     private final Map<UUID, Baseline> baselines = new HashMap<>();
@@ -194,7 +282,11 @@ public final class SnapshotDeltaTracker {
         worldBaselines.remove(playerId);
     }
 
+    public void clearMenuContext(Object player) { menuPositions.remove(player); }
+    public void clearMenuContexts() { menuPositions.clear(); }
+
     public void clear() {
+        clearMenuContexts();
         baselines.clear();
         worldBaselines.clear();
     }

@@ -40,6 +40,7 @@ public final class ObserverChecks {
         equipmentDeltasAreSampledAndCopied(fixtures);
         sampledWorldAndOutcomeEdges(fixtures);
         nativeItemOutcomeEdges(fixtures);
+        menuValueContracts(fixtures);
         roundTripsAllSharedFacts(fixtures);
         System.out.println("ObserverChecks: " + checks + " assertions passed (pure Java; no Minecraft launch)");
     }
@@ -317,8 +318,73 @@ public final class ObserverChecks {
                 SnapshotDeltaTracker.successfulCount(true, 2), "shared furnace/SWAP positive take count");
     }
 
+    private static void menuValueContracts(JsonArray fixtures) {
+        record NativeKey(int reusableId) {}
+        Object player = new NativeKey(1), menu = new NativeKey(1), other = new NativeKey(1);
+        var stone = new SnapshotDeltaTracker.MenuSlot(0, 7, false, "minecraft:stone", 3);
+        var full = SnapshotDeltaTracker.menuContents(1, i -> stone);
+        equal("available", full.get("status"), "full initial contents");
+        equal(fixture(fixtures, "container_opened").getAsJsonObject("data").get("contents"), JSON.toJsonTree(full), "Java initial contents match strict shared fixture");
+        equal("available", SnapshotDeltaTracker.menuContents(0, i -> { throw new AssertionError("empty copied"); }).get("status"), "empty full is available");
+        equal("available", SnapshotDeltaTracker.menuContents(256, i -> new SnapshotDeltaTracker.MenuSlot(i, i, true, "minecraft:air", 0)).get("status"), "inclusive slot cap");
+        var baseline = new SnapshotDeltaTracker.MenuBaseline(player, menu, full);
+        check(baseline.matches(player, menu), "exact menu/player identity");
+        check(!baseline.matches(other, menu) && !baseline.matches(player, other), "identity not value IDs");
+        equal(null, baseline.change(stone), "registration callback is not a delta");
+        var air = new SnapshotDeltaTracker.MenuSlot(0, 7, false, "minecraft:air", 0);
+        var delta = baseline.change(air);
+        equal(3, delta.get("beforeCount"), "delta uses own before baseline");
+        equal(0, delta.get("afterCount"), "delta copies after count");
+        Map<String, Object> sharedDelta = new java.util.LinkedHashMap<>(delta);
+        sharedDelta.put("menuId", 1); sharedDelta.put("containerId", 2);
+        equal(fixture(fixtures, "container_slot_changed").get("data"), JSON.toJsonTree(sharedDelta), "Java delta matches strict shared fixture");
+        equal(fixture(fixtures, "container_closed").getAsJsonObject("data").get("contents"),
+                JSON.toJsonTree(SnapshotDeltaTracker.menuContents(1, i -> air)), "final post-removal value copy is separate from initial");
+        equal(null, baseline.change(air), "equal callback suppressed");
+        baseline.reset();
+        check(!baseline.matches(player, menu), "reset invalidates object binding");
+        equal(null, baseline.change(stone), "reset never invents a new before baseline");
+        equal(3, ((Map<?, ?>)((List<?>)full.get("slots")).getFirst()).get("count"), "initial copy unchanged");
+        var unavailable = SnapshotDeltaTracker.menuContents(257, i -> { throw new AssertionError("overbound materialized"); });
+        equal("slot_limit", unavailable.get("status"), "slot cap explicit, no truncated full snapshot");
+        equal(null, unavailable.get("slots"), "unavailable has no pretend full slots");
+        equal(null, new SnapshotDeltaTracker.MenuBaseline(player, menu, unavailable).change(stone), "unavailable cannot invent before");
+        equal("serialized_limit", SnapshotDeltaTracker.menuContents(256,
+                i -> new SnapshotDeltaTracker.MenuSlot(i, i, false, "\u0001".repeat(128), 1)).get("status"), "serialized cap");
+        expectThrows(IllegalArgumentException.class, () -> new SnapshotDeltaTracker.MenuSlot(-1, 0, false, "x", 1));
+        expectThrows(IllegalArgumentException.class, () -> new SnapshotDeltaTracker.MenuSlot(0, -1, false, "x", 1));
+        expectThrows(IllegalArgumentException.class, () -> new SnapshotDeltaTracker.MenuSlot(0, 0, false, "", 1));
+        expectThrows(IllegalArgumentException.class, () -> new SnapshotDeltaTracker.MenuSlot(0, 0, false, "x", -1));
+        equal(null, SnapshotDeltaTracker.menuType(() -> { throw new UnsupportedOperationException(); }), "absent native type explicit");
+        equal("minecraft:chest", SnapshotDeltaTracker.menuType(() -> "minecraft:chest"), "known type retained");
+        expectThrows(IllegalStateException.class, () -> SnapshotDeltaTracker.menuType(() -> { throw new IllegalStateException(); }));
+        var tracker = tracker();
+        var a = List.of(1, 2, 3); var b = List.of(4, 5, 6);
+        equal(null, tracker.menuPosition(player), "no guessed position");
+        tracker.withMenuPosition(player, a, () -> {
+            equal(a, tracker.menuPosition(player), "exact lexical player context");
+            equal(null, tracker.menuPosition(other), "other player cannot consume context");
+            tracker.withMenuPosition(player, b, () -> { equal(b, tracker.menuPosition(player), "reentrant override"); return null; });
+            equal(a, tracker.menuPosition(player), "reentrant restore");
+            expectThrows(IllegalStateException.class, () -> tracker.withMenuPosition(player, b, () -> { throw new IllegalStateException(); }));
+            equal(a, tracker.menuPosition(player), "failure restores outer context");
+            return null;
+        });
+        equal(null, tracker.menuPosition(player), "lexical cleanup");
+        tracker.withMenuPosition(player, a, () -> { tracker.clear(); return null; });
+        equal(null, tracker.menuPosition(player), "reset never restores stale context");
+        tracker.withMenuPosition(player, a, () -> {
+            tracker.withMenuPosition(other, b, () -> { tracker.clearMenuContext(other); return null; });
+            equal(a, tracker.menuPosition(player), "other-player reset preserves exact context");
+            tracker.withMenuPosition(player, b, () -> { tracker.clearMenuContext(player); return null; });
+            equal(null, tracker.menuPosition(player), "nested reset cannot resurrect outer context");
+            return null;
+        });
+        equal(null, tracker.menuPosition(player), "outer finally preserves reset");
+    }
+
     private static void roundTripsAllSharedFacts(JsonArray fixtures) {
-        equal(29, fixtures.size(), "all shared fixture kinds");
+        equal(32, fixtures.size(), "all shared fixture kinds including menus");
         for (var element : fixtures) {
             JsonObject fixture = element.getAsJsonObject();
             List<Double> position = new ArrayList<>();

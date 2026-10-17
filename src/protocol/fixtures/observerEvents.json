@@ -520,5 +520,94 @@
       "itemId": "minecraft:apple",
       "count": 2
     }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "tick": 120,
+    "observedAt": 1000,
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "event": "container_opened",
+    "seq": 30,
+    "data": {
+      "menuId": 1,
+      "containerId": 2,
+      "menuType": "minecraft:generic_9x3",
+      "blockPosition": [3, 64, 0],
+      "positionSource": "clicked_block",
+      "contents": {
+        "status": "available",
+        "slotCount": 1,
+        "maxSlots": 256,
+        "maxSerializedBytes": 65536,
+        "slots": [
+          {
+            "slot": 0,
+            "containerSlot": 7,
+            "playerInventory": false,
+            "itemId": "minecraft:stone",
+            "count": 3
+          }
+        ]
+      }
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "tick": 120,
+    "observedAt": 1000,
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "event": "container_slot_changed",
+    "seq": 31,
+    "data": {
+      "menuId": 1,
+      "containerId": 2,
+      "slot": 0,
+      "containerSlot": 7,
+      "playerInventory": false,
+      "beforeItemId": "minecraft:stone",
+      "beforeCount": 3,
+      "afterItemId": "minecraft:air",
+      "afterCount": 0
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "tick": 120,
+    "observedAt": 1000,
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "event": "container_closed",
+    "seq": 32,
+    "data": {
+      "menuId": 1,
+      "containerId": 2,
+      "menuType": "minecraft:generic_9x3",
+      "blockPosition": [3, 64, 0],
+      "positionSource": "clicked_block",
+      "contents": {
+        "status": "available",
+        "slotCount": 1,
+        "maxSlots": 256,
+        "maxSerializedBytes": 65536,
+        "slots": [
+          {
+            "slot": 0,
+            "containerSlot": 7,
+            "playerInventory": false,
+            "itemId": "minecraft:air",
+            "count": 0
+          }
+        ]
+      },
+      "finalState": "post_removal"
+    }
   }
 ]
