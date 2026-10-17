@@ -154,6 +154,17 @@ public final class ObserverChecks {
                 snapshot(140, 20, "minecraft:nether_wastes", false, "minecraft:the_nether", AIR)), "dimension change rebaseline");
         equal(List.of(), tracker.observe(PLAYER,
                 snapshot(1, 30, "minecraft:nether_wastes", true, "minecraft:the_nether", AIR)), "backwards world tick rebaseline");
+        UUID other = new UUID(0, 2);
+        tracker.clear();
+        for (UUID player : List.of(PLAYER, other)) {
+            tracker.observe(player, initial);
+            tracker.observeWorld(player, initial, false, false, 0, false, Map.of(), Map.of(), List.of(), false);
+        }
+        tracker.reset(PLAYER);
+        check(tracker.worldSampleDue(PLAYER, initial), "player reset clears world cadence");
+        check(!tracker.worldSampleDue(other, initial), "other player retains world cadence");
+        equal(List.of(), tracker.observe(PLAYER, changed), "player reset cannot invent a delta");
+        check(!tracker.observe(other, changed).isEmpty(), "other player retains observation baseline");
     }
 
     private static void snapshotsAndEmittedEventsAreImmutable() {

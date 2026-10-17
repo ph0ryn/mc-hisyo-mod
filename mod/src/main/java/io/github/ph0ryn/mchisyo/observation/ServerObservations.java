@@ -140,7 +140,8 @@ public final class ServerObservations {
         });
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             requireServerThread(server);
-            new ArrayList<>(menus.keySet()).forEach(player -> { if (!scoped(player)) forgetMenu(player); });
+            // scoped() resets rejected players, including menus left by replaced native players.
+            new ArrayList<>(menus.keySet()).forEach(this::scoped);
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
                 if (scoped(player)) {
                     PlayerSnapshot snapshot = snapshot(player);
@@ -153,9 +154,7 @@ public final class ServerObservations {
             requireServerThread(player.level().getServer());
             ObservedEvent joined = fact(player, "player_connection_changed", Map.of("state", "joined"));
             nativeConnection.accept(player, joined);
-            forgetMenu(player);
-            tracker.clearMenuContext(player);
-            tracker.reset(player.getUUID());
+            resetPlayer(player);
             if (scoped(player)) {
                 sink.accept(joined);
                 tracker.rebaseline(player.getUUID(), snapshot(player));
@@ -165,12 +164,11 @@ public final class ServerObservations {
             requireServerThread(player.level().getServer());
             ObservedEvent leaving = fact(player, "player_connection_changed", Map.of("state", "leaving"));
             nativeConnection.accept(player, leaving);
-            forgetMenu(player);
-            tracker.clearMenuContext(player);
-            tracker.reset(player.getUUID());
+            resetPlayer(player);
             if (scoped(player)) sink.accept(leaving);
         });
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
+            // Detach both native listeners before resetting either player's pure tracker state.
             forgetMenu(oldPlayer);
             forgetMenu(newPlayer);
             tracker.clearMenuContext(oldPlayer);
@@ -183,9 +181,7 @@ public final class ServerObservations {
             }
         });
         ServerEntityWorldChangeEvents.AFTER_PLAYER_CHANGE_WORLD.register((player, origin, destination) -> {
-            forgetMenu(player);
-            tracker.clearMenuContext(player);
-            tracker.reset(player.getUUID());
+            resetPlayer(player);
             if (scoped(player)) {
                 emit(player, "dimension_changed", Map.of(
                         "fromDimension", origin.dimension().identifier().toString(),
@@ -376,6 +372,12 @@ public final class ServerObservations {
         observations.emit(player, "container_closed", data);
     }
 
+    private void resetPlayer(ServerPlayer player) {
+        forgetMenu(player);
+        tracker.clearMenuContext(player);
+        tracker.reset(player.getUUID());
+    }
+
     private void forgetMenu(ServerPlayer player) {
         MenuWatch watch = menus.remove(player);
         if (watch != null) {
@@ -457,9 +459,7 @@ public final class ServerObservations {
     private boolean scoped(ServerPlayer player) {
         requireServerThread(player.level().getServer());
         if (isScopedPlayer.test(player)) return true;
-        forgetMenu(player);
-        tracker.clearMenuContext(player);
-        tracker.reset(player.getUUID());
+        resetPlayer(player);
         return false;
     }
 
