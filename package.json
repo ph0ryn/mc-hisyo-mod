@@ -2,16 +2,20 @@
   "name": "mc-hisyo-mod",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "bin": {
     "ai-director": "./dist/cli.mjs"
   },
-  "type": "module",
   "scripts": {
-    "check": "vp check",
-    "format": "vp fmt",
-    "test": "vp test",
     "build": "vp pack",
     "build:mod": "cd mod && ./gradlew build --configuration-cache",
+    "check": "vp check",
+    "check:mod": "cd mod && ./gradlew check --configuration-cache",
+    "clean:mod": "cd mod && ./gradlew clean --configuration-cache",
+    "dev:mod": "cd mod && ./gradlew runClient --configuration-cache",
+    "format": "vp fmt",
+    "test": "vp test",
+    "test:mod": "cd mod && ./gradlew test --configuration-cache",
     "verify": "vp check && vp pack && vp test"
   },
   "dependencies": {
@@ -23,8 +27,8 @@
     "typescript": "7.0.2",
     "vite-plus": "1.3.0"
   },
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": "^24.15.0 || >=26.0.0"
-  },
-  "packageManager": "pnpm@11.22.0"
+  }
 }
