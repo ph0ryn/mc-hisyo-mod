@@ -11,6 +11,7 @@
     "format": "vp fmt",
     "test": "vp test",
     "build": "vp pack",
+    "build:mod": "cd mod && ./gradlew build --configuration-cache",
     "verify": "vp check && vp pack && vp test"
   },
   "dependencies": {
