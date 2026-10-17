@@ -1,0 +1,84 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+loom {
+    splitEnvironmentSourceSets()
+
+    mods {
+        mc_hisyo {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+
+    runs {
+        configureEach {
+            runDir 'run'
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+// Loom adds game dependencies to standard test configurations; keep unit tests isolated.
+configurations {
+    unitTestClasspath {
+        canBeConsumed = false
+    }
+}
+
+sourceSets.test {
+    compileClasspath = sourceSets.main.output + configurations.unitTestClasspath
+    runtimeClasspath = output + compileClasspath
+}
+
+dependencies {
+    unitTestClasspath platform('org.junit:junit-bom:5.13.4')
+    unitTestClasspath 'org.junit.jupiter:junit-jupiter'
+    unitTestClasspath 'org.junit.platform:junit-platform-launcher'
+    unitTestClasspath 'org.apiguardian:apiguardian-api:1.1.2'
+    // Same Gson as Minecraft 1.21.11; its annotations are not needed at runtime.
+    unitTestClasspath('com.google.code.gson:gson:2.13.2') {
+        transitive = false
+    }
+}
+
+tasks.named('test', Test) {
+    useJUnitPlatform()
+    def fixtures = rootProject.file('../src/protocol/fixtures/observerEvents.json')
+    inputs.file fixtures
+    systemProperty 'observerFixtures', fixtures.absolutePath
+}
+
+processResources {
+    def metadata = [
+        version: project.version,
+        minecraftVersion: project.minecraft_version,
+        loaderVersion: project.loader_version,
+        fabricApiVersion: project.fabric_api_version
+    ]
+    inputs.properties metadata
+
+    filesMatching('fabric.mod.json') {
+        expand metadata
+    }
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+    options.encoding = 'UTF-8'
+}

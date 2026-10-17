@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "tick": 120,
+  "observedAt": 1000123,
+  "dayTime": 6000,
+  "dimension": "minecraft:overworld",
+  "position": [1.5, 64, -2.5],
+  "biomeId": "minecraft:plains",
+  "health": 18,
+  "maxHealth": 20,
+  "foodLevel": 17,
+  "saturation": 2.5,
+  "experience": { "level": 3, "progress": 0.25, "total": 35 },
+  "inventory": {
+    "selectedSlot": 0,
+    "main": [
+      { "itemId": "minecraft:stone", "count": 12 },
+      { "itemId": "minecraft:apple", "count": 3 },
+      { "itemId": "minecraft:iron_pickaxe", "count": 1 },
+      { "itemId": "minecraft:torch", "count": 16 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 },
+      { "itemId": "minecraft:air", "count": 0 }
+    ],
+    "equipment": {
+      "feet": { "itemId": "minecraft:iron_boots", "count": 1 },
+      "legs": { "itemId": "minecraft:air", "count": 0 },
+      "chest": { "itemId": "minecraft:air", "count": 0 },
+      "head": { "itemId": "minecraft:air", "count": 0 },
+      "offHand": { "itemId": "minecraft:shield", "count": 1 },
+      "body": { "itemId": "minecraft:air", "count": 0 },
+      "saddle": { "itemId": "minecraft:air", "count": 0 }
+    }
+  },
+  "nearby": {
+    "blockRadius": 4,
+    "blocksComplete": true,
+    "blocks": [{ "blockId": "minecraft:oak_log", "position": [2, 64, -2] }],
+    "entityRadius": 16,
+    "entitiesTruncated": false,
+    "entities": [
+      {
+        "entityId": "ebee4a08-1f2c-4ce1-95c4-a96dd8d84d42",
+        "entityType": "minecraft:cow",
+        "position": [3, 64, -3]
+      }
+    ]
+  }
+}
