@@ -1,7 +1,7 @@
 import { referenceTools, validReferenceResult } from "../protocol/gameReferences.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter, once } from "node:events";
-import { createServer, type AddressInfo, type Socket } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { EventLog, StoredEvent } from "../events/eventLog.js";
@@ -72,21 +72,29 @@ export class DirectorBridge extends EventEmitter<{
   fault: [error: Error];
 }> {
   readonly #options: BridgeOptions;
-  readonly #server = createServer((socket) => this.#accept(socket));
+  readonly #server: ReturnType<typeof createServer>;
   readonly #connections = new Set<Connection>();
   #game: Connection | undefined;
+  #availability: { game: Connection; promise: Promise<void>; resolve: () => void } | undefined;
   #agent: Connection | undefined;
   #world: AttachedWorld | undefined;
   #playerMessageIntake: { accept: PlayerMessageHandler } | undefined;
   // Invalidated runs still occupy the single-flight slot until the owner observes settled.
-  #run: { binding: RunBinding; valid: boolean; agentBindingSent: boolean } | undefined;
+  #run:
+    | { binding: RunBinding; valid: boolean; agentBindingSent: boolean; wake: () => void }
+    | undefined;
   #closing = false;
   #storageFailed = false;
   #starting: Promise<unknown[]> | undefined;
   #shutdown: Promise<void> | undefined;
 
-  constructor(options: BridgeOptions) {
+  constructor(
+    options: BridgeOptions,
+    listener = (accept: (peer: RpcPeer) => void) =>
+      createServer((socket) => accept(new RpcPeer(socket))),
+  ) {
     super();
+    this.#server = listener((peer) => this.#accept(peer));
     if (!Check(HelloSchema.properties.token, options.token))
       throw new Error("Invalid bridge token");
     const timeout = options.helloTimeoutMs ?? 5_000;
@@ -144,6 +152,7 @@ export class DirectorBridge extends EventEmitter<{
 
   async #close(): Promise<void> {
     this.#closing = true;
+    this.#resolveAvailability();
     this.#playerMessageIntake = undefined;
     // listen() retains its own startup error; disposal must wait for either outcome.
     if (this.#starting) await Promise.allSettled([this.#starting]);
@@ -170,9 +179,19 @@ export class DirectorBridge extends EventEmitter<{
     )
       throw new Error("Game and agent are not ready for judgment");
     const binding = Object.freeze({ ...world.binding, runId: randomUUID() });
-    const run = { binding, valid: true, agentBindingSent: false };
+    const run = { binding, valid: true, agentBindingSent: false, wake: () => {} };
     this.#run = run;
     try {
+      // Keep intake/clock factual while reserving the existing slot, but do not bind natively
+      // until this game's authoritative status resolves its withdrawn-run uncertainty.
+      if (this.#availability?.game === game) {
+        const available = this.#availability.promise;
+        await new Promise<void>((resolve) => {
+          run.wake = resolve;
+          void available.then(resolve);
+        });
+      }
+      this.#requireRun(binding);
       await this.#bind(game.peer, "game.run.bind", binding);
       this.#requireRun(binding);
       run.agentBindingSent = true;
@@ -200,6 +219,7 @@ export class DirectorBridge extends EventEmitter<{
     const run = this.#run;
     if (!run?.valid) return;
     run.valid = false;
+    run.wake();
     // Same authenticated pipe as state replies: cancellation precedes any late stale error.
     const peer = this.#agent?.peer;
     if (run.agentBindingSent && peer && !peer.isClosed) {
@@ -259,12 +279,11 @@ export class DirectorBridge extends EventEmitter<{
     return { worldId: world.binding.worldId, playerId: world.binding.playerId };
   }
 
-  #accept(socket: Socket): void {
+  #accept(peer: RpcPeer): void {
     if (this.#closing) {
-      socket.destroy();
+      peer.close(new Error("Bridge closed"));
       return;
     }
-    const peer = new RpcPeer(socket);
     const connection: Connection = { peer, role: undefined, ready: false };
     this.#connections.add(connection);
     const timer = setTimeout(
@@ -352,6 +371,7 @@ export class DirectorBridge extends EventEmitter<{
       );
       if (params.paused) this.invalidateRun("paused");
       this.#requireWorld(params); // Clearing a run can synchronously close the game link.
+      this.#resolveAvailability();
       this.emit("status", this.currentWorld!);
       return { paused: params.paused };
     });
@@ -510,7 +530,14 @@ export class DirectorBridge extends EventEmitter<{
       throw new RpcError(-32602, "Unsupported event capability");
   }
 
+  #resolveAvailability(): void {
+    const pending = this.#availability;
+    this.#availability = undefined;
+    pending?.resolve();
+  }
+
   #detach(reason = "game_detached"): void {
+    this.#resolveAvailability();
     const world = this.#world;
     if (!world) return;
     const attached = this.#game?.ready === true;
@@ -540,6 +567,7 @@ export class DirectorBridge extends EventEmitter<{
     } catch (error) {
       if (!this.#storageFailed) {
         this.#storageFailed = true;
+        this.#resolveAvailability();
         this.invalidateRun("storage_failed");
         this.emit(
           "fault",
@@ -558,12 +586,38 @@ export class DirectorBridge extends EventEmitter<{
     this.#requireRun(params);
     // Capture literal request data before awaiting; never retarget a delayed display fact.
     const captured = structuredClone(params);
+    const game = this.#game!;
+    const agent = this.#agent!;
+    const run = this.#run!;
     let result: unknown;
     try {
-      result = await this.#game!.peer.call(method, captured);
+      result = await game.peer.call(method, captured);
     } catch (error) {
-      // GameSession's stale code needs our exact owned binding evidence before classification.
-      if (error instanceof RpcError && error.code === -32001) this.#requireRun(captured);
+      // Only this authenticated native producer's owned capture is withdrawal evidence.
+      if (
+        error instanceof RpcError &&
+        error.code === -32001 &&
+        error.data === undefined &&
+        !this.#closing &&
+        !this.#storageFailed &&
+        this.#game === game &&
+        this.#agent === agent &&
+        this.#run === run &&
+        !game.peer.isClosed &&
+        !agent.peer.isClosed &&
+        sameRunBinding(run.binding, captured)
+      ) {
+        this.#requireWorld(captured);
+        if (run.valid) {
+          let resolve!: () => void;
+          const promise = new Promise<void>((yes) => {
+            resolve = yes;
+          });
+          this.#availability = { game, promise, resolve };
+          this.invalidateRun("native_run_withdrawn");
+        }
+        this.#requireRun(captured);
+      }
       throw error;
     }
     if (
