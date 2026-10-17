@@ -29,59 +29,34 @@ dependencies {
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 }
 
-// Pure-Java checks use the already-cached Gson dependency, not a game/JUnit runner.
-// A separate source set keeps the ordinary test task NO-SOURCE without hiding tests.
-sourceSets {
-    observerTest {
-        java.srcDir 'src/test/observerJava'
-        compileClasspath += sourceSets.main.output
-        runtimeClasspath += sourceSets.main.output
+// Loom adds game dependencies to standard test configurations; keep unit tests isolated.
+configurations {
+    unitTestClasspath {
+        canBeConsumed = false
     }
 }
 
+sourceSets.test {
+    compileClasspath = sourceSets.main.output + configurations.unitTestClasspath
+    runtimeClasspath = output + compileClasspath
+}
+
 dependencies {
-    // Same Gson as Minecraft 1.21.11, already cached; no Minecraft/Fabric classes on this test classpath.
-    observerTestImplementation('com.google.code.gson:gson:2.13.2') {
-        // Gson runs on the JDK alone; its Error Prone annotations are not a runtime/test requirement.
+    unitTestClasspath platform('org.junit:junit-bom:5.13.4')
+    unitTestClasspath 'org.junit.jupiter:junit-jupiter'
+    unitTestClasspath 'org.junit.platform:junit-platform-launcher'
+    unitTestClasspath 'org.apiguardian:apiguardian-api:1.1.2'
+    // Same Gson as Minecraft 1.21.11; its annotations are not needed at runtime.
+    unitTestClasspath('com.google.code.gson:gson:2.13.2') {
         transitive = false
     }
 }
 
-tasks.register('observerTest', JavaExec) {
-    dependsOn tasks.named('observerTestClasses')
-    classpath = sourceSets.observerTest.runtimeClasspath
-    mainClass = 'io.github.ph0ryn.mchisyo.observation.ObserverChecks'
+tasks.named('test', Test) {
+    useJUnitPlatform()
     def fixtures = rootProject.file('../src/protocol/fixtures/observerEvents.json')
     inputs.file fixtures
-    args fixtures.absolutePath
-}
-
-tasks.register('transportTest', JavaExec) {
-    dependsOn tasks.named('observerTestClasses')
-    classpath = sourceSets.observerTest.runtimeClasspath
-    mainClass = 'io.github.ph0ryn.mchisyo.transport.TransportChecks'
-}
-
-tasks.register('rpcPeerTest', JavaExec) {
-    dependsOn tasks.named('observerTestClasses')
-    classpath = sourceSets.observerTest.runtimeClasspath
-    mainClass = 'io.github.ph0ryn.mchisyo.transport.RpcPeerChecks'
-}
-
-tasks.register('gameSessionTest', JavaExec) {
-    dependsOn tasks.named('observerTestClasses')
-    classpath = sourceSets.observerTest.runtimeClasspath
-    mainClass = 'io.github.ph0ryn.mchisyo.session.GameSessionChecks'
-}
-
-tasks.register('referenceTest', JavaExec) {
-    dependsOn tasks.named('observerTestClasses')
-    classpath = sourceSets.observerTest.runtimeClasspath
-    mainClass = 'io.github.ph0ryn.mchisyo.reference.ReferenceChecks'
-}
-
-tasks.named('check') {
-    dependsOn tasks.named('observerTest'), tasks.named('transportTest'), tasks.named('rpcPeerTest'), tasks.named('gameSessionTest'), tasks.named('referenceTest')
+    systemProperty 'observerFixtures', fixtures.absolutePath
 }
 
 processResources {

@@ -78,15 +78,15 @@ CLI attach / detachの内部履歴はnative JOIN / LEAVEの代用ではない。
 
 [共有fixture](<../src/protocol/fixtures/observerEvents.json>)を
 [TypeScriptテスト](<../src/protocol/gameEvent.test.ts>)と
-[純Javaチェック](<../mod/src/test/observerJava/io/github/ph0ryn/mchisyo/observation/ObserverChecks.java>)の両方で読む。
+[JUnitテスト](<../mod/src/test/java/io/github/ph0ryn/mchisyo/observation/ObserverTest.java>)の両方で読む。
 Java側はsnapshot差分、プレイヤー別baseline、sample、reset、不変DTO、明示nullを検証する。
 
 `mod`ディレクトリで実行する。
 
 ```bash
-./gradlew observerTest
+./gradlew test --tests '*ObserverTest'
 ```
 
-依存がcache済みなら`--offline`を追加できる。通常の`build`もこのcheckを実行する。
+依存がcache済みなら`--offline`を追加できる。通常の`test` / `check` / `build`もこのJUnitテストを実行する。
 Minecraft / Fabricをテスト実行classpathへ入れず、ゲーム起動・EULA同意・ワールド変更は行わない。
 コンパイルとfixtureの整合確認は、ゲーム内callbackの発火を保証するものではない。

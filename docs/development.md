@@ -57,7 +57,8 @@ pnpm run build:mod
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
 このビルドはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
 依存がcache済みなら`pnpm run build:mod --offline`で実行できる。
-Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は[5つの純Java check](<../mod/build.gradle#L50-L85>)を実行する。
+Modのunit testは[JUnit Jupiter](<../mod/build.gradle#L32-L60>)を使い、`cd mod && ./gradlew test`で全件実行する。
+テストは[`mod/src/test/java`](<../mod/src/test/java/>)へ置く。標準の`check` / `build`も同じテストを実行する。
 生成物は`mod/build/libs/mc_hisyo-0.1.0.jar`（実行用）と`mc_hisyo-0.1.0-sources.jar`。
 Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
 登録API、明示nullのserialize、観測の限界は[観測資料](<observations.md>)を参照。
