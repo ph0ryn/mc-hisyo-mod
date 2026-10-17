@@ -187,6 +187,54 @@ test("one shared history preserves game sequence and gap semantics", () => {
   expect(() => new EventCatalog(gameEventDefinitions).validateObservation(input)).toThrow();
 });
 
+test.each([
+  [0, 1, null, null],
+  [1, 2, null, null],
+  [1, 4, 2, 3],
+])("game and CLI rows retain distinct sequence metadata (%i -> %i)", (last, seq, from, to) => {
+  const f = log(port([[{ seq: last }]]));
+  const cli = structuredClone(input);
+  const game = {
+    ...binding,
+    seq,
+    tick: 4,
+    observedAt: 101,
+    event: "block_broken",
+    dimension: "minecraft:overworld",
+    position: [0, 64, 0] as [number, number, number],
+    data: { blockId: "minecraft:stone", position: [1, 64, 0] },
+  };
+  const storedCli = f.log.appendActivity(cli);
+  const storedGame = f.log.append(game);
+  expect(f.calls[0]!.args).toEqual([
+    binding.worldId,
+    binding.playerId,
+    binding.worldSessionId,
+    null,
+    cli.event,
+    cli.observedAt,
+    JSON.stringify(cli),
+    null,
+    null,
+  ]);
+  expect(f.calls[2]!.args).toEqual([
+    binding.worldId,
+    binding.playerId,
+    binding.worldSessionId,
+    seq,
+    game.event,
+    game.observedAt,
+    JSON.stringify(game),
+    from,
+    to,
+  ]);
+  expect(storedGame.missingSequencesBefore).toEqual(from === null ? undefined : { from, to });
+  cli.data.text = "changed";
+  game.data.position[0] = 999;
+  expect(storedCli.observation.data.text).toBe(input.data.text);
+  expect(storedGame.observation.data.position).toEqual([1, 64, 0]);
+});
+
 test("byte-bounded escaped-text pages resume without loss or duplication", () => {
   const large = { ...input, data: { text: "\u0000".repeat(16_000) } };
   const rows = Array.from({ length: 24 }, (_, i) => row(i + 1, large));

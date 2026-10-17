@@ -103,7 +103,6 @@ export class EventLog {
 
   appendActivity(observation: DirectorActivity): { id: number; observation: DirectorActivity } {
     validateDirectorActivity(observation);
-    const json = JSON.stringify(observation);
     if (
       Buffer.byteLength(
         JSON.stringify({
@@ -115,23 +114,7 @@ export class EventLog {
       ) > eventPageBytes
     )
       throw new Error("Director activity exceeds history page byte budget");
-    const result = this.db
-      .prepare(`
-      INSERT INTO events(world_id, player_id, session_id, seq, event, observed_at, observation_json, gap_from, gap_to)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-      .run(
-        observation.worldId,
-        observation.playerId,
-        observation.worldSessionId,
-        null,
-        observation.event,
-        observation.observedAt,
-        json,
-        null,
-        null,
-      );
-    const id = Number(result.lastInsertRowid);
+    const id = this.#insert(observation, null);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid stored event cursor");
     return { id, observation: structuredClone(observation) };
   }
@@ -157,15 +140,30 @@ export class EventLog {
     if (seq <= last) throw new Error(`Invalid event sequence: received ${seq}, last ${last}`);
     const gapFrom = seq > last + 1 ? last + 1 : null;
     const gapTo = gapFrom === null ? null : seq - 1;
+    const entry: StoredEvent = {
+      id: this.#insert(observation, seq, gapFrom, gapTo),
+      observation: structuredClone(observation),
+    };
+    if (gapFrom !== null && gapTo !== null)
+      entry.missingSequencesBefore = { from: gapFrom, to: gapTo };
+    return entry;
+  }
+
+  #insert(
+    observation: GameEvent | DirectorActivity,
+    seq: number | null,
+    gapFrom: number | null = null,
+    gapTo: number | null = null,
+  ): number {
     const result = this.db
       .prepare(`
       INSERT INTO events(world_id, player_id, session_id, seq, event, observed_at, observation_json, gap_from, gap_to)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
       .run(
-        worldId,
-        playerId,
-        worldSessionId,
+        observation.worldId,
+        observation.playerId,
+        observation.worldSessionId,
         seq,
         observation.event,
         observation.observedAt,
@@ -173,13 +171,7 @@ export class EventLog {
         gapFrom,
         gapTo,
       );
-    const entry: StoredEvent = {
-      id: Number(result.lastInsertRowid),
-      observation: structuredClone(observation),
-    };
-    if (gapFrom !== null && gapTo !== null)
-      entry.missingSequencesBefore = { from: gapFrom, to: gapTo };
-    return entry;
+    return Number(result.lastInsertRowid);
   }
 
   search(
