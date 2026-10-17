@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EventEmitter } from "node:events";
 import { expect, test } from "vite-plus/test";
-import type { RunBinding } from "../protocol/bridge.js";
+import { staleRunErrorCode, type RunBinding } from "../protocol/bridge.js";
 import snapshot from "../protocol/fixtures/gameSnapshot.json" with { type: "json" };
 import type { RpcParams } from "../protocol/jsonRpc.js";
 import { RpcError } from "../transport/rpcPeer.js";
@@ -102,7 +102,9 @@ test.each([false, true])(
     if (stdioFirst) first.controller.abort();
     // The authenticated TCP control arrives before its stale RPC error, independently of stdio.
     h.peer.receive("director.run.invalidate", binding);
-    h.peer.states[0]!.result.reject(new RpcError(-32001, "late stale result"));
+    h.peer.states[0]!.result.reject(
+      new RpcError(staleRunErrorCode, "Director run invalidated", binding),
+    );
     expect(await observed).toBeInstanceOf(Error);
     await dispatch;
     expect(providerDispatches).toBe(0);
@@ -153,6 +155,110 @@ test.each(["context", "tool"])(
     expect(h.peer.closes).toBe(1);
     h.emit("agent_settled", ctx);
     expect(() => h.peer.receive("director.run.bind", { ...binding, runId: "second" })).toThrow();
+  },
+);
+
+test.each([
+  ["context", "error-first", new RpcError(-32603, "Invalid game result or binding")],
+  ["context", "signal-first", new RpcError(-32603, "Invalid game result or binding")],
+  ["context", "error-first", new Error("Director run cancelled")],
+  ["context", "signal-first", new Error("Director run cancelled")],
+  ["tool", "error-first", new RpcError(-32603, "Invalid game result or binding")],
+  ["tool", "signal-first", new RpcError(-32603, "Invalid game result or binding")],
+] as const)("%s fatal failure survives %s cancellation: %s", async (path, order, failure) => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  const pending =
+    path === "context"
+      ? Promise.resolve(h.emit("context", ctx, { messages: [] }))
+      : h.tools
+          .get("get_game_state")!
+          .execute("id", { query: {} }, controller.signal, undefined, ctx);
+  const observed = pending.catch((error: unknown) => error);
+  if (order === "signal-first") controller.abort();
+  h.peer.states[0]!.result.reject(failure);
+  // Same-chunk parsing rejects the RPC then runs owner control before any await continuation.
+  h.peer.receive("director.run.invalidate", binding);
+  expect(await observed).toBe(failure);
+  expect(controller.signal.aborted).toBe(true);
+  expect(h.peer.closes).toBe(1);
+  h.emit("agent_settled", ctx);
+  expect(() => h.peer.receive("director.run.bind", { ...binding, runId: "second" })).toThrow();
+});
+
+test.each(["context", "tool"])(
+  "malformed fulfilled %s state remains fatal after owned cancellation",
+  async (path) => {
+    const h = await setup();
+    const { ctx, controller } = h.context();
+    h.emit("agent_start", ctx);
+    const pending =
+      path === "context"
+        ? Promise.resolve(h.emit("context", ctx, { messages: [] }))
+        : h.tools
+            .get("get_game_state")!
+            .execute("id", { query: {} }, controller.signal, undefined, ctx);
+    const observed = pending.catch((error: unknown) => error);
+    h.peer.states[0]!.result.resolve({ ...binding, state: {} });
+    h.peer.receive("director.run.invalidate", binding);
+    expect(await observed).toBeInstanceOf(Error);
+    expect(controller.signal.aborted).toBe(true);
+    expect(h.peer.closes).toBe(1);
+  },
+);
+
+test.each([
+  new RpcError(staleRunErrorCode, "stale", undefined),
+  new RpcError(staleRunErrorCode, "stale", { ...binding, extra: true }),
+  new RpcError(staleRunErrorCode, "stale", { ...binding, runId: "foreign" }),
+  new RpcError(-32001, "stale", binding),
+])("owned cancellation cannot downgrade unclassified RPC failure: %s", async (failure) => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  const observed = Promise.resolve(h.emit("context", ctx, { messages: [] })).catch(
+    (error: unknown) => error,
+  );
+  h.peer.receive("director.run.invalidate", binding);
+  h.peer.states[0]!.result.reject(failure);
+  expect(await observed).toBe(failure);
+  expect(controller.signal.aborted).toBe(true);
+  expect(h.peer.closes).toBe(1);
+});
+
+test("typed stale error without owned cancellation remains fatal", async () => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  const observed = Promise.resolve(h.emit("context", ctx, { messages: [] })).catch(
+    (error: unknown) => error,
+  );
+  const failure = new RpcError(staleRunErrorCode, "Director run invalidated", binding);
+  h.peer.states[0]!.result.reject(failure);
+  expect(await observed).toBe(failure);
+  expect(controller.signal.aborted).toBe(true);
+  expect(h.peer.closes).toBe(1);
+});
+
+test.each(["context", "tool"])(
+  "valid fulfilled %s state after owned cancellation is denied without retirement",
+  async (path) => {
+    const h = await setup();
+    const { ctx, controller } = h.context();
+    h.emit("agent_start", ctx);
+    const pending =
+      path === "context"
+        ? Promise.resolve(h.emit("context", ctx, { messages: [] }))
+        : h.tools
+            .get("get_game_state")!
+            .execute("id", { query: {} }, controller.signal, undefined, ctx);
+    const observed = pending.catch((error: unknown) => error);
+    h.peer.states[0]!.result.resolve({ ...binding, state: snapshot });
+    h.peer.receive("director.run.invalidate", binding);
+    expect(await observed).toBeInstanceOf(Error);
+    expect(controller.signal.aborted).toBe(true);
+    expect(h.peer.closes).toBe(0);
   },
 );
 

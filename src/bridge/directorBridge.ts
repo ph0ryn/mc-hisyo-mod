@@ -33,6 +33,7 @@ import {
   protocolVersion,
   sameRunBinding,
   sameWorldBinding,
+  staleRunErrorCode,
   type BridgeRole,
   type RunBinding,
   type WorldBinding,
@@ -243,6 +244,15 @@ export class DirectorBridge extends EventEmitter<{
   }
 
   #requireRun(binding: RunBinding): { worldId: string; playerId: string } {
+    const run = this.#run;
+    if (
+      !this.#closing &&
+      !this.#storageFailed &&
+      run &&
+      !run.valid &&
+      sameRunBinding(run.binding, binding)
+    )
+      throw new RpcError(staleRunErrorCode, "Director run invalidated", run.binding);
     const world = this.#requireWorld(binding);
     if (!this.#run?.valid || !sameRunBinding(this.#run.binding, binding))
       throw new RpcError(-32001, "Inactive or stale execution binding");
@@ -549,7 +559,6 @@ export class DirectorBridge extends EventEmitter<{
     // Capture literal request data before awaiting; never retarget a delayed display fact.
     const captured = structuredClone(params);
     const result = await this.#game!.peer.call(method, captured);
-    if (method !== "game.message.send") this.#requireRun(captured);
     if (
       !Check(schema, result) ||
       !sameRunBinding(result as RunBinding, captured) ||

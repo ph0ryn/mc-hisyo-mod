@@ -14,6 +14,7 @@ import {
   protocolVersion,
   RunBindingSchema,
   sameRunBinding,
+  staleRunErrorCode,
   SendMessageResultSchema,
   SendMessageSchema,
   type RunBinding,
@@ -110,12 +111,16 @@ export default function directorBridge(
   ): Promise<unknown> {
     requireRun(captured, signal);
     try {
-      const result = await peer!.call(method, { ...args, ...captured });
-      requireRun(captured, signal);
-      return result;
+      // Callers validate fulfilled payloads before checking cancellation.
+      return await peer!.call(method, { ...args, ...captured });
     } catch (error) {
-      // The ordered owner control can precede this stale rejection and the stdio abort.
-      requireRun(captured, signal);
+      if (
+        error instanceof RpcError &&
+        error.code === staleRunErrorCode &&
+        Check(RunBindingSchema, error.data) &&
+        sameRunBinding(error.data, captured)
+      )
+        requireRun(captured, signal);
       throw error;
     }
   }
@@ -126,6 +131,7 @@ export default function directorBridge(
       const result = await request(captured, "game.state.get", { query: {} }, signal);
       if (!Check(GameStateResultSchema, result) || !sameRunBinding(result, captured))
         throw new Error("Invalid required game state or binding");
+      requireRun(captured, signal);
       return result.state;
     } catch (error) {
       stop(ctx, error);

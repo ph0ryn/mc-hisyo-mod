@@ -36,6 +36,8 @@ export const RunBindingSchema = Type.Object(
   strict,
 );
 export type RunBinding = Readonly<Static<typeof RunBindingSchema>>;
+// RpcError.data carries the exact invalidated RunBinding, not arbitrary request parameters.
+export const staleRunErrorCode = -32005;
 
 export const EmptySchema = Type.Object({}, strict);
 export const GameAttachSchema = Type.Object(
