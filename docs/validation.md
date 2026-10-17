@@ -4,18 +4,18 @@
 
 ## 現在の自動テスト：unit testのみ
 
-frozen source **`f559634c0b5c5f1646aa67ee3878e1a0f408e87f`**に対するleadのcomposed検証結果を以下に記録する。
-今回のdocs-only変更で再実行した結果ではない。依存install・build承認・downloadはしていない。
+frozen source **`a31fc1d163694baefc8555bee71767e1173be47b`**に対するleadのcomposed検証結果を以下に記録する。
+リファクタリング後に全件を再実行した。依存install・build承認・downloadはしていない。
 
 | 検査 | leadが実行したコマンド / 範囲 | 結果 |
 | --- | --- | --- |
-| TypeScript検査 | `./node_modules/.bin/vp check` | 49 format / 43 TypeScript、警告なし |
-| ESM build | `./node_modules/.bin/vp pack` | 12 artifacts |
-| unit | `./node_modules/.bin/vp test --run` | **307 / 307成功、13ファイル** |
-| 純Java + cached build | `observerTest transportTest rpcPeerTest gameSessionTest referenceTest build --rerun-tasks`、`--offline` | **749 assertions**、14 tasks再実行、BUILD SUCCESSFUL |
-| 文書 / whitespace | `rumdl check docs` / `git diff --check` | 11文書で問題なし / 成功（source基点の旧docs） |
+| TypeScript検査 | `pnpm run verify`内の`vp check` | 52 format / 46 TypeScript、警告なし |
+| ESM build | 同`vp pack` | 12 artifacts |
+| unit | 同`vp test` | **341 / 341成功、15ファイル** |
+| 純Java + cached build | `observerTest transportTest rpcPeerTest gameSessionTest referenceTest build --rerun-tasks`、`--offline` | **753 assertions**、14 tasks再実行、BUILD SUCCESSFUL |
+| 文書 / whitespace | `rumdl check docs` / `git diff --check` | 問題なし / 成功 |
 
-Java内訳はobserver 209、transport 181、rpcPeer 140、gameSession 173、reference 46。
+Java内訳はobserver 213、transport 181、rpcPeer 140、gameSession 173、reference 46。
 通常のGradle `test`は`NO-SOURCE`であり、この5つのcustom checkと取り違えない。
 実行routeは[既存cacheを使う手動コマンド](<development.md#検証コマンド>)を参照。
 
@@ -25,7 +25,19 @@ TypeScriptの発見対象は[設定](<../vite.config.ts>)の`src/**/*.test.ts`�
 JavaもMinecraft / Fabricをruntime classpathに含めず、literal fixture・手動queue / streamを使う。
 古い実TCP・HTTP・provider・子プロセス・実SQLiteの8 suiteとfake実行harnessは削除済みで、任意実行設定にも残していない。
 
-### 最終修正の検証とその限界
+### 今回のリファクタリング
+
+- 全10 Toolの名前・引数schema・RPC method・説明を[protocolのcatalog](<../src/protocol/directorTools.ts>)へ集約した。
+  [拡張のunit](<../src/pi/directorBridge.test.ts>)で全Toolの引数拒否・binding付与・payload・結果を確認する。
+- 履歴INSERTとプレイヤーresetの重複を統合し、game / CLIの連番・欠損metadata、snapshot分離、他プレイヤーのbaseline保持を確認した。
+- [Pi stdioのunit](<../src/pi/piRpcClient.test.ts>)は手動streamとfake timerで、ACKとsettledの区別、取消ACK順序、相関不正の拒否、終了確認待ちを検証する。
+  [JSONLのunit](<../src/transport/jsonLines.test.ts>)は全byte分割位置のUTF-8、malformed入力、byte上限、途中EOFを検証する。
+- 独立reviewで取消testのACK消費前という弱点が見つかり、ACK消費後に取消するよう強化した。
+  post-settlementの取消ACK待ちを外すmutationで早期settledがREDとなり、driverの完全復元後に10件GREENを確認した。実PiのREDではない。
+- indexionの90%再走査はTSの類似file group・関数重複・wrapper候補なし。Javaの1 groupはbinding recordのimport一致であり、抽出しない。
+  これはheuristicの結果で、意味的重複の不在や実境界での動作証明ではない。
+
+### 直前checkpointの検証とその限界
 
 - 初回JOINのcandidateは`AssertionError: check 18`でREDとなり、pending captureのtake-onceをatomicに修正した。
   これは純Javaの再現であり、未変更productionの実ゲームで発見したREDではない。
