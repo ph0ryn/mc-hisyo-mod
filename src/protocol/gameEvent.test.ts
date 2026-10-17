@@ -16,9 +16,9 @@ function fixture(name: string): GameEvent {
 }
 
 describe("server observer event contracts", () => {
-  it("publishes one shared fixture for each of the 22 supported observation kinds", () => {
-    expect(fixtures).toHaveLength(22);
-    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(22);
+  it("publishes one shared fixture for each of the 29 supported observation kinds", () => {
+    expect(fixtures).toHaveLength(29);
+    expect(new Set(fixtures.map((entry) => entry.event)).size).toBe(29);
     expect(gameEventDefinitions.map((entry) => entry.name).toSorted()).toEqual(
       fixtures.map((entry) => entry.event).toSorted(),
     );
@@ -212,6 +212,59 @@ describe("server observer event contracts", () => {
     fixedClock.data.dayTime = -1;
     fixedClock.data.fixedTime = true;
     catalog.validateObservation(fixedClock);
+  });
+
+  it("keeps native item quantities and reached attempts precise", () => {
+    for (const name of ["block_use_attempted", "item_use_attempted"]) {
+      expect(catalog.get(name).observation).toBe("attempt");
+      expect(catalog.get(name).description).toMatch(/server-reached/i);
+      const attempt = fixture(name);
+      attempt.data.itemId = "minecraft:air";
+      attempt.data.count = 0;
+      catalog.validateObservation(attempt);
+    }
+    expect(catalog.get("item_picked_up").description).toMatch(/not.*net inventory gain/i);
+    expect(catalog.get("grid_result_taken").description).toMatch(/not.*recipe/i);
+    expect(catalog.get("furnace_result_taken").description).toMatch(/not.*production/i);
+    const furnace = fixture("furnace_result_taken");
+    furnace.data.furnacePosition = null;
+    furnace.data.menuId = null;
+    catalog.validateObservation(furnace);
+    for (const name of [
+      "item_picked_up",
+      "item_dropped",
+      "grid_result_taken",
+      "furnace_result_taken",
+    ]) {
+      for (const count of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+        const observation = fixture(name);
+        observation.data.count = count;
+        expect(() => catalog.validateObservation(observation)).toThrow();
+      }
+    }
+    for (const [name, patch] of [
+      ["block_placed", { position: [1.5, 64, 0] }],
+      ["item_picked_up", { remainingCount: -1 }],
+      ["item_dropped", { trace: "true" }],
+      ["grid_result_taken", { slot: -1 }],
+      ["furnace_result_taken", { furnacePosition: [0, 64.5, 0] }],
+      ["block_use_attempted", { blockPosition: [0, 64.5, 0] }],
+      ["block_use_attempted", { face: "side" }],
+      ["block_use_attempted", { loadedBlockId: "" }],
+      ["item_use_attempted", { hand: "both" }],
+      ["item_use_attempted", { count: -1 }],
+    ] as const) {
+      const observation = fixture(name);
+      expect(() =>
+        catalog.validateObservation({ ...observation, data: { ...observation.data, ...patch } }),
+      ).toThrow();
+    }
+    const block = fixture("block_use_attempted");
+    delete block.data.loadedBlockId;
+    expect(() => catalog.validateObservation(block)).toThrow();
+    expect(
+      matchesFilter(fixture("item_picked_up").data, { itemId: "minecraft:stone", count: 4 }),
+    ).toBe(false);
   });
 
   it("requires explicit valid movement sampling policy instead of claiming a full path", () => {

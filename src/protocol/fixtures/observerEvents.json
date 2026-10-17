@@ -395,5 +395,130 @@
       "criterion": "get_cobblestone",
       "afterDone": true
     }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 23,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "block_placed",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "blockId": "minecraft:oak_planks",
+      "itemId": "minecraft:oak_planks",
+      "position": [3, 64, 0]
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 24,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "item_picked_up",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "itemId": "minecraft:stone",
+      "count": 3,
+      "remainingCount": 2,
+      "entityId": "item-1",
+      "entityPosition": [3, 64, 0],
+      "infiniteMaterials": false
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 25,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "item_dropped",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "itemId": "minecraft:stone",
+      "count": 2,
+      "entityId": "item-2",
+      "entityPosition": [2, 65, 0],
+      "spread": false,
+      "trace": true
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 26,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "grid_result_taken",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "itemId": "minecraft:oak_planks",
+      "count": 4,
+      "menuId": 0,
+      "slot": 0
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 27,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "furnace_result_taken",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "itemId": "minecraft:iron_ingot",
+      "count": 2,
+      "menuId": 1,
+      "slot": 2,
+      "furnacePosition": [3, 64, 0]
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 28,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "block_use_attempted",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "hand": "off_hand",
+      "itemId": "minecraft:air",
+      "count": 0,
+      "blockPosition": [3, 64, 0],
+      "hitPosition": [3.5, 64.5, 0],
+      "face": "north",
+      "loadedBlockId": null
+    }
+  },
+  {
+    "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
+    "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
+    "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+    "seq": 29,
+    "tick": 120,
+    "observedAt": 1000,
+    "event": "item_use_attempted",
+    "dimension": "minecraft:overworld",
+    "position": [2, 64, 0],
+    "data": {
+      "hand": "main_hand",
+      "itemId": "minecraft:apple",
+      "count": 2
+    }
   }
 ]

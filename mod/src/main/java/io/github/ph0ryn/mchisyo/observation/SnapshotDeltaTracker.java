@@ -174,6 +174,16 @@ public final class SnapshotDeltaTracker {
                 : List.of("advancement_criterion_granted");
     }
 
+    /** Immediate entity remainder, before playerTouch restores a fully consumed stack's count.
+     * Inventory.add may return false after partial consumption and a final no-progress retry. */
+    public static int consumedAmount(int before, int remaining) {
+        return before > 0 && remaining >= 0 && remaining < before ? before - remaining : 0;
+    }
+
+    public static int successfulCount(boolean succeeded, int count) {
+        return succeeded && count > 0 ? count : 0;
+    }
+
     public void rebaseline(UUID playerId, PlayerSnapshot snapshot) {
         worldBaselines.remove(playerId);
         baselines.put(Objects.requireNonNull(playerId), new Baseline(snapshot, snapshot, snapshot.tick()));
