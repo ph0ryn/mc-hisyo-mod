@@ -320,6 +320,25 @@ test("after-status native stale does not gate validated availability", async () 
   h.native[0]!.result.reject(new RpcError(-32001, "native stale"));
   expect(await pending).toMatchObject({ code: staleRunErrorCode, data: binding });
   expect(h.bridge.readyWorld!.paused).toBe(false);
+  h.emit("agent_settled", h.context().ctx);
+  expect(h.bridge.finishRun(binding)).toBe(true);
+  let admitted: RunBinding | undefined;
+  const admission = h.bridge.beginRun().then(
+    (next) => {
+      admitted = next;
+    },
+    (error: unknown) => error,
+  );
+  try {
+    await drain();
+    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(2);
+    expect(h.agent.host.calls.filter((method) => method === "director.run.bind")).toHaveLength(2);
+    expect(admitted).toMatchObject(h.world);
+    expect(admitted!.runId).not.toBe(binding.runId);
+  } finally {
+    await h.bridge.close();
+    await admission;
+  }
 });
 
 test("old capture cannot invalidate or gate a new owner", async () => {
