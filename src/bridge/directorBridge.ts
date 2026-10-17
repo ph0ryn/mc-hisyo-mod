@@ -558,7 +558,14 @@ export class DirectorBridge extends EventEmitter<{
     this.#requireRun(params);
     // Capture literal request data before awaiting; never retarget a delayed display fact.
     const captured = structuredClone(params);
-    const result = await this.#game!.peer.call(method, captured);
+    let result: unknown;
+    try {
+      result = await this.#game!.peer.call(method, captured);
+    } catch (error) {
+      // GameSession's stale code needs our exact owned binding evidence before classification.
+      if (error instanceof RpcError && error.code === -32001) this.#requireRun(captured);
+      throw error;
+    }
     if (
       !Check(schema, result) ||
       !sameRunBinding(result as RunBinding, captured) ||
