@@ -1,32 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
-import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { EventCatalog, matchesFilter, type EventFilter } from "../events/eventCatalog.js";
 import {
-  EventCatalog,
-  EventFilterSchema,
-  matchesFilter,
-  type EventFilter,
-} from "../events/eventCatalog.js";
+  HookInputSchema,
+  HookListOptionsSchema,
+  type HookInput,
+  type HookListOptions,
+} from "../protocol/bridge.js";
 import { validateScope, type GameEvent, type WorldScope } from "../protocol/gameEvent.js";
 
-export const HookInputSchema = Type.Object(
-  {
-    event: Type.String({ minLength: 1, maxLength: 128 }),
-    filter: Type.Optional(EventFilterSchema),
-    instruction: Type.String({ minLength: 1, maxLength: 16_000 }),
-  },
-  { additionalProperties: false },
-);
-export type HookInput = Static<typeof HookInputSchema>;
-export const HookListOptionsSchema = Type.Object(
-  {
-    after: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
-  },
-  { additionalProperties: false },
-);
-export type HookListOptions = Static<typeof HookListOptionsSchema>;
 export interface HookPage {
   hooks: ResponseHook[];
   nextCursor?: string;

@@ -1,6 +1,5 @@
 import { Type, type Static } from "typebox";
 import { EventFilterSchema } from "../events/eventCatalog.js";
-import { HookInputSchema, HookListOptionsSchema } from "../hooks/responseHooks.js";
 import { GameEventSchema, WorldScopeSchema } from "./gameEvent.js";
 import { GameSnapshotSchema } from "./gameSnapshot.js";
 
@@ -65,6 +64,24 @@ export const PlayerMessageSchema = Type.Object(
   },
   strict,
 );
+
+export const HookInputSchema = Type.Object(
+  {
+    event: Type.String({ minLength: 1, maxLength: 128 }),
+    filter: Type.Optional(EventFilterSchema),
+    instruction: Type.String({ minLength: 1, maxLength: 16_000 }),
+  },
+  strict,
+);
+export type HookInput = Static<typeof HookInputSchema>;
+export const HookListOptionsSchema = Type.Object(
+  {
+    after: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+  },
+  strict,
+);
+export type HookListOptions = Static<typeof HookListOptionsSchema>;
 
 export const HookAddSchema = Type.Object(
   {

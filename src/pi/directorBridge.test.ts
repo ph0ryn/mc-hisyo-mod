@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { EventEmitter } from "node:events";
+import type { TObject } from "typebox";
+import { Check } from "typebox/value";
 import { expect, test } from "vite-plus/test";
 import { staleRunErrorCode, type RunBinding } from "../protocol/bridge.js";
 import snapshot from "../protocol/fixtures/gameSnapshot.json" with { type: "json" };
@@ -22,17 +24,40 @@ class ManualPeer extends EventEmitter<{ close: [Error] }> {
   readonly handlers = new Map<string, (params: unknown) => unknown>();
   readonly states: { params: RpcParams; result: ReturnType<typeof deferred> }[] = [];
   readonly calls: string[] = [];
+  readonly requests: { method: string; params: RpcParams }[] = [];
   closes = 0;
   handle(method: string, handler: (params: unknown) => unknown) {
     this.handlers.set(method, handler);
   }
   call(method: string, params: RpcParams): Promise<unknown> {
     this.calls.push(method);
+    this.requests.push({ method, params });
     if (method === "director.ready") return Promise.resolve({ ready: true });
-    if (method !== "game.state.get") throw new Error(`Unexpected call ${method}`);
-    const result = deferred();
-    this.states.push({ params, result });
-    return result.promise;
+    if (method === "game.state.get") {
+      const result = deferred();
+      this.states.push({ params, result });
+      return result.promise;
+    }
+    if (method === "game.message.send") return Promise.resolve({ ...binding, displayed: true });
+    if (method.startsWith("game.files.")) {
+      const reference =
+        method === "game.files.list"
+          ? { kind: "roots", roots: [], nextCursor: null }
+          : method === "game.files.read"
+            ? { root: "minecraft:0", path: "data/x.json", content: "{}", bytes: 2 }
+            : {
+                root: "minecraft:0",
+                path: "data",
+                text: "item",
+                matches: [],
+                scanned: 0,
+                nextCursor: null,
+                firstMatchPerFile: true,
+              };
+      return Promise.resolve({ ...binding, reference });
+    }
+    if (method.startsWith("director.")) return Promise.resolve({ ok: true });
+    throw new Error(`Unexpected call ${method}`);
   }
   close(error = new Error("closed")) {
     if (this.closes) return;
@@ -56,13 +81,19 @@ const binding: RunBinding = {
 async function setup() {
   const peer = new ManualPeer();
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
-  const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+  const tools = new Map<
+    string,
+    { parameters: TObject; execute: (...args: unknown[]) => Promise<unknown> }
+  >();
   directorBridge(
     {
       on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
         handlers.set(name, handler),
-      registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) =>
-        tools.set(tool.name, tool),
+      registerTool: (tool: {
+        name: string;
+        parameters: TObject;
+        execute: (...args: unknown[]) => Promise<unknown>;
+      }) => tools.set(tool.name, tool),
       getActiveTools: () => [...directorToolNames],
     } as unknown as ExtensionAPI,
     () => Promise.resolve(peer),
@@ -84,6 +115,78 @@ async function setup() {
   peer.receive("director.run.bind", binding);
   return { peer, context, emit, tools };
 }
+
+test("registers exactly the ten scoped tools", async () => {
+  const h = await setup();
+  expect([...h.tools.keys()].toSorted()).toEqual([
+    "add_response_hook",
+    "get_game_state",
+    "get_recent_events",
+    "list_event_types",
+    "list_game_files",
+    "list_response_hooks",
+    "read_game_file",
+    "remove_response_hook",
+    "search_game_files",
+    "send_message",
+  ]);
+});
+
+test.each([
+  ["get_game_state", "game.state.get", { query: {} }, { query: {} }],
+  ["send_message", "game.message.send", { text: "hello" }, { text: "hello" }],
+  ["list_event_types", "director.events.list", {}, {}],
+  ["get_recent_events", "director.events.get", { query: { limit: 1 } }, { query: { limit: 1 } }],
+  [
+    "add_response_hook",
+    "director.hooks.add",
+    { event: "health_changed", filter: {}, instruction: "help" },
+    { event: "health_changed", filter: {}, instruction: "help" },
+  ],
+  ["remove_response_hook", "director.hooks.remove", { id: "hook" }, { id: "hook" }],
+  ["list_response_hooks", "director.hooks.list", {}, { query: {} }],
+  [
+    "list_response_hooks",
+    "director.hooks.list",
+    { after: "hook", limit: 8 },
+    { query: { after: "hook", limit: 8 } },
+  ],
+  ["list_game_files", "game.files.list", { query: {} }, { query: {} }],
+  [
+    "read_game_file",
+    "game.files.read",
+    { query: { root: "minecraft:0", path: "data/x.json" } },
+    { query: { root: "minecraft:0", path: "data/x.json" } },
+  ],
+  [
+    "search_game_files",
+    "game.files.search",
+    { query: { root: "minecraft:0", path: "data", text: "item" } },
+    { query: { root: "minecraft:0", path: "data", text: "item" } },
+  ],
+] as const)(
+  "%s retains its arguments, RPC method and run binding",
+  async (name, method, args, payload) => {
+    const h = await setup();
+    const { ctx } = h.context();
+    const tool = h.tools.get(name)!;
+    expect(Check(tool.parameters, args)).toBe(true);
+    expect(Check(tool.parameters, { ...args, runId: "forged" })).toBe(false);
+    const result = tool.execute("call", args, undefined, undefined, ctx);
+    if (method === "game.state.get")
+      h.peer.states[0]!.result.resolve({ ...binding, state: snapshot });
+    const value = (await result) as { content: { text: string }[]; details: unknown };
+    expect(h.peer.requests.at(-1)).toEqual({ method, params: { ...payload, ...binding } });
+    expect(JSON.parse(value.content[0]!.text)).toEqual(value.details);
+    if (method === "game.state.get") expect(value.details).toEqual(snapshot);
+    if (method === "game.message.send") expect(value.details).toEqual({ displayed: true });
+    if (method.startsWith("game.files.")) expect(value.details).not.toHaveProperty("runId");
+    await expect(
+      tool.execute("forged", { ...args, runId: "forged" }, undefined, undefined, ctx),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(h.peer.closes).toBe(0);
+  },
+);
 
 test.each([false, true])(
   "owned pause rejects late state without retiring; stdio abort first=%s",

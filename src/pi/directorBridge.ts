@@ -2,21 +2,17 @@ import { referenceTools, validReferenceResult } from "../protocol/gameReferences
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { once } from "node:events";
 import { createConnection } from "node:net";
-import { Type, type Static, type TObject } from "typebox";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { HookInputSchema, HookListOptionsSchema } from "../hooks/responseHooks.js";
+import { directorTools } from "../protocol/directorTools.js";
 import {
-  EmptySchema,
-  EventSearchRequestSchema,
   GameStateResultSchema,
   HelloSchema,
-  HookRemoveSchema,
   protocolVersion,
   RunBindingSchema,
   sameRunBinding,
   staleRunErrorCode,
   SendMessageResultSchema,
-  SendMessageSchema,
   type RunBinding,
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
@@ -34,10 +30,6 @@ const BootstrapSchema = Type.Object(
   },
   strict,
 );
-const stateArgs = Type.Object({ query: EmptySchema }, strict);
-const eventArgs = Type.Object({ query: EventSearchRequestSchema.properties.query }, strict);
-const messageArgs = Type.Object({ text: SendMessageSchema.properties.text }, strict);
-const removeArgs = Type.Object({ id: HookRemoveSchema.properties.id }, strict);
 
 async function connectHost(): Promise<RpcPeer> {
   const bootstrap: unknown = JSON.parse(process.env.MC_HISYO_BRIDGE ?? "null");
@@ -106,7 +98,7 @@ export default function directorBridge(
   async function request(
     captured: RunBinding,
     method: string,
-    args: Record<string, unknown>,
+    args: object,
     signal?: AbortSignal,
   ): Promise<unknown> {
     requireRun(captured, signal);
@@ -139,13 +131,7 @@ export default function directorBridge(
     }
   }
 
-  function tool<T extends TObject>(
-    name: (typeof directorToolNames)[number],
-    description: string,
-    parameters: T,
-    method: string,
-    payload: (args: Static<T>) => Record<string, unknown> = (args) => args,
-  ) {
+  for (const { name, description, args: parameters, method } of directorTools) {
     pi.registerTool({
       name,
       label: name,
@@ -157,7 +143,8 @@ export default function directorBridge(
         let result: unknown;
         if (method === "game.state.get") result = await getState(ctx, signal);
         else {
-          result = await request(captured, method, payload(args), signal);
+          const payload = method === "director.hooks.list" ? { query: args } : args;
+          result = await request(captured, method, payload, signal);
           const reference = referenceTools.find((tool) => tool.method === method);
           if (reference) {
             if (
@@ -182,53 +169,6 @@ export default function directorBridge(
       },
     });
   }
-
-  tool(
-    "get_game_state",
-    "Get a fresh bounded snapshot of the current game. Query must be {}. Nulls and incomplete coverage are explicit.",
-    stateArgs,
-    "game.state.get",
-  );
-  tool(
-    "send_message",
-    "Display text to the player. This is the only way to speak in game; ordinary assistant text is not displayed.",
-    messageArgs,
-    "game.message.send",
-  );
-  tool(
-    "list_event_types",
-    "List attached-game hook capabilities and searchable-only CLI Director activities, with explicit origin, hookability, filters and observation limitations.",
-    EmptySchema,
-    "director.events.list",
-  );
-  tool(
-    "get_recent_events",
-    "Search game and Director activity history for this world/player across sessions. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches. Gap flags cover admitted sequence holes only; CLI attachment boundaries mark unknown pre-ready, terminal and disconnected coverage, even when hasKnownGaps is false. Requests/matches do not prove provider execution.",
-    eventArgs,
-    "director.events.get",
-  );
-  tool(
-    "add_response_hook",
-    "Persist an event response instruction for this world/player. Use advertised event types and filter fields.",
-    HookInputSchema,
-    "director.hooks.add",
-  );
-  tool(
-    "remove_response_hook",
-    "Remove a response hook by its ID from this world/player.",
-    removeArgs,
-    "director.hooks.remove",
-  );
-  tool(
-    "list_response_hooks",
-    "List persistent response hooks with keyset pagination. Default and maximum page size is 8; pages are not a snapshot.",
-    HookListOptionsSchema,
-    "director.hooks.list",
-    (query) => ({ query }),
-  );
-
-  for (const reference of referenceTools)
-    tool(reference.name, reference.description, reference.args, reference.method);
 
   // Register every guard before parsing bootstrap: a failed idle startup must also deny later prompts.
   pi.on("session_start", async (_event, ctx) => {
