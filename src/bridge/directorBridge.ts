@@ -78,7 +78,7 @@ export class DirectorBridge extends EventEmitter<{
   #world: AttachedWorld | undefined;
   #playerMessageIntake: { accept: PlayerMessageHandler } | undefined;
   // Invalidated runs still occupy the single-flight slot until the owner observes settled.
-  #run: { binding: RunBinding; valid: boolean } | undefined;
+  #run: { binding: RunBinding; valid: boolean; agentBindingSent: boolean } | undefined;
   #closing = false;
   #storageFailed = false;
   #starting: Promise<unknown[]> | undefined;
@@ -169,11 +169,12 @@ export class DirectorBridge extends EventEmitter<{
     )
       throw new Error("Game and agent are not ready for judgment");
     const binding = Object.freeze({ ...world.binding, runId: randomUUID() });
-    const run = { binding, valid: true };
+    const run = { binding, valid: true, agentBindingSent: false };
     this.#run = run;
     try {
       await this.#bind(game.peer, "game.run.bind", binding);
       this.#requireRun(binding);
+      run.agentBindingSent = true;
       await this.#bind(agent.peer, "director.run.bind", binding);
       this.#requireRun(binding);
       return binding;
@@ -198,6 +199,15 @@ export class DirectorBridge extends EventEmitter<{
     const run = this.#run;
     if (!run?.valid) return;
     run.valid = false;
+    // Same authenticated pipe as state replies: cancellation precedes any late stale error.
+    const peer = this.#agent?.peer;
+    if (run.agentBindingSent && peer && !peer.isClosed) {
+      try {
+        peer.notify("director.run.invalidate", run.binding);
+      } catch (error) {
+        peer.close(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
     this.#clearGameRun(run.binding);
     this.emit("runInvalidated", run.binding, reason);
   }
