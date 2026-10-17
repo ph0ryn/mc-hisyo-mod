@@ -84,9 +84,9 @@ Java側はsnapshot差分、プレイヤー別baseline、sample、reset、不変D
 `mod`ディレクトリで実行する。
 
 ```bash
-GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew --offline observerTest
+./gradlew observerTest
 ```
 
-`--offline`は必要な依存がcache済みの場合に使う。通常の`build`もこのcheckを実行する。
+依存がcache済みなら`--offline`を追加できる。通常の`build`もこのcheckを実行する。
 Minecraft / Fabricをテスト実行classpathへ入れず、ゲーム起動・EULA同意・ワールド変更は行わない。
 コンパイルとfixtureの整合確認は、ゲーム内callbackの発火を保証するものではない。

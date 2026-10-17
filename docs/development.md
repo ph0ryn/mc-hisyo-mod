@@ -47,18 +47,17 @@ Vite+はプロジェクトローカルの固定バージョンを使い、グロ
 [pnpm設定](<../pnpm-workspace.yaml>)は依存解決と供給網ポリシー用で、monorepo構成ではない。
 Vite+ coreのバージョン表記に対するpeer例外は、検証したバージョンのみに限定している。
 
-Fabricのビルドはリポジトリ内の専用キャッシュを使う。
-`mod`ディレクトリで次を実行する。
+Fabricのビルドはルートで次を実行する。
+Gradleの標準キャッシュ（既定は`~/.gradle`）とDaemonを再利用する。
 
 ```bash
-GRADLE_USER_HOME="$PWD/run/gradle-user-home" ./gradlew --offline \
-  observerTest transportTest rpcPeerTest gameSessionTest referenceTest build --rerun-tasks
+pnpm run build:mod
 ```
 
 Minecraft 1.21.11 / Loader 0.19.5 / Fabric API 0.141.6+1.21.11 / Java 21 / Loom 1.17.21 / Gradle 9.7.1を固定している。
 このビルドはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
-`--offline`には既存cacheが必要。
-Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は上記5つの純Java checkを実行する。
+依存がcache済みなら`pnpm run build:mod --offline`で実行できる。
+Gradleの通常の`test`は`NO-SOURCE`だが、`check` / `build`は[5つの純Java check](<../mod/build.gradle#L50-L85>)を実行する。
 生成物は`mod/build/libs/mc_hisyo-0.1.0.jar`（実行用）と`mc_hisyo-0.1.0-sources.jar`。
 Minecraft / Fabricを実行classpathに載せず、純Javaで共有fixtureとsnapshot差分を検証する。
 登録API、明示nullのserialize、観測の限界は[観測資料](<observations.md>)を参照。
