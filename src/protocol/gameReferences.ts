@@ -169,14 +169,8 @@ export function validReferenceResult(
     return false;
   if (tool.method !== "game.files.read") return true;
   const { content, bytes } = (value as { reference: { content: string; bytes: number } }).reference;
+  // Allow TAB/LF/CR, reject other controls and lone surrogates (not valid Unicode pairs).
   return (
-    !/[\ud800-\udfff]/u.test(content) &&
-    !Array.from(content).some((character) => {
-      const code = character.codePointAt(0)!;
-      return (
-        (code < 32 && code !== 9 && code !== 10 && code !== 13) || (code >= 127 && code <= 159)
-      );
-    }) &&
-    Buffer.byteLength(content, "utf8") === bytes
+    !/(?![\t\n\r])[\p{Cc}\p{Cs}]/u.test(content) && Buffer.byteLength(content, "utf8") === bytes
   );
 }

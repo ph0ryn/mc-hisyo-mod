@@ -83,6 +83,44 @@ test("full text byte and escaped serialized budgets are independent", () => {
   expect(referenceResultBudget({ value: "\0".repeat(90_000) })).toBe(false);
   expect(referenceResultBudget({ value: "x".repeat(90_000) })).toBe(true);
 });
+test("read text preserves whitespace and Unicode while rejecting controls and lone surrogates", () => {
+  const valid = (content: string) =>
+    validReferenceResult(referenceTools[1]!, {
+      ...binding,
+      reference: {
+        root: "minecraft:0",
+        path: "x.json",
+        content,
+        bytes: Buffer.byteLength(content, "utf8"),
+      },
+    });
+  for (let code = 0; code <= 159; code++) {
+    const allowed = code === 9 || code === 10 || code === 13 || (code >= 32 && code < 127);
+    expect(valid(`before${String.fromCodePoint(code)}after`)).toBe(allowed);
+  }
+  for (const content of [
+    "",
+    "\t\n\r",
+    "日本語",
+    "\u00a0",
+    "\ud7ff",
+    "\ue000",
+    "😀",
+    "𐀀",
+    "\u{10ffff}",
+  ])
+    expect(valid(content)).toBe(true);
+  for (const content of [
+    "\ud800",
+    "\udbff",
+    "\udc00",
+    "\udfff",
+    "\ud800x",
+    "x\udfff",
+    "\udc00\ud800",
+  ])
+    expect(valid(content)).toBe(false);
+});
 test("zero-match search pages retain examined cursor and exact metadata", () => {
   const result = {
     ...binding,
