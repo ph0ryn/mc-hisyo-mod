@@ -34,7 +34,7 @@ afterEach(() => {
 // Only the owned mkdtemp directory is removed after this file's tests finish.
 afterAll(() => rmSync(directory, { recursive: true }));
 
-test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
+test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (language) => {
   const world = { worldId: "w", playerId: "p", worldSessionId: "s" };
   const hash = createHash("sha256")
     .update(JSON.stringify([world.worldId, world.playerId]))
@@ -75,9 +75,21 @@ test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
     expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
     expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");
     const prompt = readFileSync(promptPath, "utf8");
-    expect(prompt).toContain("Periodic judgments normally send zero or one message");
-    expect(prompt).toContain("Stay silent when there is no useful new information");
-    expect(prompt).toContain("After a successful send_message, finish this judgment");
+    expect(prompt).toContain("Keep the player continuously directed toward a concrete goal");
+    expect(prompt).toContain("single action or several steps");
+    expect(prompt).toContain(
+      "Do not enforce a fixed instruction count or require a message on every judgment",
+    );
+    expect(prompt).toContain("Do not wait for a player question or a new event");
+    expect(prompt).toContain("completed, blocked or no longer appropriate");
+    expect(prompt).toContain(
+      "While the current instructions remain appropriate and are being carried out, let them stand without repeating or replacing them, even on polls",
+    );
+    expect(prompt).toContain("Set or update needed hooks before send_message");
+    expect(prompt).not.toContain("Stay silent when there is no useful new information");
+    expect(prompt).not.toContain("send one concise, actionable instruction");
+    expect(prompt).not.toContain("After a successful send_message, finish this judgment");
+    expect(prompt).toContain("A refreshed snapshot or tool acknowledgement is background data");
     expect(prompt).toContain("Do not narrate routine HUD values or list inventory");
     expect(
       JSON.parse(readFileSync(join(launch.env.PI_CODING_AGENT_DIR!, "models.json"), "utf8")),
