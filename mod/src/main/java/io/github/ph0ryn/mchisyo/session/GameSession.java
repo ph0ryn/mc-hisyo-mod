@@ -46,7 +46,7 @@ public final class GameSession implements AutoCloseable {
         private Capture(Object identity, RunBinding binding) { this.identity = identity; this.binding = binding; }
         public void requireCurrent() {
             synchronized (state) {
-                if (closed || !ready || paused || runIdentity != identity || !binding.equals(run)) throw stale();
+                if (closed || !ready || runIdentity != identity || !binding.equals(run)) throw stale();
             }
         }
     }
@@ -77,7 +77,7 @@ public final class GameSession implements AutoCloseable {
             RunBinding binding = binding(params, Set.of());
             synchronized (state) {
                 requireWorld(binding.worldBinding());
-                if (paused || (run != null && !run.equals(binding))) throw stale();
+                if (this.paused || (run != null && !run.equals(binding))) throw stale();
                 if (run == null) { run = binding; runIdentity = new Object(); }
             }
             return CompletableFuture.completedFuture(binding.toJson());
@@ -153,7 +153,7 @@ public final class GameSession implements AutoCloseable {
     private void requireWorld(WorldBinding binding) { if (closed || !ready || !binding.equals(world)) throw stale(); }
     private Capture capture(RunBinding binding) {
         synchronized (state) {
-            requireWorld(binding.worldBinding()); if (paused || !binding.equals(run)) throw stale();
+            requireWorld(binding.worldBinding()); if (!binding.equals(run)) throw stale();
             return new Capture(runIdentity, binding);
         }
     }
@@ -171,7 +171,7 @@ public final class GameSession implements AutoCloseable {
         JsonObject params;
         synchronized (state) {
             if (closed || paused == value) return;
-            paused = value; invalidateRun();
+            paused = value; // Pause gates new runs, not tools or completion of the admitted run.
             if (!ready || statuses.size() >= 32) params = null;
             else {
                 params = world.toJson(); params.addProperty("paused", value); statuses.addLast(params);

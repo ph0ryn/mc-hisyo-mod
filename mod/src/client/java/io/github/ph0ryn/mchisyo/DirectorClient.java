@@ -160,7 +160,6 @@ final class DirectorClient {
                 }
                 public CompletionStage<JsonObject> snapshot(GameSession.Capture capture) {
                     return serverTask(a, () -> {
-                        if (a.server.isPaused()) { a.session.pause(true); throw GameSession.stale(); }
                         capture.requireCurrent(); JsonObject snapshot = ServerGameState.snapshot(requireServer(a));
                         requireServer(a); capture.requireCurrent(); return snapshot;
                     });

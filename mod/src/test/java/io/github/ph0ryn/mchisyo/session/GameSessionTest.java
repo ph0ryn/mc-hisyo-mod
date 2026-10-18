@@ -11,6 +11,8 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Literal wire/manual queued game work only; no resource adapters are instantiated. */
 public final class GameSessionTest {
@@ -52,7 +54,7 @@ public final class GameSessionTest {
         }
         public CompletionStage<Void> display(GameSession.Capture capture, String text) {
             CompletableFuture<Void> result = new CompletableFuture<>();
-            queue.add(() -> { try { capture.requireCurrent(); displayed++; result.complete(null); } catch (RuntimeException e) { result.completeExceptionally(e); } });
+            queue.add(() -> { try { capture.requireCurrent(); displayed++; afterRead.run(); result.complete(null); } catch (RuntimeException e) { result.completeExceptionally(e); } });
             return result;
         }
     }
@@ -188,10 +190,10 @@ public final class GameSessionTest {
         receive(peer, "game.files.list", referenceRequest, 301); assertTrue(game.references == 0); game.queue.remove().run();
         assertTrue(game.references == 1); assertTrue(wire.last().getAsJsonObject("result").get("runId").getAsString().equals(RUN.runId()));
         receive(peer, "game.files.list", referenceRequest, 302); session.pause(true); game.queue.remove().run();
-        assertTrue(game.references == 1); assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+        assertTrue(game.references == 2); assertToolResult(wire, "game.files.list", 302);
         session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 303);
         game.afterRead = () -> session.pause(true); receive(peer, "game.files.list", referenceRequest, 304); game.queue.remove().run();
-        assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001); game.afterRead = () -> {};
+        assertToolResult(wire, "game.files.list", 304); game.afterRead = () -> {};
         session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 305);
         JsonObject invalidReference = RUN.toJson(); invalidReference.add("query", json("{\"root\":\"minecraft:0\",\"path\":\"../SECRET\"}"));
         receive(peer, "game.files.read", invalidReference, 306); assertTrue(game.queue.isEmpty()); assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602);
@@ -204,7 +206,7 @@ public final class GameSessionTest {
             game.queue.remove().run(); assertTrue(game.references == readCount);
             assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001); assertTrue(game.queue.isEmpty());
             game.afterRead = () -> session.pause(true); receive(peer, method, request, 313); game.queue.remove().run();
-            assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+            assertToolResult(wire, method, 313);
             game.afterRead = () -> {}; session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 314);
             request.addProperty("host", "/SECRET"); receive(peer, method, request, 315);
             assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602); assertTrue(game.queue.isEmpty());
@@ -226,14 +228,15 @@ public final class GameSessionTest {
         receive(peer, "game.message.send", message, 4); assertTrue(game.displayed == 0); game.queue.remove().run();
         assertTrue(game.displayed == 1); assertTrue(wire.last().getAsJsonObject("result").get("displayed").getAsBoolean());
         JsonObject state = RUN.toJson(); state.add("query", json("{}")); receive(peer, "game.state.get", state, 5);
-        session.pause(true); game.queue.remove().run(); assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
-        session.pause(false); receive(peer, "game.message.send", message, 6); assertTrue(game.queue.isEmpty());
+        session.pause(true); game.queue.remove().run(); assertToolResult(wire, "game.state.get", 5);
+        session.pause(false); receive(peer, "game.message.send", message, 6); assertTrue(game.queue.size() == 1);
+        game.queue.remove().run(); assertToolResult(wire, "game.message.send", 6); assertTrue(game.displayed == 2);
         receive(peer, "game.run.bind", RUN.toJson(), 7);
         receive(peer, "game.run.clear", new RunBinding(WORLD, PLAYER, "session", "old").toJson(), 8);
         receive(peer, "game.message.send", message, 9); assertTrue(game.queue.size() == 1);
         receive(peer, "game.run.clear", RUN.toJson(), 10);
         receive(peer, "game.run.bind", RUN.toJson(), 21); // Same textual binding must not revive a queued capture (ABA).
-        game.queue.remove().run(); assertTrue(game.displayed == 1);
+        game.queue.remove().run(); assertTrue(game.displayed == 2);
         assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
         receive(peer, "game.run.bind", RUN.toJson(), 11);
         JsonObject bad = state.deepCopy(); bad.getAsJsonObject("query").addProperty("raw", true); receive(peer, "game.state.get", bad, 12);
@@ -243,7 +246,7 @@ public final class GameSessionTest {
         assertTrue(wire.last().getAsJsonObject("result").get("runId").getAsString().equals("run"));
         game.afterRead = () -> session.pause(true);
         receive(peer, "game.state.get", state, 23); game.queue.remove().run();
-        assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+        assertToolResult(wire, "game.state.get", 23);
         session.pause(false); receive(peer, "game.run.bind", RUN.toJson(), 24);
         JsonObject oversize = message.deepCopy(); oversize.addProperty("text", "😀".repeat(16001));
         receive(peer, "game.message.send", oversize, 25); assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602);
@@ -252,7 +255,7 @@ public final class GameSessionTest {
         oversize.addProperty("text", "\u00a0\t\ufeff"); receive(peer, "game.message.send", oversize, 28);
         assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32602);
         oversize.addProperty("text", "😀".repeat(16000)); receive(peer, "game.message.send", oversize, 27);
-        assertTrue(game.queue.size() == 1); game.queue.remove().run(); assertTrue(game.displayed == 2);
+        assertTrue(game.queue.size() == 1); game.queue.remove().run(); assertTrue(game.displayed == 3);
         receive(peer, "game.message.send", message, 13); int oldFrames = wire.sent.size(); session.close();
         Wire replacementWire = new Wire(); RpcPeer replacementPeer = new RpcPeer(replacementWire); Game replacementGame = new Game();
         GameSession replacement = new GameSession(replacementPeer, replacementGame, "new-world", PLAYER, "ja_jp", List.of(), false);
@@ -260,8 +263,147 @@ public final class GameSessionTest {
         reply(replacementPeer, replacementWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         JsonObject newWorld = RUN.worldBinding().toJson(); newWorld.addProperty("worldId", "new-world");
         reply(replacementPeer, replacementWire, newWorld); reply(replacementPeer, replacementWire, json("{\"ready\":true}"));
-        game.queue.remove().run(); assertTrue(game.displayed == 2); assertTrue(!session.isReady());
+        game.queue.remove().run(); assertTrue(game.displayed == 3); assertTrue(!session.isReady());
         assertTrue(replacement.isReady()); assertTrue(replacementGame.displayed == 0); assertTrue(wire.sent.size() == oldFrames); replacement.close();
+    }
+
+    private static JsonObject toolRequest(String method) {
+        JsonObject request = RUN.toJson();
+        if (method.equals("game.message.send")) request.addProperty("text", "hello");
+        else request.add("query", method.endsWith("read") ? json("{\"root\":\"minecraft:0\",\"path\":\"x.json\"}")
+                : method.endsWith("search") ? json("{\"root\":\"minecraft:0\",\"path\":\"\",\"text\":\"needle\"}") : json("{}"));
+        return request;
+    }
+    private static GameSession readySession(RpcPeer peer, Wire wire, Game game) {
+        GameSession session = new GameSession(peer, game, WORLD, PLAYER, "ja_jp", List.of(), false);
+        session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+        reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
+        reply(peer, wire, RUN.worldBinding().toJson()); reply(peer, wire, json("{\"ready\":true}"));
+        receive(peer, "game.run.bind", RUN.toJson(), 100);
+        assertEquals(RUN.toJson(), wire.last().get("result"));
+        return session;
+    }
+    private static void pauseAndAcknowledge(GameSession session, RpcPeer peer, Wire wire, boolean paused) {
+        session.pause(paused);
+        assertEquals("game.status", wire.last().get("method").getAsString());
+        JsonObject params = RUN.worldBinding().toJson(); params.addProperty("paused", paused);
+        assertEquals(params, wire.last().get("params"));
+        JsonObject ack = new JsonObject(); ack.addProperty("paused", paused); reply(peer, wire, ack);
+    }
+    private static void assertToolResult(Wire wire, String method, int id) {
+        JsonObject frame = wire.last();
+        assertEquals(id, frame.get("id").getAsInt());
+        assertFalse(frame.has("error"), () -> method + " must keep the admitted run: " + frame);
+        JsonObject result = frame.getAsJsonObject("result");
+        JsonObject binding = result.deepCopy();
+        binding.remove(method.equals("game.state.get") ? "state" : method.equals("game.message.send") ? "displayed" : "reference");
+        assertEquals(RUN.toJson(), binding);
+        if (method.equals("game.state.get")) assertEquals(1, result.getAsJsonObject("state").get("version").getAsInt());
+        else if (method.equals("game.message.send")) assertTrue(result.get("displayed").getAsBoolean());
+        else assertEquals("roots", result.getAsJsonObject("reference").get("kind").getAsString());
+    }
+    private static void assertPendingWorkSurvivesPause(String method, boolean resume) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            receive(peer, method, toolRequest(method), 101); assertEquals(1, game.queue.size());
+            pauseAndAcknowledge(session, peer, wire, true);
+            if (resume) pauseAndAcknowledge(session, peer, wire, false);
+            game.queue.remove().run(); assertToolResult(wire, method, 101);
+            // The admitted judgment may request another tool while paused; this is not a new run.
+            receive(peer, method, toolRequest(method), 103); assertEquals(1, game.queue.size());
+            game.queue.remove().run(); assertToolResult(wire, method, 103);
+            assertTrue(session.isReady()); assertFalse(peer.isClosed());
+        }
+    }
+    @Test
+    void pausedSessionRejectsRunBindingsWithoutRevokingExistingRun() {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            pauseAndAcknowledge(session, peer, wire, true);
+            for (RunBinding binding : List.of(RUN, new RunBinding(WORLD, PLAYER, "session", "other"))) {
+                receive(peer, "game.run.bind", binding.toJson(), 101);
+                assertTrue(wire.last().has("error"), () -> "No run may bind while paused: " + wire.last());
+                assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+            }
+            receive(peer, "game.state.get", toolRequest("game.state.get"), 105);
+            assertEquals(1, game.queue.size()); game.queue.remove().run(); assertToolResult(wire, "game.state.get", 105);
+            receive(peer, "game.run.clear", RUN.toJson(), 102);
+            receive(peer, "game.run.bind", RUN.toJson(), 103);
+            assertTrue(wire.last().has("error"));
+            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+            receive(peer, "game.state.get", toolRequest("game.state.get"), 104);
+            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+            assertTrue(game.queue.isEmpty());
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void pendingWorkSurvivesPause(String method) { assertPendingWorkSurvivesPause(method, false); }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void pendingWorkSurvivesPauseAndResume(String method) { assertPendingWorkSurvivesPause(method, true); }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void pauseDuringCaptureKeepsResult(String method) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            game.afterRead = () -> pauseAndAcknowledge(session, peer, wire, true);
+            receive(peer, method, toolRequest(method), 101); game.queue.remove().run();
+            assertToolResult(wire, method, 101);
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void explicitClearStillFencesWorkAcrossPauseAndSameBindingRebind(String method) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            receive(peer, method, toolRequest(method), 101);
+            pauseAndAcknowledge(session, peer, wire, true);
+            receive(peer, "game.run.clear", RUN.toJson(), 102); assertEquals(RUN.toJson(), wire.last().get("result"));
+            pauseAndAcknowledge(session, peer, wire, false);
+            receive(peer, "game.run.bind", RUN.toJson(), 103); assertEquals(RUN.toJson(), wire.last().get("result"));
+            game.queue.remove().run();
+            assertEquals(101, wire.last().get("id").getAsInt());
+            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+            assertEquals(0, game.references); assertEquals(0, game.displayed);
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void clearDuringCaptureStillRejectsResult(String method) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            game.afterRead = () -> receive(peer, "game.run.clear", RUN.toJson(), 102);
+            receive(peer, method, toolRequest(method), 101); game.queue.remove().run();
+            assertEquals(101, wire.last().get("id").getAsInt());
+            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void disconnectStillFencesPausedWork(String method) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        GameSession session = readySession(peer, wire, game);
+        receive(peer, method, toolRequest(method), 101); pauseAndAcknowledge(session, peer, wire, true);
+        peer.close(); int frames = wire.sent.size(); game.queue.remove().run();
+        assertFalse(session.isReady()); assertEquals(frames, wire.sent.size());
+        assertEquals(0, game.references); assertEquals(0, game.displayed);
+    }
+    @ParameterizedTest
+    @ValueSource(strings = {"game.state.get", "game.message.send", "game.files.list", "game.files.read", "game.files.search"})
+    void pausedRunStillRejectsMismatchedBindings(String method) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            pauseAndAcknowledge(session, peer, wire, true);
+            for (String field : List.of("worldId", "playerId", "worldSessionId", "runId")) {
+                JsonObject request = toolRequest(method); request.addProperty(field, "other");
+                receive(peer, method, request, 101);
+                assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
+                assertTrue(game.queue.isEmpty());
+            }
+        }
     }
 
     @Test
@@ -400,8 +542,8 @@ public final class GameSessionTest {
             // RpcPeer has reserved the true request but has not written it: the other caller resumes.
             ordered.pause(false);
             orderedGame.queue.remove().run();
-            assertTrue(orderedGame.displayed == 0);
-            assertTrue(orderedWire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
+            assertTrue(orderedGame.displayed == 1);
+            assertToolResult(orderedWire, "game.message.send", 101);
         };
         ordered.pause(true);
         List<JsonObject> statuses = orderedWire.sent.stream().filter(frame -> frame.has("method")

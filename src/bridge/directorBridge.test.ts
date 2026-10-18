@@ -229,42 +229,47 @@ test("history completion is independent of run admission and rejects cancelled l
   await rejected;
 });
 
-test("real bridge pause cancels independent memory and resume cannot revive its result", async () => {
-  const h = await fixture();
-  const attached = h.bridge.readyWorld!;
-  vi.spyOn(h.bridge.history, "next").mockReturnValue({
-    source: {
-      after: 0,
-      through: 1,
-      sourceSessionId: h.world.worldSessionId,
-      sourceCount: 1,
-      firstObservedAt: 1,
-      lastObservedAt: 1,
-      input: "attachment observed",
-    },
-    backlog: false,
-  });
-  const save = vi.spyOn(h.bridge.history, "save").mockImplementation(() => {});
-  const response = deferred<unknown>();
-  h.complete.mockImplementation(() => response.promise);
-  let now = 0;
-  const worker = new HistoryWorker({ bridge: h.bridge, now: () => now });
-  try {
-    now = 60_000;
-    expect(worker.poll(h.world)).toBe(true);
-    const signal = (h.complete.mock.calls[0]![2] as { signal: AbortSignal }).signal;
-    await h.game.client.call("game.status", { ...h.world, paused: true });
-    expect(signal.aborted).toBe(true);
-    expect(attached.paused).toBe(false); // Host emits fresh snapshots, never its mutable world.
-    await h.game.client.call("game.status", { ...h.world, paused: false });
-    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "late" }] });
-    await drain();
-    expect(save).not.toHaveBeenCalled();
-  } finally {
-    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "cleanup" }] });
-    await worker.close();
-  }
-});
+test.each([false, true])(
+  "real bridge stores in-flight memory across pause; resumed=%s",
+  async (resume) => {
+    const h = await fixture();
+    const attached = h.bridge.readyWorld!;
+    vi.spyOn(h.bridge.history, "next").mockReturnValue({
+      source: {
+        after: 0,
+        through: 1,
+        sourceSessionId: h.world.worldSessionId,
+        sourceCount: 1,
+        firstObservedAt: 1,
+        lastObservedAt: 1,
+        input: "attachment observed",
+      },
+      backlog: false,
+    });
+    const save = vi.spyOn(h.bridge.history, "save").mockImplementation(() => {});
+    const response = deferred<unknown>();
+    h.complete.mockImplementation(() => response.promise);
+    let now = 0;
+    const worker = new HistoryWorker({ bridge: h.bridge, now: () => now });
+    try {
+      now = 60_000;
+      expect(worker.poll(h.world)).toBe(true);
+      const signal = (h.complete.mock.calls[0]![2] as { signal: AbortSignal }).signal;
+      await h.game.client.call("game.status", { ...h.world, paused: true });
+      expect(signal.aborted).toBe(false);
+      expect(attached.paused).toBe(false); // Host emits fresh snapshots, never its mutable world.
+      expect(worker.poll(h.world)).toBe(false);
+      if (resume) await h.game.client.call("game.status", { ...h.world, paused: false });
+      response.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
+      await drain();
+      expect(save).toHaveBeenCalledOnce();
+      expect(save.mock.calls[0]![2]).toBe("completed");
+    } finally {
+      response.resolve({ stopReason: "stop", content: [{ type: "text", text: "cleanup" }] });
+      await worker.close();
+    }
+  },
+);
 
 test("saved history is authenticated, run-bound, fresh and not exposed as a new game tool", async () => {
   const h = await fixture();
@@ -491,10 +496,11 @@ test("native withdrawal FIRST cancels without retirement; queued manual/tick wai
   await h.game.client.call("game.status", { ...h.world, paused: true });
   await drain();
   expect(session.judge).toHaveBeenCalledTimes(2);
+  expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
   await h.game.client.call("game.status", { ...h.world, paused: false });
   await drain();
   expect(flights).toHaveLength(2);
-  expect(JSON.parse(session.judge.mock.calls[2]![0])).toMatchObject({
+  expect(JSON.parse(session.judge.mock.calls[1]![0])).toMatchObject({
     playerMessages: ["retained"],
     poll: true,
   });
@@ -520,6 +526,60 @@ const forwards = [
 ] as const;
 
 test.each(forwards)(
+  "pause preserves admitted %s and subsequent state access",
+  async (method, args) => {
+    const h = await fixture();
+    const binding = await h.bridge.beginRun();
+    const invalidated = vi.fn();
+    h.bridge.on("runInvalidated", invalidated);
+    const pending = h.agent.client
+      .call(method, { ...binding, ...args })
+      .catch((error: unknown) => error);
+    await h.game.client.call("game.status", { ...h.world, paused: true });
+    const result =
+      method === "game.state.get"
+        ? { state: snapshot }
+        : method === "game.message.send"
+          ? { displayed: true }
+          : method === "game.files.list"
+            ? { reference: { kind: "roots", roots: [], nextCursor: null } }
+            : method === "game.files.read"
+              ? { reference: { root: "minecraft:0", path: "data/a.json", content: "{}", bytes: 2 } }
+              : {
+                  reference: {
+                    root: "minecraft:0",
+                    path: "data",
+                    text: "a",
+                    matches: [],
+                    scanned: 0,
+                    nextCursor: null,
+                    firstMatchPerFile: true,
+                  },
+                };
+    h.native[0]!.result.resolve({ ...binding, ...result });
+    expect(await pending).toEqual({ ...binding, ...result });
+    const nextState = h.agent.client.call("game.state.get", { ...binding, query: {} });
+    h.native[1]!.result.resolve({ ...binding, state: snapshot });
+    expect(await nextState).toEqual({ ...binding, state: snapshot });
+    await h.game.client.call("game.status", { ...h.world, paused: false });
+    expect(await h.agent.client.call("director.history.get", binding)).toEqual({
+      ...binding,
+      text: "",
+    });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(h.agent.host.calls).not.toContain("director.run.invalidate");
+    expect(h.bridge.finishRun(binding)).toBe(true);
+  },
+);
+
+test("pause still prevents admission of a new run", async () => {
+  const h = await fixture();
+  await h.game.client.call("game.status", { ...h.world, paused: true });
+  await expect(h.bridge.beginRun()).rejects.toThrow();
+  expect(h.game.host.calls).not.toContain("game.run.bind");
+});
+
+test.each(forwards)(
   "owned native withdrawal before status is scoped for %s",
   async (method, args) => {
     const h = await fixture();
@@ -536,7 +596,7 @@ test.each(forwards)(
   },
 );
 
-test("after-status native stale does not gate validated availability", async () => {
+test("earlier pause/resume cannot mask a later genuine native withdrawal", async () => {
   const h = await fixture();
   const binding = await h.bridge.beginRun();
   const pending = h.agent.client
@@ -557,6 +617,10 @@ test("after-status native stale does not gate validated availability", async () 
     (error: unknown) => error,
   );
   try {
+    await drain();
+    expect(admitted).toBeUndefined();
+    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
+    await h.game.client.call("game.status", { ...h.world, paused: false });
     await drain();
     expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(2);
     expect(h.agent.host.calls.filter((method) => method === "director.run.bind")).toHaveLength(2);

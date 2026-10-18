@@ -387,7 +387,7 @@ test.each([
 );
 
 test.each([false, true])(
-  "owned pause rejects late state without retiring; stdio abort first=%s",
+  "owned cancellation rejects late state without retiring; stdio abort first=%s",
   async (stdioFirst) => {
     const h = await setup();
     const first = h.context();

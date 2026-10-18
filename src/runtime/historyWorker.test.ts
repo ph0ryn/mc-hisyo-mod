@@ -104,7 +104,7 @@ test("pause excludes time and an empty delta never calls the model", async () =>
   await f.worker.close();
 });
 
-test("delayed ticks never burst or overlap, even while cancellation is pending", async () => {
+test("delayed ticks never burst or overlap and pause preserves in-flight completion", async () => {
   const f = fixture();
   f.at(300_000);
   expect(f.worker.poll(binding)).toBe(true);
@@ -112,18 +112,18 @@ test("delayed ticks never burst or overlap, even while cancellation is pending",
   expect(f.worker.poll(binding)).toBe(false);
   expect(f.pending).toHaveLength(1);
   f.pause(true);
-  expect(f.pending[0]!.signal.aborted).toBe(true);
+  expect(f.pending[0]!.signal.aborted).toBe(false);
   f.pause(false);
   f.at(660_000);
   expect(f.worker.poll(binding)).toBe(false);
-  f.pending[0]!.resolve("stale");
+  f.pending[0]!.resolve("completed");
   await f.settle();
-  expect(f.bridge.history.save).not.toHaveBeenCalled();
+  expect(f.bridge.history.save).toHaveBeenCalledTimes(1);
   f.at(720_000);
   expect(f.worker.poll(binding)).toBe(true);
   f.pending[1]!.resolve("fresh");
   await f.settle();
-  expect(f.bridge.history.save).toHaveBeenCalledTimes(1);
+  expect(f.bridge.history.save).toHaveBeenCalledTimes(2);
   await f.worker.close();
 });
 

@@ -45,7 +45,6 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
   readonly #status = (world: AttachedWorld): void => {
     if (!this.#world || !sameWorldBinding(world.binding, this.#world.binding)) return;
     this.#clock.setPlaying(!world.paused, this.#now());
-    if (world.paused && !this.#world.paused) this.#invalidate();
     this.#world = world;
   };
   readonly #detach = (binding: WorldBinding): void => {

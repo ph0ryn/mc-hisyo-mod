@@ -183,7 +183,8 @@ export class DirectorBridge extends EventEmitter<{
       )
         throw new Error("Invalid history summary result or binding");
       signal.throwIfAborted();
-      if (agent !== this.#agent || this.#requireWorld(binding).paused || result.cancelled)
+      this.#requireWorld(binding);
+      if (agent !== this.#agent || result.cancelled)
         throw new Error("History summary became stale");
       validateSummaryText(result.summary);
       return result.summary;
@@ -432,9 +433,8 @@ export class DirectorBridge extends EventEmitter<{
           activity(world.binding, "director.status_reported", { paused: params.paused }),
         ),
       );
-      if (params.paused) this.invalidateRun("paused");
-      this.#requireWorld(params); // Clearing a run can synchronously close the game link.
-      this.#resolveAvailability();
+      this.#requireWorld(params);
+      if (!params.paused) this.#resolveAvailability();
       this.emit("status", this.currentWorld!);
       return { paused: params.paused };
     });
