@@ -207,7 +207,7 @@ test("history completion is independent of run admission and rejects cancelled l
   expect(h.native).toHaveLength(0);
   expect(h.complete.mock.calls[0]![2]).toMatchObject({
     serviceTier: "priority",
-    reasoningEffort: "medium",
+    reasoningEffort: "low",
   });
   const response = deferred<unknown>();
   h.complete.mockImplementation(() => response.promise);

@@ -240,7 +240,7 @@ export default function directorBridge(
             {
               // Fast mode's compatible wire name; some ChatGPT endpoints reject "fast".
               serviceTier: "priority",
-              reasoningEffort: "medium",
+              reasoningEffort: "low",
               maxTokens: 4096,
               cacheRetention: "none",
               signal: flight.controller.signal,

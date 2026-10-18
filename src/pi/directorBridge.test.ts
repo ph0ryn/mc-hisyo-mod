@@ -134,7 +134,7 @@ const summaryRequest = {
   input: "block_broken minecraft:oak_log ×3",
 };
 
-test("independent memory requests Fast via priority with unchanged medium reasoning and no tools", async () => {
+test("independent memory requests Fast via priority with low reasoning and no tools", async () => {
   const h = await setup();
   // The native provider forwards this literal; this endpoint rejects "fast" with HTTP 400.
   h.complete.mockImplementation(async (_model, _context, options) =>
@@ -159,7 +159,7 @@ test("independent memory requests Fast via priority with unchanged medium reason
   expect(h.complete.mock.calls[0]![1]).not.toHaveProperty("tools");
   expect(h.complete.mock.calls[0]![2]).toMatchObject({
     serviceTier: "priority",
-    reasoningEffort: "medium",
+    reasoningEffort: "low",
   });
   expect(controller.signal.aborted).toBe(false);
   expect(h.peer.calls).toEqual(["director.ready"]);
