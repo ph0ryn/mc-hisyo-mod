@@ -254,10 +254,11 @@ public final class ServerObservations {
     }
 
     public static void advancementAwarded(ServerPlayer player, String advancementId, String criterion,
-            boolean granted, boolean beforeDone, boolean afterDone) {
+            boolean granted, boolean beforeDone, boolean afterDone, boolean hasDisplay) {
         ServerObservations observations = active;
         if (observations != null && observations.scoped(player)) {
-            Map<String, Object> data = Map.of("advancementId", advancementId, "criterion", criterion, "afterDone", afterDone);
+            Map<String, Object> data = Map.of("advancementId", advancementId, "criterion", criterion,
+                    "afterDone", afterDone, "hasDisplay", hasDisplay);
             SnapshotDeltaTracker.advancementEvents(granted, beforeDone, afterDone)
                     .forEach(name -> observations.emit(player, name, data));
         }

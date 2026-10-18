@@ -1,6 +1,6 @@
 # ポーリングと応答hook
 
-保留キュー、開始・チャット・一致hook・pollのsingle-flight実行制御、active-play計時と通常CLI / Modへの配線は実装済み。
+保留キュー、開始・チャット・実績解除・一致hook・pollのsingle-flight実行制御、active-play計時と通常CLI / Modへの配線は実装済み。
 実接続・実Pi受入れは未実施。[実装・検証状況](<development.md>)を参照。
 
 ## AIを起動する入口
@@ -9,10 +9,12 @@
 2. プレイヤーからのチャット。
 3. 定期ポーリング。
 4. LLMが登録したhookの発火。
+5. 表示を持つ実績の解除（`advancement_completed`かつ`hasDisplay: true`）。hook登録は不要。
 
 通常のゲームイベントはCLIへ通知・記録するが、記録するだけではLLMを起動しない。
-起動条件は上記4つに限り、LLMが判断と判断の間もゲームを常時監視しているわけではない。
-対応するhookを登録しなければ、作業完了や行き詰まりが起きても次の定期pollまたはプレイヤー入力まで反応できない。この起動条件と制約をagentのsystem promptにも明記する。
+起動条件は上記5つに限り、LLMが判断と判断の間もゲームを常時監視しているわけではない。
+実績解除以外の作業完了や行き詰まりに即応するには対応するhookが必要。この起動条件と制約をagentのsystem promptにも明記する。
+criterion単体、レシピ解禁など表示を持たない内部進捗、`hasDisplay`のない旧観測は自動起動しない。記録とhook照合は引き続き行う。
 
 ## 定期ポーリング
 
@@ -116,6 +118,7 @@ Piの`steer`は進行中のAPI応答を即座に中断する機能ではなく�
 開始・pollはそれぞれ1予約へまとめ、チャットは同文でも受信順に別々に残す。
 hookは発火時のID・指示・正確な保存イベントIDを保持し、同じhookの発火をまとめる。
 一致イベントの内容と連番欠損情報はbatch内に1コピーだけ保持し、複数hookからIDで参照する。
+実績解除も`observations`へ保持する。同時にhookが一致しても内容は1コピーで、別々の判断には分けない。
 後でhookを削除しても捕捉済みの指示は変えず、新規hookを過去イベントへ照合し直さない。
 
 - 既定上限は保留batchをJSON化したUTF-8で1 MiB。指示・参照・イベント本文・JSON escapeも数える。
@@ -133,7 +136,7 @@ DB保存・hook登録や照合は検証しない。single-flightは次のschedul
 ## 実行制御
 
 [JudgmentScheduler](<../src/runtime/judgmentScheduler.ts>)はready済みworldから開始理由を1回取り込み、
-チャット・一致hook・期限到達pollのbatchをPi session所有者へ順番に渡す。通常観測は保存だけを行う。
+チャット・実績解除・一致hook・期限到達pollのbatchをPi session所有者へ順番に渡す。他の観測はhookに一致しなければ保存だけを行う。
 pause中も入力は保持するが判断を開始しない。pause解除がsettledより先でも、slotを重ねず次回へ進む。
 `not_started`は取得済みbatchを保持し、開始後のsettledは取消済みでも消費する。曖昧な失敗は再送しない。
 
@@ -154,7 +157,7 @@ stubの解決順確認が実プロセスの終了検証を代替するとは扱�
 Pi送受信の上限は2 MiB + 256 bytes、キューの上限は1 MiBとし、超過は明示失敗で停止する。
 任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
 定期timer・CLI / Mod接続は実装済みだが、実Piでのscheduler受入れは未実施。
-判断理由は`judge`前に保存する。要求記録はprovider実行の証拠ではない。
+判断理由は`judge`前に保存する。実績解除は`director.judgment_requested_advancement`に元の保存イベントIDを記録する。要求記録はprovider実行の証拠ではない。
 native-first取消の待機は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
 
 ## 推論設定

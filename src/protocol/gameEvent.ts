@@ -122,6 +122,10 @@ export const GameEventSchema = Type.Object(
 );
 export type GameEvent = Static<typeof GameEventSchema>;
 
+export function isAdvancementUnlock(observation: GameEvent): boolean {
+  return observation.event === "advancement_completed" && observation.data.hasDisplay === true;
+}
+
 export interface EventDefinition {
   readonly name: string;
   readonly description: string;
@@ -517,10 +521,15 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
       "Original award returned true for a newly granted criterion; loaded progress is never replayed.",
     observation: "confirmed",
     dataSchema: Type.Object(
-      { advancementId: identifier, criterion: identifier, afterDone: Type.Boolean() },
+      {
+        advancementId: identifier,
+        criterion: identifier,
+        afterDone: Type.Boolean(),
+        hasDisplay: Type.Optional(Type.Boolean()),
+      },
       strict,
     ),
-    filterFields: ["advancementId", "criterion", "afterDone"],
+    filterFields: ["advancementId", "criterion", "afterDone", "hasDisplay"],
   },
   {
     name: "advancement_completed",
@@ -528,10 +537,15 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
       "Successful criterion award changed native advancement done from false to true, not loaded progress or an already-done award.",
     observation: "confirmed",
     dataSchema: Type.Object(
-      { advancementId: identifier, criterion: identifier, afterDone: Type.Literal(true) },
+      {
+        advancementId: identifier,
+        criterion: identifier,
+        afterDone: Type.Literal(true),
+        hasDisplay: Type.Optional(Type.Boolean()),
+      },
       strict,
     ),
-    filterFields: ["advancementId", "criterion", "afterDone"],
+    filterFields: ["advancementId", "criterion", "afterDone", "hasDisplay"],
   },
   {
     name: "block_placed",

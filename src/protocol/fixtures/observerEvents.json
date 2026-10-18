@@ -378,7 +378,8 @@
     "data": {
       "advancementId": "minecraft:story/mine_stone",
       "criterion": "get_cobblestone",
-      "afterDone": true
+      "afterDone": true,
+      "hasDisplay": true
     }
   },
   {
@@ -394,7 +395,8 @@
     "data": {
       "advancementId": "minecraft:story/mine_stone",
       "criterion": "get_cobblestone",
-      "afterDone": true
+      "afterDone": true,
+      "hasDisplay": true
     }
   },
   {

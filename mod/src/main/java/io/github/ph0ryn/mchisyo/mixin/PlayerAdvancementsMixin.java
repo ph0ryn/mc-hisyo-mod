@@ -21,7 +21,7 @@ abstract class PlayerAdvancementsMixin {
         boolean beforeDone = getOrStartProgress(advancement).isDone();
         boolean granted = original.call(advancement, criterion);
         if (granted) ServerObservations.advancementAwarded(player, advancement.id().toString(), criterion,
-                true, beforeDone, getOrStartProgress(advancement).isDone());
+                true, beforeDone, getOrStartProgress(advancement).isDone(), advancement.value().display().isPresent());
         return granted;
     }
 }

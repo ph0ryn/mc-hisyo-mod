@@ -37,6 +37,31 @@ test("observations without supplied hook matches do not reserve a judgment", () 
   expect(queue.take()).toBeUndefined();
 });
 
+test("unhooked advancement notifications retain payloads within the same byte budget", () => {
+  const completed = stored(1);
+  completed.observation.event = "advancement_completed";
+  completed.observation.data = {
+    advancementId: "minecraft:story/mine_stone",
+    criterion: "get_cobblestone",
+    afterDone: true,
+    hasDisplay: true,
+  };
+  const probe = new JudgmentQueue(world);
+  probe.enqueueObservation(completed, []);
+  const batch = probe.take();
+  expect(batch).toMatchObject({ hooks: [], observations: [completed] });
+  const bytes = Buffer.byteLength(JSON.stringify(batch), "utf8");
+  const queue = new JudgmentQueue(world, bytes);
+  queue.enqueueObservation(completed, []);
+  completed.observation.data.advancementId = "mutated";
+  expect(queue.take()).toEqual(batch);
+  const short = new JudgmentQueue(world, bytes - 1);
+  expect(() => short.enqueueObservation(batch!.observations[0]!, [])).toThrow(
+    JudgmentQueueFullError,
+  );
+  expect(() => short.take()).toThrow(JudgmentQueueFullError);
+});
+
 test("coalesces start and poll but retains every chat in arrival order", () => {
   const queue = new JudgmentQueue(world);
   for (let index = 0; index < 50; index++) {

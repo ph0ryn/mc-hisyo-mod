@@ -58,6 +58,8 @@ var observations = ServerObservations.register(isScopedPlayer, sink); // 最小�
 - 包含構造物はloaded chunkのbounded metadataだけで、coverageは常に不完全。locate・生成・遠方座標探索をしない。
 - 天候はraw rain / thunder、半日phaseはraw day time由来で、明るさや体感の天候ではない。
 - advancementは元のawardを一度だけ呼び、その成功と前後の完了状態を観測する。進捗の再演や過去分の再送はしない。
+  `hasDisplay`はnativeのdisplay metadataの有無を表し、実際のtoast表示の証拠ではない。旧履歴では欠け得る。
+  表示を持つ実績の完了だけが[hookなしでAIを起動する](<scheduling.md#aiを起動する入口>)。criterionや内部進捗も履歴には残す。
 - 設置は成功したnative placement経路。拾得はitem entityから消費された個数で、inventory net増加とは限らない。
   dropはentity追加が`true`だった場合。grid / furnaceはnativeがcreditした結果個数で、全recipeやmodded経路を保証しない。
 - block / item useはserverへ到達した試行で、全packetや成功操作の全件ではない。callbackは常に`PASS`。

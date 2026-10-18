@@ -237,6 +237,73 @@ test("preserves ordered duplicate chats in one subsequent judgment", async () =>
   expect(f.session.judge).toHaveBeenCalledTimes(2);
 });
 
+test.each([false, true])(
+  "notifies advancement unlocks without hooks (paused=%s)",
+  async (paused) => {
+    const f = fixture();
+    await tick();
+    f.session.settle();
+    await tick();
+    const completed: StoredEvent = {
+      ...stored(1),
+      observation: {
+        ...stored(1).observation,
+        event: "advancement_completed",
+        data: {
+          advancementId: "minecraft:story/mine_stone",
+          criterion: "get_cobblestone",
+          afterDone: true,
+          hasDisplay: true,
+        },
+      },
+    };
+    for (const observation of [
+      { ...completed.observation, event: "advancement_criterion_granted" },
+      { ...completed.observation, data: { ...completed.observation.data, hasDisplay: false } },
+      {
+        ...completed.observation,
+        data: {
+          advancementId: "minecraft:story/mine_stone",
+          criterion: "get_cobblestone",
+          afterDone: true,
+        },
+      },
+    ])
+      f.bridge.emit("observation", { ...completed, observation }, []);
+    await tick();
+    expect(f.session.judge).toHaveBeenCalledTimes(1);
+
+    f.bridge.pause(paused);
+    f.bridge.emit("observation", completed, []);
+    await tick();
+    if (paused) {
+      expect(f.session.judge).toHaveBeenCalledTimes(1);
+      f.bridge.pause(false);
+      await tick();
+    }
+    expect(f.session.batches()[1]).toMatchObject({ hooks: [], observations: [completed] });
+
+    const next = { ...completed, id: 2, observation: { ...completed.observation, seq: 2 } };
+    const matched = {
+      ...hook("advancement", "react to the unlock"),
+      event: "advancement_completed",
+    };
+    f.bridge.emit("observation", next, [matched]);
+    await tick();
+    expect(f.session.judge).toHaveBeenCalledTimes(2);
+    f.session.settle();
+    await tick();
+    expect(f.session.batches()[2]).toMatchObject({
+      hooks: [{ id: matched.id, instruction: matched.instruction, eventIds: [next.id] }],
+      observations: [next],
+    });
+    f.session.settle();
+    await tick();
+    expect(f.session.judge).toHaveBeenCalledTimes(3);
+    expect(f.faults).toEqual([]);
+  },
+);
+
 test("starts an initially paused owner but waits for play before sending start and chat", async () => {
   const f = fixture({ paused: true });
   await tick();

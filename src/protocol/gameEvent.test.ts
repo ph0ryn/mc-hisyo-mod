@@ -33,6 +33,21 @@ describe("server observer event contracts", () => {
     expect(() => catalog.validateObservation(observation)).not.toThrow();
   });
 
+  it.each(["advancement_criterion_granted", "advancement_completed"])(
+    "validates %s display metadata while retaining legacy history",
+    (event) => {
+      const observation = fixture(event);
+      delete observation.data.hasDisplay;
+      expect(() => catalog.validateObservation(observation)).not.toThrow();
+      for (const hasDisplay of [true, false]) {
+        observation.data.hasDisplay = hasDisplay;
+        expect(() => catalog.validateObservation(observation)).not.toThrow();
+      }
+      observation.data.hasDisplay = "true";
+      expect(() => catalog.validateObservation(observation)).toThrow();
+    },
+  );
+
   it("validates and matches every advertised scalar filter", () => {
     for (const observation of fixtures) {
       const definition = catalog.get(observation.event);

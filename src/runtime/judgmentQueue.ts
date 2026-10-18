@@ -1,6 +1,7 @@
 import type { StoredEvent } from "../events/eventLog.js";
 import type { ResponseHook } from "../hooks/responseHooks.js";
 import { sameWorldBinding, type WorldBinding } from "../protocol/bridge.js";
+import { isAdvancementUnlock } from "../protocol/gameEvent.js";
 
 export interface JudgmentBatch {
   binding: WorldBinding;
@@ -65,7 +66,7 @@ export class JudgmentQueue {
 
   enqueueObservation(stored: StoredEvent, hooks: readonly ResponseHook[]): void {
     this.#requireBinding(stored.observation);
-    if (hooks.length === 0) return;
+    if (hooks.length === 0 && !isAdvancementUnlock(stored.observation)) return;
     this.#update((batch) => {
       const captured = new Map(batch.hooks.map((hook) => [hook.id, hook]));
       for (const hook of hooks) {
@@ -86,7 +87,12 @@ export class JudgmentQueue {
   take(): JudgmentBatch | undefined {
     this.#healthy();
     const batch = this.#pending;
-    if (!batch.worldStart && !batch.poll && !batch.playerMessages.length && !batch.hooks.length)
+    if (
+      !batch.worldStart &&
+      !batch.poll &&
+      !batch.playerMessages.length &&
+      !batch.observations.length
+    )
       return undefined;
     this.#pending = this.#empty();
     return batch;

@@ -7,7 +7,12 @@ import {
   sameRunBinding,
   type WorldBinding,
 } from "../protocol/bridge.js";
-import { GameEventSchema, WorldScopeSchema, type EventDefinition } from "../protocol/gameEvent.js";
+import {
+  GameEventSchema,
+  WorldScopeSchema,
+  isAdvancementUnlock,
+  type EventDefinition,
+} from "../protocol/gameEvent.js";
 import type { JudgmentBatch } from "../runtime/judgmentQueue.js";
 import { EventCatalog, EventFilterSchema } from "./eventCatalog.js";
 
@@ -109,24 +114,23 @@ export const directorActivityCatalog = new EventCatalog([
     },
     ["hookId", "sourceEventId"],
   ),
-  ...(["initial", "poll", "player", "hook"] as const).map((reason) =>
+  ...(["initial", "poll", "player", "hook", "advancement"] as const).map((reason) =>
     definition(
       `judgment_requested_${reason}`,
       `Scheduler requested a judgment attempt for ${reason}; not proof of provider execution. Records sharing requestId belong to one attempt.`,
       {
         requestId: identifier,
         ...(reason === "player" ? { text } : {}),
-        ...(reason === "hook"
-          ? {
-              hookId: identifier,
-              sourceEventId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-            }
+        ...(reason === "hook" ? { hookId: identifier } : {}),
+        ...(reason === "hook" || reason === "advancement"
+          ? { sourceEventId: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }) }
           : {}),
       },
       [
         "requestId",
         ...(reason === "player" ? ["text"] : []),
-        ...(reason === "hook" ? ["hookId", "sourceEventId"] : []),
+        ...(reason === "hook" ? ["hookId"] : []),
+        ...(reason === "hook" || reason === "advancement" ? ["sourceEventId"] : []),
       ],
       "attempt",
     ),
@@ -206,5 +210,7 @@ export function judgmentActivities(
   for (const text of batch.playerMessages) add("player", { text });
   for (const hook of batch.hooks)
     for (const sourceEventId of hook.eventIds) add("hook", { hookId: hook.id, sourceEventId });
+  for (const stored of batch.observations)
+    if (isAdvancementUnlock(stored.observation)) add("advancement", { sourceEventId: stored.id });
   return records;
 }

@@ -179,6 +179,7 @@ test("every current Director activity fits individually at maximum escaped text 
     ["hook_matched", { hookId: id, sourceEventId: Number.MAX_SAFE_INTEGER }],
     ["judgment_requested_initial", { requestId: id }],
     ["judgment_requested_poll", { requestId: id }],
+    ["judgment_requested_advancement", { requestId: id, sourceEventId: Number.MAX_SAFE_INTEGER }],
     ["judgment_requested_player", { requestId: id, text }],
     [
       "judgment_requested_hook",
@@ -436,13 +437,32 @@ test("hook mutation and history use one transaction with rollback on recording f
 });
 
 test("reason batches commit completely or propagate failure and roll back", () => {
-  const batch = {
+  const batch: JudgmentBatch = {
     binding,
     worldStart: true,
     poll: true,
     playerMessages: ["one", "two"],
     hooks: [{ id: "hook", event: "block_broken", instruction: "respond", eventIds: [7, 9] }],
-    observations: [],
+    observations: [
+      {
+        id: 8,
+        observation: {
+          ...binding,
+          seq: 1,
+          tick: 1,
+          observedAt: 100,
+          event: "advancement_completed",
+          dimension: "minecraft:overworld",
+          position: [0, 64, 0],
+          data: {
+            advancementId: "minecraft:story/mine_stone",
+            criterion: "get_cobblestone",
+            afterDone: true,
+            hasDisplay: true,
+          },
+        },
+      },
+    ],
   };
   const records = judgmentActivities(batch, 100, "request");
   expect(records.map((entry) => entry.event)).toEqual([
@@ -452,6 +472,7 @@ test("reason batches commit completely or propagate failure and roll back", () =
     "director.judgment_requested_player",
     "director.judgment_requested_hook",
     "director.judgment_requested_hook",
+    "director.judgment_requested_advancement",
   ]);
   expect(records.map((entry) => entry.data)).toEqual([
     { requestId: "request" },
@@ -460,7 +481,14 @@ test("reason batches commit completely or propagate failure and roll back", () =
     { requestId: "request", text: "two" },
     { requestId: "request", hookId: "hook", sourceEventId: 7 },
     { requestId: "request", hookId: "hook", sourceEventId: 9 },
+    { requestId: "request", sourceEventId: 8 },
   ]);
+  for (const hasDisplay of [false, undefined]) {
+    batch.observations[0]!.observation.data.hasDisplay = hasDisplay;
+    expect(judgmentActivities(batch, 100, "request").map((entry) => entry.event)).not.toContain(
+      "director.judgment_requested_advancement",
+    );
+  }
   const f = log();
   f.log.appendActivities(records);
   expect(f.transactions).toEqual(["BEGIN IMMEDIATE", "COMMIT"]);

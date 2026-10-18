@@ -79,7 +79,10 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     expect(prompt).toContain("every 60 seconds of active play");
     expect(prompt).toContain("Ordinary game events are recorded but do not wake you");
     expect(prompt).toContain(
-      "Without a matching hook, task completion or a blocker cannot trigger your response before the next poll or player message",
+      "Advancement unlocks (advancement_completed with hasDisplay: true) wake you without a hook",
+    );
+    expect(prompt).toContain(
+      "Other task completion or blockers require a matching hook to wake you before the next poll or player message",
     );
     expect(prompt).toContain(
       "use add_response_hook to register the completion/blocker events you need to react to",
