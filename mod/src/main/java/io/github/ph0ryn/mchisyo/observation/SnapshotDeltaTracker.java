@@ -257,7 +257,7 @@ public final class SnapshotDeltaTracker {
     }
 
     public static List<String> advancementEvents(String advancementId, boolean granted, boolean beforeDone, boolean afterDone) {
-        if (!granted || advancementId.contains(":recipes/")) return List.of();
+        if (!granted) return List.of();
         return !beforeDone && afterDone ? List.of("advancement_criterion_granted", "advancement_completed")
                 : List.of("advancement_criterion_granted");
     }

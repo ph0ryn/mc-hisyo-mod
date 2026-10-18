@@ -312,11 +312,12 @@ public final class ObserverTest {
     }
 
     @Test
-    void recipeUnlocksAreSilent() {
+    void recipeUnlocksAreObserved() {
         for (String id : List.of("minecraft:recipes/root", "minecraft:recipes/building_blocks/yellow_concrete_powder",
                 "example:recipes/tools/hammer")) {
-            assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents(id, true, false, false), id + " criterion excluded");
-            assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents(id, true, false, true), id + " completion excluded");
+            assertEquals(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents(id, true, false, false), id + " criterion observed");
+            assertEquals(List.of("advancement_criterion_granted", "advancement_completed"),
+                    SnapshotDeltaTracker.advancementEvents(id, true, false, true), id + " completion observed");
         }
         for (String id : List.of("minecraft:story/smelt_iron", "example:story/root",
                 "example:recipes_unlocked/root", "example:story/recipes/root")) {
