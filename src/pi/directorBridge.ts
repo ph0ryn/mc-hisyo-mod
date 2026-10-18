@@ -124,7 +124,14 @@ export default function directorBridge(
       if (!Check(GameStateResultSchema, result) || !sameRunBinding(result, captured))
         throw new Error("Invalid required game state or binding");
       requireRun(captured, signal);
-      return result.state;
+      // Minecraft's day starts at 06:00; dayTime may span multiple days or be negative.
+      const dayTicks = ((result.state.dayTime % 24_000) + 24_000) % 24_000;
+      const hour = (Math.floor(dayTicks / 1_000) + 6) % 24;
+      const minute = Math.floor(((dayTicks % 1_000) * 60) / 1_000);
+      return {
+        ...result.state,
+        dayTimeClock: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+      };
     } catch (error) {
       stop(ctx, error);
       throw error;

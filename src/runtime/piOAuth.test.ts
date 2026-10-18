@@ -114,6 +114,10 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     expect(prompt).not.toContain("After a successful send_message, finish this judgment");
     expect(prompt).toContain("A refreshed snapshot or tool acknowledgement is background data");
     expect(prompt).toContain("Do not narrate routine HUD values or list inventory");
+    expect(prompt).toContain("dayTimeClock is the Minecraft 24-hour clock");
+    expect(prompt).toContain("06:00 dawn, 12:00 noon, 18:00 sunset, 00:00 midnight");
+    expect(prompt).toContain("not from old messages, event history or the real-world clock");
+    expect(prompt).toContain("does not measure local brightness");
     expect(
       JSON.parse(readFileSync(join(launch.env.PI_CODING_AGENT_DIR!, "models.json"), "utf8")),
     ).toEqual({ providers: {} });

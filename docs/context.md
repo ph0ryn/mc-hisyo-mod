@@ -6,7 +6,7 @@ LLMの各呼び出し前に、Pi拡張の`context`イベントから最新情報
 Tool実行後の再判断も対象とし、過去のスナップショットを毎回会話履歴へ積み続けない。
 
 - 位置、ディメンション、バイオーム、周辺情報。
-- ゲーム内時刻。
+- ゲーム内時刻。生の`dayTime`に加え、Pi拡張が24時間表記の`dayTimeClock`（`HH:mm`）を添える。
 - 体力。
 - インベントリ。
 - 最近のAIの発言。
@@ -19,6 +19,9 @@ bridgeは[必須snapshot](<gameState.md>)のschemaを検証する。範囲外・
 [Pi拡張](<../src/pi/directorBridge.ts>)は毎回`game.state.get`を待ち、`CURRENT_GAME_STATE`として直近の判断入力の直前へ一時注入する。
 Tool結果の後ろへ新しいuser messageを追加しない。状態更新は背景情報であり、新たな発言要求ではない。
 この必須snapshotは会話へ永続化せず、Tool呼出し後の再判断でも取得し直す。
+`dayTimeClock`は`get_game_state`の結果にも添えるAI向けの派生値で、Modとのwire schemaは変えない。
+24,000 ticksで一周、0 ticksが06:00、6,000 ticksが12:00。負値も正規化する。
+現在の時刻は最新の状態を優先し、過去の会話やイベントから推測しない。時計は局所の明るさや他dimensionの昼夜を保証しない。
 必須snapshotの欠損・不正・切断・timeoutはbinding破棄、同期abort、接続の引退で判断を止める。
 ただしhostが先に無効化した**同じrun**の取消通知と、厳密なbinding付き`-32005`は通常の取消であり、拡張を引退させない。
 不正・別runのエラーを取消扱いにしない。詳細は[取消の順序](<protocol.md#native側が先にrunを無効化した場合>)を参照。

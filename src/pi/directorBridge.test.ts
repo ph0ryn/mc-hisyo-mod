@@ -161,6 +161,51 @@ test("refreshes background state before the judgment, never as a new input after
   expect(h.peer.calls.filter((method) => method === "game.message.send")).toHaveLength(2);
 });
 
+test("refreshes Minecraft clock time in both background context and tool results", async () => {
+  const h = await setup();
+  const { ctx } = h.context();
+  h.emit("agent_start", ctx);
+  const messages = [
+    { role: "assistant", content: "It is night." },
+    { role: "user", content: '{"poll":true}' },
+  ];
+  for (const [dayTime, dayTimeClock] of [
+    [18_000, "00:00"],
+    [6_000, "12:00"],
+    [0, "06:00"],
+    [12_000, "18:00"],
+    [23_999, "05:59"],
+    [24_000, "06:00"],
+    [30_000, "12:00"],
+    [-1, "05:59"],
+    [-24_000, "06:00"],
+    [6_017, "12:01"],
+  ] as const) {
+    const state = { ...snapshot, dayTime };
+    const expected = { ...state, dayTimeClock };
+    const context = Promise.resolve(h.emit("context", ctx, { messages }));
+    h.peer.states.at(-1)!.result.resolve({ ...binding, state });
+    expect(await context).toMatchObject({
+      messages: [
+        messages[0],
+        {
+          content: `CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(expected)}`,
+        },
+        messages[1],
+      ],
+    });
+    const result = h.tools
+      .get("get_game_state")!
+      .execute("call", { query: {} }, ctx.signal, undefined, ctx);
+    h.peer.states.at(-1)!.result.resolve({ ...binding, state });
+    expect(await result).toEqual({
+      content: [{ type: "text", text: JSON.stringify(expected) }],
+      details: expected,
+    });
+    expect(state).not.toHaveProperty("dayTimeClock");
+  }
+});
+
 test.each([
   ["get_game_state", "game.state.get", { query: {} }, { query: {} }],
   ["send_message", "game.message.send", { text: "hello" }, { text: "hello" }],
@@ -207,7 +252,8 @@ test.each([
     const value = (await result) as { content: { text: string }[]; details: unknown };
     expect(h.peer.requests.at(-1)).toEqual({ method, params: { ...payload, ...binding } });
     expect(JSON.parse(value.content[0]!.text)).toEqual(value.details);
-    if (method === "game.state.get") expect(value.details).toEqual(snapshot);
+    if (method === "game.state.get")
+      expect(value.details).toEqual({ ...snapshot, dayTimeClock: "12:00" });
     if (method === "game.message.send") expect(value.details).toEqual({ displayed: true });
     if (method.startsWith("game.files.")) expect(value.details).not.toHaveProperty("runId");
     await expect(
