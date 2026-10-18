@@ -77,6 +77,11 @@ node dist/cli.mjs --pi /absolute/path/to/pi
 
 引数の正は[parser / usage](<../src/cliOptions.ts>)、設定解決は[directorConfig.ts](<../src/runtime/directorConfig.ts>)。
 
+CLIは時刻付き診断ログを標準エラーへ出す。接続・pause状態、判断要求と取消、Pi ready・prompt送信・settled、
+Toolの開始・引数・結果・エラー・Piが返した実行時間を確認できる。`toolCallId`で開始と結果を対応付ける。
+引数と結果にはプレイヤーの入力やゲーム内テキストを含む。詳細JSONは4,096文字までとし、省略時は`[truncated]`を付ける。
+改行・端末制御文字はescapeし、Piの生stderr・認証情報・RPCの無関係なfieldは転送しない。ログファイルは自動作成しない。
+
 - `--pi`の既定はPATH上の`pi`。このプロジェクトのPiは`openai/gpt-6-luna`に固定し、グローバルのモデル設定は読み書きしない。
   `--provider` / `--model`を指定する場合も両方が必要で、`openai` / `gpt-6-luna`以外は拒否する。
 - 認証保存先は`--pi-agent-dir` → `PI_CODING_AGENT_DIR` → `~/.pi/agent`。子のprivate設定先とは別。

@@ -100,6 +100,23 @@ test("config fails before acquiring any resource", async () => {
   expect(f.ports.startBridge).not.toHaveBeenCalled();
 });
 
+test("CLI diagnostics reach the scheduler without logging credentials or connection tokens", async () => {
+  const f = fixture();
+  const onLog = vi.fn();
+  const runtime = (await startDirectorRuntime({ ...f.options, onLog }, f.ports))!;
+  try {
+    const schedulerOptions = vi.mocked(f.ports.createScheduler).mock.calls[0]![0];
+    schedulerOptions.onLog?.("tool_execution_start", { toolName: "send_message" });
+    expect(onLog).toHaveBeenCalledExactlyOnceWith("tool_execution_start", {
+      toolName: "send_message",
+    });
+    expect(JSON.stringify(onLog.mock.calls)).not.toContain("SECRET_SENTINEL");
+    expect(JSON.stringify(onLog.mock.calls)).not.toContain(f.base.connection.token);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("default launch forwards the OAuth source without its refresh grant", async () => {
   const f = fixture([]);
   f.ports.readText = (path) =>

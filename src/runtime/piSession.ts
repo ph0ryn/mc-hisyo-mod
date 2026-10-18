@@ -19,13 +19,18 @@ import {
   type NativePiModel,
 } from "../pi/nativePiModel.js";
 import { directorToolNames } from "../pi/piPolicy.js";
-import { PiRunError, startPiRpcClient, type PiJudgment } from "../pi/piRpcClient.js";
+import {
+  PiRunError,
+  startPiRpcClient,
+  type PiJudgment,
+  type PiLaunchOptions,
+} from "../pi/piRpcClient.js";
 import { sameWorldBinding, type RunBinding, type WorldBinding } from "../protocol/bridge.js";
 import type { ConnectionInfo } from "./connectionFile.js";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
 import { refreshPiOAuth } from "./piOAuth.js";
 
-export interface PiSessionOptions {
+export interface PiSessionOptions extends Pick<PiLaunchOptions, "onLog"> {
   dataDirectory: string;
   bridge: DirectorBridge;
   world: WorldBinding;

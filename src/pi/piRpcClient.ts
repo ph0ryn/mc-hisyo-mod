@@ -18,6 +18,7 @@ export interface PiLaunchOptions {
   requestTimeoutMs?: number;
   judgmentTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  onLog?: (event: string, details?: Record<string, unknown>) => void;
 }
 export type PiJudgment = { status: "not_started" } | { status: "settled"; aborted: boolean };
 export class PiRunError extends Error {
@@ -54,6 +55,20 @@ const queueSchema = Type.Object({
   followUp: Type.Array(Type.String()),
 });
 const promptSchema = Type.Object({ disposition: Type.Literal("started") });
+const toolEventFields = {
+  toolCallId: Type.String({ minLength: 1 }),
+  toolName: Type.String({ minLength: 1 }),
+};
+const toolStartSchema = Type.Object({
+  ...toolEventFields,
+  args: Type.Unknown(),
+});
+const toolEndSchema = Type.Object({
+  ...toolEventFields,
+  result: Type.Unknown(),
+  isError: Type.Boolean(),
+  durationMs: Type.Optional(Type.Number({ minimum: 0 })),
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -186,6 +201,10 @@ class PiRpcClient extends EventEmitter {
       signal.throwIfAborted();
       await this.#gate();
       signal.throwIfAborted();
+      this.#options.onLog?.("pi.ready", {
+        provider: this.#options.model.provider,
+        model: this.#options.model.id,
+      });
     } catch (error) {
       this.#fail(error);
       throw error;
@@ -231,6 +250,7 @@ class PiRpcClient extends EventEmitter {
       const ack = await this.#request("prompt", { message }, () => {
         // write(false) still submits; never retry a frame after backpressure.
         slot.sent = true;
+        this.#options.onLog?.("pi.prompt_submitted");
         slot.timer = setTimeout(
           () => this.#fail(new Error("Pi judgment did not settle")),
           this.#options.judgmentTimeoutMs ?? 300_000,
@@ -337,9 +357,26 @@ class PiRpcClient extends EventEmitter {
       if (!Check(settledSchema, value) || !slot?.sent || slot.sawSettled)
         throw new Error("Unexpected Pi settlement");
       slot.sawSettled = true;
+      this.#options.onLog?.("pi.agent_settled", { aborted: value.aborted });
       slot.terminal.resolve({ aborted: value.aborted });
+    } else if (value.type === "tool_execution_start") {
+      if (!Check(toolStartSchema, value)) throw new Error("Invalid Pi tool execution start");
+      this.#options.onLog?.(value.type, {
+        toolCallId: value.toolCallId,
+        toolName: value.toolName,
+        args: value.args,
+      });
+    } else if (value.type === "tool_execution_end") {
+      if (!Check(toolEndSchema, value)) throw new Error("Invalid Pi tool execution end");
+      this.#options.onLog?.(value.isError ? "tool_execution_error" : value.type, {
+        toolCallId: value.toolCallId,
+        toolName: value.toolName,
+        isError: value.isError,
+        durationMs: value.durationMs,
+        result: value.result,
+      });
     }
-    // Assistant prose, agent_end and other Pi events are deliberately not game output.
+    // Assistant prose, raw stderr and unrelated RPC fields are deliberately not logged.
   }
 
   #fail(cause: unknown): void {

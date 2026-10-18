@@ -24,7 +24,7 @@ const resources: DirectorRuntimePorts = {
     return () => clearInterval(timer);
   },
 };
-interface DirectorRuntimeOptions {
+interface DirectorRuntimeOptions extends Pick<JudgmentSchedulerOptions, "onLog"> {
   options: CliOptions;
   homeDirectory: string;
   bundledExtension: string;
@@ -37,7 +37,7 @@ export async function startDirectorRuntime(
   input: DirectorRuntimeOptions,
   ports = resources,
 ): Promise<BridgeRuntime | undefined> {
-  const { options, homeDirectory, bundledExtension, signal, onFault } = input;
+  const { options, homeDirectory, bundledExtension, signal, onFault, onLog } = input;
   if (options.help) return;
   signal.throwIfAborted();
   const config = options.bridgeOnly
@@ -96,6 +96,7 @@ export async function startDirectorRuntime(
         bridge: base.bridge,
         connection: base.connection,
         bundledExtension,
+        ...(onLog ? { onLog } : {}),
       });
       scheduler.on("fault", onFault);
       signal.throwIfAborted();

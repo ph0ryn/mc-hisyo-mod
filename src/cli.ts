@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { cliErrorMessage, parseOptions, usage } from "./cliOptions.js";
+import { writeCliLog } from "./cliLog.js";
 import type { BridgeRuntime } from "./runtime/bridgeRuntime.js";
 
 async function main(): Promise<void> {
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
   process.stdout.on("error", onFault);
+  process.stderr.on("error", onFault);
   let runtime: BridgeRuntime | undefined;
   const errors: unknown[] = [];
   try {
@@ -31,8 +33,33 @@ async function main(): Promise<void> {
       bundledExtension: fileURLToPath(new URL("./directorBridge.mjs", import.meta.url)),
       signal: stop.signal,
       onFault,
+      onLog: writeCliLog,
     });
     stop.signal.throwIfAborted();
+    runtime!.bridge.on("attach", (world) =>
+      writeCliLog("game.attached", {
+        ...world.binding,
+        language: world.language,
+        paused: world.paused,
+      }),
+    );
+    runtime!.bridge.on("detach", (binding) => writeCliLog("game.detached", binding));
+    runtime!.bridge.on("status", (world) =>
+      writeCliLog("game.status", { ...world.binding, paused: world.paused }),
+    );
+    runtime!.bridge.on("judgmentRequested", (batch) =>
+      writeCliLog("judgment.requested", {
+        ...batch.binding,
+        initial: batch.worldStart,
+        poll: batch.poll,
+        playerMessages: batch.playerMessages,
+        hooks: batch.hooks.map((hook) => hook.id),
+        observations: batch.observations.length,
+      }),
+    );
+    runtime!.bridge.on("runInvalidated", (binding, reason) =>
+      writeCliLog("judgment.invalidated", { ...binding, reason }),
+    );
     process.stdout.write(
       `Bridge ready at 127.0.0.1:${runtime!.connection.port}${options.bridgeOnly ? " (bridge-only)" : ""}.\n`,
     );
@@ -48,6 +75,7 @@ async function main(): Promise<void> {
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
       process.stdout.off("error", onFault);
+      process.stderr.off("error", onFault);
     }
   }
   if (fatalError && !errors.includes(fatalError)) errors.unshift(fatalError);
