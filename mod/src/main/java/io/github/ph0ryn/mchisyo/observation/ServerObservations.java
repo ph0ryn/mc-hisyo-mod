@@ -259,7 +259,7 @@ public final class ServerObservations {
         if (observations != null && observations.scoped(player)) {
             Map<String, Object> data = Map.of("advancementId", advancementId, "criterion", criterion,
                     "afterDone", afterDone, "hasDisplay", hasDisplay);
-            SnapshotDeltaTracker.advancementEvents(granted, beforeDone, afterDone)
+            SnapshotDeltaTracker.advancementEvents(advancementId, granted, beforeDone, afterDone)
                     .forEach(name -> observations.emit(player, name, data));
         }
     }

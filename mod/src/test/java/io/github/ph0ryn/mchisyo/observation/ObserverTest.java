@@ -292,11 +292,11 @@ public final class ObserverTest {
         assertEquals("night", SnapshotDeltaTracker.clockPhase(12000), "first night tick");
         assertEquals("night", SnapshotDeltaTracker.clockPhase(-1), "negative day time floorMod");
         assertEquals("day", SnapshotDeltaTracker.clockPhase(-24000), "negative whole day");
-        assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents(false, false, true), "failed grant is not achievement");
-        assertEquals(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents(true, true, true), "no repeated completion");
+        assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents("minecraft:story/smelt_iron", false, false, true), "failed grant is not achievement");
+        assertEquals(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents("minecraft:story/smelt_iron", true, true, true), "no repeated completion");
         assertEquals(List.of("advancement_criterion_granted", "advancement_completed"),
-                SnapshotDeltaTracker.advancementEvents(true, false, true), "new criterion plus done edge");
-        assertEquals(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents(true, false, false), "partial criterion not completed");
+                SnapshotDeltaTracker.advancementEvents("minecraft:story/smelt_iron", true, false, true), "new criterion plus done edge");
+        assertEquals(List.of("advancement_criterion_granted"), SnapshotDeltaTracker.advancementEvents("minecraft:story/smelt_iron", true, false, false), "partial criterion not completed");
         PlayerSnapshot dimension = snapshot(201, 2, "minecraft:nether_wastes", false, "minecraft:the_nether", AIR);
         assertTrue(tracker.worldSampleDue(PLAYER, dimension), "dimension change samples immediately");
         assertEquals(List.of("status_effects_sampled", "nearby_sampled", "structures_sampled"), tracker.observeWorld(PLAYER,
@@ -309,6 +309,20 @@ public final class ObserverTest {
         tracker.reset(PLAYER); assertTrue(tracker.worldSampleDue(PLAYER, next), "reset world baseline");
         tracker.observeWorld(PLAYER, next, true, true, 12000, false, nearby, structures, effects, false);
         tracker.clear(); assertTrue(tracker.worldSampleDue(PLAYER, next), "binding clear world baseline");
+    }
+
+    @Test
+    void recipeUnlocksAreSilent() {
+        for (String id : List.of("minecraft:recipes/root", "minecraft:recipes/building_blocks/yellow_concrete_powder",
+                "example:recipes/tools/hammer")) {
+            assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents(id, true, false, false), id + " criterion excluded");
+            assertEquals(List.of(), SnapshotDeltaTracker.advancementEvents(id, true, false, true), id + " completion excluded");
+        }
+        for (String id : List.of("minecraft:story/smelt_iron", "example:story/root",
+                "example:recipes_unlocked/root", "example:story/recipes/root")) {
+            assertEquals(List.of("advancement_criterion_granted", "advancement_completed"),
+                    SnapshotDeltaTracker.advancementEvents(id, true, false, true), id + " ordinary advancement preserved");
+        }
     }
 
     @Test

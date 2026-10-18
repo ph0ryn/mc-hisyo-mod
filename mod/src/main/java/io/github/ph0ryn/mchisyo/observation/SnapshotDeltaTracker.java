@@ -256,8 +256,8 @@ public final class SnapshotDeltaTracker {
         return Math.floorMod(dayTime, 24000) < 12000 ? "day" : "night";
     }
 
-    public static List<String> advancementEvents(boolean granted, boolean beforeDone, boolean afterDone) {
-        if (!granted) return List.of();
+    public static List<String> advancementEvents(String advancementId, boolean granted, boolean beforeDone, boolean afterDone) {
+        if (!granted || advancementId.contains(":recipes/")) return List.of();
         return !beforeDone && afterDone ? List.of("advancement_criterion_granted", "advancement_completed")
                 : List.of("advancement_criterion_granted");
     }
