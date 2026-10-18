@@ -77,10 +77,11 @@ node dist/cli.mjs --pi /absolute/path/to/pi
 
 引数の正は[parser / usage](<../src/cliOptions.ts>)、設定解決は[directorConfig.ts](<../src/runtime/directorConfig.ts>)。
 
-CLIは時刻付き診断ログを標準エラーへ出す。接続・pause状態、判断要求と取消、Pi ready・prompt送信・settled、
-Toolの開始・引数・結果・エラー・Piが返した実行時間を確認できる。`toolCallId`で開始と結果を対応付ける。
-引数と結果にはプレイヤーの入力やゲーム内テキストを含む。詳細JSONは4,096文字までとし、省略時は`[truncated]`を付ける。
-改行・端末制御文字はescapeし、Piの生stderr・認証情報・RPCの無関係なfieldは転送しない。ログファイルは自動作成しない。
+CLIは時刻付きの人向け診断ログを標準エラーへ出す。接続・pause状態、判断要求と取消、Pi ready・prompt送信・settledを
+文章の見出しで示し、Toolの引数・結果・Piが返した実行時間は項目別に整形する。Tool名とcall IDで開始・完了・失敗を対応付ける。
+繰返しのsession / run IDと空の判断理由は表示しない。Tool結果に`details`がある場合は、重複する`content`ではなく結果本体を表示する。
+引数と結果にはプレイヤーの入力やゲーム内テキストを含む。1回のログ本文は4,096文字までとし、省略時は`[truncated]`を付ける。
+値の改行・端末制御文字はescapeし、Piの生stderr・認証情報・RPCの無関係なfieldは転送しない。ログファイルは自動作成しない。
 
 - `--pi`の既定はPATH上の`pi`。このプロジェクトのPiは`openai/gpt-6-luna`に固定し、グローバルのモデル設定は読み書きしない。
   `--provider` / `--model`を指定する場合も両方が必要で、`openai` / `gpt-6-luna`以外は拒否する。

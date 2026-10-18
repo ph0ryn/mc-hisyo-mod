@@ -1,10 +1,99 @@
-/** Human-readable diagnostics only; never forward raw Pi stderr or RPC envelopes. */
-export function writeCliLog(event: string, details: Record<string, unknown> = {}): void {
-  const json = JSON.stringify(details).replace(
+import { inspect } from "node:util";
+
+function preview(value: unknown): string {
+  const text =
+    typeof value === "string"
+      ? JSON.stringify(value).slice(1, -1)
+      : inspect(value, { colors: false, depth: null, maxArrayLength: null, maxStringLength: null });
+  return text.replace(
     /[\u007f-\u009f\u2028\u2029]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
+}
+
+function describeLog(
+  event: string,
+  details: Record<string, unknown>,
+): [string, Record<string, unknown>] {
+  switch (event) {
+    case "game.attached":
+      return [
+        "Game connected",
+        {
+          World: details.worldId,
+          Player: details.playerId,
+          Language: details.language,
+          State: details.paused ? "Paused" : "Playing",
+        },
+      ];
+    case "game.detached":
+      return ["Game disconnected", { World: details.worldId, Player: details.playerId }];
+    case "game.status":
+      return [details.paused ? "Game paused" : "Game resumed", {}];
+    case "judgment.requested":
+      return [
+        "Judgment requested",
+        {
+          "World start": details.initial ? "Yes" : undefined,
+          "Periodic check": details.poll ? "Yes" : undefined,
+          "Player messages":
+            Array.isArray(details.playerMessages) && details.playerMessages.length
+              ? details.playerMessages
+              : undefined,
+          "Response hooks":
+            Array.isArray(details.hooks) && details.hooks.length ? details.hooks : undefined,
+          Observations: details.observations,
+        },
+      ];
+    case "judgment.invalidated":
+      return [
+        "Judgment cancellation requested",
+        {
+          Reason:
+            typeof details.reason === "string"
+              ? details.reason.replaceAll("_", " ")
+              : details.reason,
+        },
+      ];
+    case "pi.ready":
+      return [`Pi ready (Model: ${preview(details.provider)}/${preview(details.model)})`, {}];
+    case "pi.prompt_submitted":
+      return ["Judgment sent to Pi", {}];
+    case "pi.agent_settled":
+      return [details.aborted ? "Judgment cancelled" : "Judgment finished", {}];
+    case "tool_execution_start":
+    case "tool_execution_end":
+    case "tool_execution_error": {
+      const result = details.result;
+      const status =
+        event === "tool_execution_start"
+          ? "started"
+          : event === "tool_execution_error"
+            ? "failed"
+            : "completed";
+      return [
+        `Tool ${status}: ${preview(details.toolName)} (${preview(details.toolCallId)})`,
+        {
+          Arguments: event === "tool_execution_start" ? details.args : undefined,
+          Duration: typeof details.durationMs === "number" ? `${details.durationMs} ms` : undefined,
+          Result:
+            result && typeof result === "object" && "details" in result ? result.details : result,
+        },
+      ];
+    }
+    default:
+      return [preview(event.replace(/[._]/g, " ")), details];
+  }
+}
+
+/** Human-readable diagnostics only; never forward raw Pi stderr or RPC envelopes. */
+export function writeCliLog(event: string, details: Record<string, unknown> = {}): void {
+  const [title, fields] = describeLog(event, details);
+  const lines = Object.entries(fields)
+    .filter(([, value]) => value !== undefined)
+    .map(([label, value]) => `  ${preview(label)}: ${preview(value).replaceAll("\n", "\n  ")}`);
+  const message = [title, ...lines].join("\n");
   // ponytail: 4,096-character console previews; add opt-in full logs if larger results need inspection.
-  const summary = json.length > 4_096 ? `${json.slice(0, 4_096)}… [truncated]` : json;
-  process.stderr.write(`[${new Date().toISOString()}] ${event} ${summary}\n`);
+  const summary = message.length > 4_096 ? `${message.slice(0, 4_096)}… [truncated]` : message;
+  process.stderr.write(`[${new Date().toISOString()}] ${summary}\n`);
 }
