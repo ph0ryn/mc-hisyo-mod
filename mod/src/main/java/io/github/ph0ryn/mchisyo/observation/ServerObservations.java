@@ -218,7 +218,7 @@ public final class ServerObservations {
 
     // ponytail: equipment is tick-end ID/count only (7 slots), missing component-only/same-tick reversals.
     // World cadence20: <=729 block probes, <=65 entity matches/64 copied, <=256 baseline effects;
-    // nearby is neither sight nor nearest/complete; weather/clock miss subinterval reversals. Widen only after measurement.
+    // nearby filters unobstructed eye rays, not FOV/light/nearest/complete; weather/clock miss subinterval reversals.
     @SuppressWarnings("unchecked")
     private void sampleWorld(ServerPlayer player, PlayerSnapshot snapshot) {
         Map<String, Object> nearby = JSON.fromJson(ServerGameState.nearby(player), Map.class);

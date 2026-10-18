@@ -16,10 +16,17 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.boss.enderdragon.EnderDragonPart;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.level.levelgen.structure.StructureStart;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 /** Server-thread copies from already-loaded data only; no chunk requests or history. */
@@ -40,7 +47,7 @@ public final class ServerGameState {
     public static JsonObject snapshot(ServerPlayer player) {
         ServerLevel level = player.level();
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Server thread required");
-        JsonObject state = new JsonObject(); state.addProperty("version", 1);
+        JsonObject state = new JsonObject(); state.addProperty("version", 2);
         count(state, "tick", level.getGameTime()); count(state, "observedAt", System.currentTimeMillis());
         long day = level.getDayTime(); GameSession.safeCounter(new JsonPrimitive(day), true); state.addProperty("dayTime", day);
         state.addProperty("dimension", id(level.dimension().identifier().toString())); state.add("position", position(player.position()));
@@ -61,13 +68,16 @@ public final class ServerGameState {
     public static JsonObject nearby(ServerPlayer player) {
         ServerLevel level = player.level();
         if (!level.getServer().isSameThread()) throw new IllegalStateException("Server thread required");
-        JsonObject nearby = new JsonObject(); nearby.addProperty("blockRadius", 4); JsonArray blocks = new JsonArray(); boolean complete = true;
+        BlockGetter view = loadedView(level);
+        JsonObject nearby = new JsonObject(); nearby.addProperty("visibility", "unobstructed");
+        nearby.addProperty("blockRadius", 4); JsonArray blocks = new JsonArray(); boolean complete = true;
         BlockPos center = player.blockPosition();
         for (int x = -4; x <= 4; x++) for (int y = -4; y <= 4; y++) for (int z = -4; z <= 4; z++) {
             BlockPos pos = center.offset(x, y, z); if (level.isOutsideBuildHeight(pos)) continue;
             var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
             if (chunk == null) { complete = false; continue; }
-            var block = chunk.getBlockState(pos); if (block.isAir()) continue;
+            var block = chunk.getBlockState(pos);
+            if (block.isAir() || !unobstructed(view, player, Vec3.atCenterOf(pos), pos)) continue;
             JsonObject entry = new JsonObject(); entry.addProperty("blockId", id(BuiltInRegistries.BLOCK.getKey(block.getBlock()).toString()));
             JsonArray coords = new JsonArray(); coords.add(pos.getX()); coords.add(pos.getY()); coords.add(pos.getZ()); entry.add("position", coords); blocks.add(entry);
         }
@@ -77,10 +87,57 @@ public final class ServerGameState {
                 entity -> entity != player && !(entity instanceof EnderDragonPart) && entity.position().distanceToSqr(origin) <= 256, found, 65);
         JsonArray entities = new JsonArray();
         for (int i = 0; i < Math.min(64, found.size()); i++) {
-            Entity entity = found.get(i); JsonObject entry = new JsonObject(); entry.addProperty("entityId", id(entity.getUUID().toString()));
+            Entity entity = found.get(i);
+            if (entity.isSpectator() || entity.isInvisibleTo(player)
+                    || !unobstructed(view, player, entity.getEyePosition(), null)) continue;
+            JsonObject entry = new JsonObject(); entry.addProperty("entityId", id(entity.getUUID().toString()));
             entry.addProperty("entityType", id(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString())); entry.add("position", position(entity.position())); entities.add(entry);
         }
         nearby.addProperty("entitiesTruncated", found.size() > 64); nearby.add("entities", entities); return nearby;
+    }
+
+    /** Native shape queries must never fall back to Level.getBlockState(), which loads chunks. */
+    private static BlockGetter loadedView(ServerLevel level) {
+        return new BlockGetter() {
+            public int getHeight() { return level.getHeight(); }
+            public int getMinY() { return level.getMinY(); }
+            public BlockState getBlockState(BlockPos pos) {
+                if (level.isOutsideBuildHeight(pos)) return Blocks.VOID_AIR.defaultBlockState();
+                var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+                if (chunk == null) return Blocks.STONE.defaultBlockState();
+                var state = chunk.getBlockState(pos);
+                // Pending block-entity NBT is not materialized; unknown dynamic shapes occlude.
+                return state.hasBlockEntity() && !chunk.getBlockEntities().containsKey(pos)
+                        ? Blocks.STONE.defaultBlockState() : state;
+            }
+            public FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
+            public BlockEntity getBlockEntity(BlockPos pos) {
+                var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+                return chunk == null ? null : chunk.getBlockEntities().get(pos);
+            }
+        };
+    }
+
+    // ponytail: conservative center rays, not FOV/lighting; client observation needed for exact perception.
+    private static boolean unobstructed(BlockGetter view, ServerPlayer player, Vec3 target, BlockPos block) {
+        Vec3 eye = player.getEyePosition();
+        if (eye.distanceToSqr(target) > 256) return false;
+        // Native clip checks only traversed cells; moving-piston shapes protrude into adjacent cells.
+        // ponytail: 27 loaded-only probes per ray cell; cache per sample if profiling warrants.
+        if (BlockGetter.traverseBlocks(eye, target, player.level(), (level, pos) -> {
+            for (var neighbor : BlockPos.betweenClosed(pos.offset(-1, -1, -1), pos.offset(1, 1, 1))) {
+                var chunk = level.getChunkSource().getChunkNow(neighbor.getX() >> 4, neighbor.getZ() >> 4);
+                if (chunk != null && chunk.getBlockState(neighbor).is(Blocks.MOVING_PISTON)) return true;
+            }
+            return null;
+        }, level -> false)) return false;
+        var outline = view.clip(new ClipContext(eye, target, ClipContext.Block.OUTLINE, ClipContext.Fluid.ANY, player));
+        if (block == null ? outline.getType() != HitResult.Type.MISS
+                : outline.getType() != HitResult.Type.BLOCK || !outline.getBlockPos().equals(block)) return false;
+        // OUTLINE misses moving-piston shapes; COLLIDER alone misses opaque non-colliders.
+        var collider = view.clip(new ClipContext(eye, target, ClipContext.Block.COLLIDER, ClipContext.Fluid.ANY, player));
+        return collider.getType() == HitResult.Type.MISS
+                || block != null && collider.getBlockPos().equals(block);
     }
 
     public static Map<String, Object> containingStructures(ServerPlayer player) {

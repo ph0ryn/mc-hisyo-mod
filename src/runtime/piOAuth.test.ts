@@ -1,5 +1,14 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, expect, test, vi } from "vite-plus/test";
@@ -27,6 +36,13 @@ afterAll(() => rmSync(directory, { recursive: true }));
 
 test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
   const world = { worldId: "w", playerId: "p", worldSessionId: "s" };
+  const hash = createHash("sha256")
+    .update(JSON.stringify([world.worldId, world.playerId]))
+    .digest("hex");
+  const scope = join(directory, "state", "pi", hash);
+  mkdirSync(scope, { recursive: true, mode: 0o700 });
+  const legacy = join(scope, "session.jsonl");
+  writeFileSync(legacy, "old hidden-world transcript", { mode: 0o600 });
   const bridge = Object.assign(new EventEmitter(), {
     isAgentReady: false,
     currentWorld: { binding: world, language },
@@ -52,6 +68,9 @@ test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
     privateAuth = join(launch.env.PI_CODING_AGENT_DIR!, "auth.json");
     expect(JSON.parse(readFileSync(privateAuth, "utf8")).openai.key).toBe("startup-token");
     expect(launch.env.MC_HISYO_MODEL_API_KEY).toBeUndefined();
+    const sessionPath = launch.args![launch.args!.indexOf("--session") + 1]!;
+    expect(sessionPath).toBe(join(realpathSync(scope), "session-observable-v1.jsonl"));
+    expect(readFileSync(legacy, "utf8")).toBe("old hidden-world transcript");
     promptPath = launch.args![launch.args!.indexOf("--system-prompt") + 1]!;
     expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
     expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");

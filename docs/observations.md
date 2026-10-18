@@ -51,8 +51,10 @@ var observations = ServerObservations.register(isScopedPlayer, sink); // 最小�
 - entity useはvanillaの後続検証より前の**試行**。交易・手懐け・騎乗・menu表示の成功とは扱わない。
   callbackは`PASS`を返し、通常の操作を横取りしない。
 - effectsの初回sampleはbaseline。無期限durationは`-1`、装備はID / countのみでcomponent変化を捕捉しない。
-- 周辺sampleは20 ticksごと、block半径4（最大729座標）、entity半径16（最大64件、65件目で打切り）。
-  未ロードchunkを要求せず、視認・近い順・完全な世界観測ではない。
+- 周辺sampleは20 ticksごと、block半径4（最大729座標）、entity半径16（遮蔽判定前の最大64候補、65件目で打切り）。
+  snapshotと同じ[loaded-only遮蔽判定](<gameState.md#nearby>)を使い、`visibility: "unobstructed"`を付ける。
+  壁裏・床下・プレイヤーから不可視のentityを除く。FOV・明るさ・近い順・完全な視認の保証ではない。
+  旧履歴のmarkerなしsampleは参照時にblock/entity配列を伏せ、coverageを不明として返す。元のDBは変更しない。
 - 包含構造物はloaded chunkのbounded metadataだけで、coverageは常に不完全。locate・生成・遠方座標探索をしない。
 - 天候はraw rain / thunder、半日phaseはraw day time由来で、明るさや体感の天候ではない。
 - advancementは元のawardを一度だけ呼び、その成功と前後の完了状態を観測する。進捗の再演や過去分の再送はしない。

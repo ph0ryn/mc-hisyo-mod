@@ -17,7 +17,7 @@ export const snapshotLimits = { blockRadius: 4, entityRadius: 16, maxEntities: 6
 /** Required ID/count baseline; unknown neighborhood coverage must be explicit. */
 export const GameSnapshotSchema = Type.Object(
   {
-    version: Type.Literal(1),
+    version: Type.Literal(2),
     tick: counter,
     observedAt: counter,
     dayTime: signedInteger,
@@ -57,6 +57,7 @@ export const GameSnapshotSchema = Type.Object(
     ),
     nearby: Type.Object(
       {
+        visibility: Type.Literal("unobstructed"),
         blockRadius: Type.Literal(snapshotLimits.blockRadius),
         blocksComplete: Type.Boolean(),
         blocks: Type.Array(

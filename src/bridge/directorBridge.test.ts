@@ -427,6 +427,20 @@ test("captured displayed ACK is recorded before stale fence; storage failure rem
   expect(h.bridge.readyWorld).toBeUndefined();
 });
 
+test.each(["version1", "missing-visibility"])("rejects unsafe %s snapshots", async (kind) => {
+  const h = await fixture();
+  const binding = await h.bridge.beginRun();
+  const pending = h.agent.client
+    .call("game.state.get", { ...binding, query: {} })
+    .catch((error: unknown) => error);
+  const state =
+    kind === "version1"
+      ? { ...snapshot, version: 1 }
+      : { ...snapshot, nearby: { ...snapshot.nearby, visibility: undefined } };
+  h.native[0]!.result.resolve({ ...binding, state });
+  expect(await pending).toMatchObject({ code: -32603 });
+});
+
 test.each(["malformed", "foreign"])(
   "fulfilled %s state stays fatal under cancellation",
   async (kind) => {

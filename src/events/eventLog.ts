@@ -54,6 +54,16 @@ function decodeRow(row: Record<string, SQLOutputValue>, catalog: EventCatalog): 
     ("seq" in value && row.seq !== value.seq)
   )
     throw new Error("Invalid stored event metadata");
+  if (value.event === "nearby_sampled" && value.data.visibility !== "unobstructed") {
+    // Legacy samples included buried blocks and wall-hidden entities. Keep the stored row intact.
+    value.data = {
+      ...value.data,
+      blocks: [],
+      blocksComplete: false,
+      entities: [],
+      entitiesTruncated: true,
+    };
+  }
   if (row.gap_from === null && row.gap_to === null)
     return { id: row.id, observation: value } as StoredHistory;
   if (
@@ -129,6 +139,8 @@ export class EventLog {
   /** Persist first. A returned gap is evidence of missing observations, never inferred events. */
   append(observation: GameEvent): StoredEvent {
     this.catalog.validateObservation(observation);
+    if (observation.event === "nearby_sampled" && observation.data.visibility !== "unobstructed")
+      throw new Error("nearby_sampled requires unobstructed visibility; update the Mod");
     const { worldId, playerId, worldSessionId, seq } = observation;
     const last = this.db
       .prepare(`

@@ -403,11 +403,12 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
   {
     name: "nearby_sampled",
     description:
-      "Every 20 ticks: loaded non-air blocks in radius4 cube and up to64 entities in radius16 sphere. Not sight, nearest order, or a complete world sample; may miss subinterval changes.",
+      "Every 20 ticks: conservative unobstructed eye-line samples from loaded blocks in radius4 cube and up to64 entity candidates in radius16 sphere. Not FOV, lighting, nearest order or complete sight; glass/fluids may occlude. Legacy samples without visibility are redacted on history reads; empty arrays do not prove absence.",
     observation: "snapshot_delta",
     dataSchema: Type.Object(
       {
         sampleIntervalTicks,
+        visibility: Type.Optional(Type.Literal("unobstructed")),
         blockRadius: Type.Literal(4),
         blocksComplete: Type.Boolean(),
         blocks: Type.Array(

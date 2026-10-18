@@ -32,7 +32,7 @@ Modが観測した事実を共通イベント形式でCLIへ送り、CLI側で�
 
 | 種類 | 内容 |
 | --- | --- |
-| 周辺履歴 | 範囲限定のentity / block、移動sampleのbiome、loadedな包含構造物metadata。視認・発見の証明ではない |
+| 周辺履歴 | 遮蔽を除いた範囲限定のentity / block、移動sampleのbiome、loadedな包含構造物metadata。完全な視認・発見の証明ではない |
 | チェスト履歴 | 開けたチェストの位置、中身、最終確認時刻 |
 | 死亡履歴 | 死亡した位置、ディメンション、時刻 |
 
@@ -50,7 +50,15 @@ menu初期snapshot・slot listener・実際のcloseを記録するが、全trans
 - 発見済みの情報は記憶を検索して案内できる。
 - レシピや必要資材などの一般知識は相談に利用する。
 
-これは指示による制御であり、ネタバレを完全に防ぐ技術的な保証ではない。
+周辺のblock/entityは[遮蔽判定](<gameState.md#nearby>)をproducerで行い、snapshotと20 ticksごとの履歴に共用する。
+旧`nearby_sampled`に`visibility`がない場合、履歴参照時に配列を空にし、`blocksComplete: false`・`entitiesTruncated: true`で不明を示す。
+元の履歴行・ID・sequenceは変更しない。新しいlive sampleはmarkerが必須で、snapshotはversion 2のみを受け付けるためCLIとModを一緒に更新する。
+
+古い会話に残る位置情報を再利用しないよう、Piは同じworld/player scope・同じ所有lockの下で新しい会話ファイルを使う。
+旧会話ファイルは保存するがresumeしない。以前の会話の文脈は引き継がず、イベント履歴とhookは維持する。
+更新後の会話は従来どおり再接続で継続する。既存hookの条件や理由に記載済みの情報までは消去しない。
+
+画面の向き・明るさや、包含構造物metadataなどは別の境界であり、ネタバレを完全に防ぐ技術的な保証ではない。
 
 ## 一次資料
 

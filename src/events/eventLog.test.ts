@@ -97,6 +97,57 @@ test("history decodes previous-session CLI records alongside game history", () =
   });
 });
 
+test("history hides legacy nearby locations without rewriting stored data", () => {
+  const nearby = {
+    ...binding,
+    seq: 1,
+    tick: 4,
+    observedAt: 100,
+    event: "nearby_sampled",
+    dimension: "minecraft:overworld",
+    position: [0, 64, 0],
+    data: {
+      sampleIntervalTicks: 20,
+      blockRadius: 4,
+      blocksComplete: true,
+      blocks: [{ blockId: "minecraft:diamond_ore", position: [0, 60, 0] }],
+      entityRadius: 16,
+      entitiesTruncated: false,
+      entities: [{ entityId: "hidden", entityType: "minecraft:zombie", position: [3, 64, 0] }],
+    },
+  };
+  const legacy = { ...row(1, nearby), seq: 1, event: nearby.event };
+  const original = legacy.observation_json;
+  const f = log(port([[{ id: 1 }], [legacy], [{ found: 0 }]]));
+  const result = f.log.search({ worldId: binding.worldId, playerId: binding.playerId }).events[0]!;
+  expect(result.observation).toEqual({
+    ...nearby,
+    data: {
+      ...nearby.data,
+      blocksComplete: false,
+      blocks: [],
+      entitiesTruncated: true,
+      entities: [],
+    },
+  });
+  expect(legacy.observation_json).toBe(original);
+  const sink = log();
+  expect(() => sink.log.append({ ...nearby, position: [0, 64, 0] })).toThrow(/unobstructed/);
+  expect(sink.calls).toEqual([]);
+
+  const filtered = { ...nearby, data: { ...nearby.data, visibility: "unobstructed" } };
+  const g = log(
+    port([
+      [{ id: 1 }],
+      [{ ...legacy, observation_json: JSON.stringify(filtered) }],
+      [{ found: 0 }],
+    ]),
+  );
+  expect(
+    g.log.search({ worldId: binding.worldId, playerId: binding.playerId }).events[0]!.observation,
+  ).toEqual(filtered);
+});
+
 test("stored CLI corruption fails rather than inventing game observations", () => {
   for (const observation of [
     { ...input, seq: 1 },

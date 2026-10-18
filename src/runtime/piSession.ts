@@ -97,7 +97,8 @@ function prepareFiles(options: PiSessionOptions, language: string) {
     // Pi restores the header cwd on resume. Keep this EMPTY cwd stable, not per-launch.
     const cwd = new PrivateDataDirectory(join(scope.path, "cwd"));
     if (readdirSync(cwd.path).length) throw new Error("Pi session cwd must remain empty");
-    const sessionPath = join(scope.path, "session.jsonl");
+    // Keep the pre-visibility transcript on disk, but never resume its hidden-world knowledge.
+    const sessionPath = join(scope.path, "session-observable-v1.jsonl");
     const fd = openSync(
       sessionPath,
       constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW,
