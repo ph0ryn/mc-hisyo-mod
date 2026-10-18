@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Server } from "node:net";
 import { expect, onTestFinished, test, vi } from "vite-plus/test";
 import type { EventLog } from "../events/eventLog.js";
+import type { HistorySummaries } from "../storage/historySummaries.js";
 import type { ResponseHook, ResponseHooks } from "../hooks/responseHooks.js";
 import type { GameEvent } from "../protocol/gameEvent.js";
 import extension from "../pi/directorBridge.js";
@@ -99,6 +100,11 @@ async function fixture(supportedEvents: string[] = []) {
     {
       token: "a".repeat(43),
       eventLog,
+      history: {
+        context: () => "",
+        next: () => undefined,
+        save: () => {},
+      } as unknown as HistorySummaries,
       hooks: { db, match: () => matchedHooks } as unknown as ResponseHooks,
     },
     (register) => {

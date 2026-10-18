@@ -20,6 +20,7 @@ function optionalStat(path: string): BigIntStats | undefined {
 export class PrivateDataDirectory {
   readonly path: string;
   readonly databasePath: string;
+  readonly summaryDatabasePath: string;
   readonly connectionPath: string;
   readonly #identity: FileIdentity;
 
@@ -43,6 +44,7 @@ export class PrivateDataDirectory {
     this.path = realpathSync(requested);
     this.#identity = stat;
     this.databasePath = join(this.path, "history.sqlite");
+    this.summaryDatabasePath = join(this.path, "summaries.sqlite");
     this.connectionPath = join(this.path, "connection.json");
     this.assertCurrent();
   }
@@ -68,16 +70,18 @@ export class PrivateDataDirectory {
 
   assertStorageFiles(): void {
     this.assertCurrent();
-    for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-      const stat = optionalStat(`${this.databasePath}${suffix}`);
-      if (
-        stat &&
-        (!stat.isFile() ||
-          stat.uid !== this.#identity.uid ||
-          (stat.mode & 0o777n) !== 0o600n ||
-          stat.nlink !== 1n)
-      )
-        throw new Error("SQLite paths must be owned regular 0600 files with a single link.");
+    for (const databasePath of [this.databasePath, this.summaryDatabasePath]) {
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+        const stat = optionalStat(`${databasePath}${suffix}`);
+        if (
+          stat &&
+          (!stat.isFile() ||
+            stat.uid !== this.#identity.uid ||
+            (stat.mode & 0o777n) !== 0o600n ||
+            stat.nlink !== 1n)
+        )
+          throw new Error("SQLite paths must be owned regular 0600 files with a single link.");
+      }
     }
   }
 

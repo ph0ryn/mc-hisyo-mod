@@ -20,14 +20,60 @@ const source: HistorySource = {
   input: "RAW_PROJECTION_NOT_CONTEXT",
 };
 
-/** SQL capture/port tests, not a simulated SQLite durability claim. */
+function legacyRow(overrides: Record<string, SQLOutputValue> = {}) {
+  return {
+    id: 1,
+    world_id: scope.worldId,
+    player_id: scope.playerId,
+    source_after: source.after,
+    source_through: source.through,
+    source_json: JSON.stringify(source),
+    summary: "legacy summary",
+    created_at: 200,
+    model: "openai/gpt-6-luna",
+    requested_tier: "fast",
+    prompt_version: 1,
+    ...overrides,
+  };
+}
+
+/** Independent SQL capture ports, not a simulated SQLite durability claim. */
 function fixture() {
   const rows: Record<string, SQLOutputValue>[] = [];
+  const legacy: Record<string, SQLOutputValue>[] = [];
   const events: Record<string, SQLOutputValue>[] = [];
   const sql: string[] = [];
+  const rawSql: string[] = [];
   const inserts: SQLInputValue[][] = [];
   let insertFailure: Error | undefined;
   let max = 100;
+  const rawDb = {
+    exec: () => {
+      throw new Error("Summary must not start a raw-history transaction");
+    },
+    prepare: (text: string) => {
+      rawSql.push(text);
+      return {
+        get: () =>
+          text.includes("sqlite_master")
+            ? legacy.length
+              ? { name: "history_summaries" }
+              : undefined
+            : text.includes("MAX(id)")
+              ? { id: max }
+              : { found: 0 },
+        all: (...params: SQLInputValue[]) =>
+          text.includes("FROM history_summaries")
+            ? legacy
+            : events
+                .filter(
+                  (row) =>
+                    Number(row.id) > Number(params[2]) && Number(row.id) <= Number(params[3]),
+                )
+                .slice(0, Number(params.at(-1))),
+      };
+    },
+  } as unknown as DatabaseSync;
   const db = {
     exec: (text: string) => {
       sql.push(text);
@@ -35,21 +81,19 @@ function fixture() {
     prepare: (text: string) => {
       sql.push(text);
       return {
-        get: () =>
-          text.includes("MAX(id)")
-            ? { id: max }
-            : text.includes(" AS found")
-              ? { found: 0 }
-              : rows.at(-1),
+        get: (...params: SQLInputValue[]) => {
+          const scoped = rows.filter(
+            (row) => row.world_id === params[0] && row.player_id === params[1],
+          );
+          return text.includes("source_after = ?")
+            ? scoped.find((row) => row.source_after === params[2])
+            : scoped.at(-1);
+        },
         all: (...params: SQLInputValue[]) =>
-          text.includes("FROM history_summaries")
-            ? rows.toReversed().slice(0, 5)
-            : events
-                .filter(
-                  (row) =>
-                    Number(row.id) > Number(params[2]) && Number(row.id) <= Number(params[3]),
-                )
-                .slice(0, Number(params.at(-1))),
+          rows
+            .filter((row) => row.world_id === params[0] && row.player_id === params[1])
+            .toReversed()
+            .slice(0, 5),
         run: (...params: SQLInputValue[]) => {
           if (insertFailure) throw insertFailure;
           inserts.push(params);
@@ -61,8 +105,23 @@ function fixture() {
             source_json,
             summary,
             created_at,
-          ] = params as [string, string, number, number, string, string, number];
+            model = "openai/gpt-6-luna",
+            requested_tier = "fast",
+            prompt_version = 1,
+          ] = params as [
+            string,
+            string,
+            number,
+            number,
+            string,
+            string,
+            number,
+            string?,
+            string?,
+            number?,
+          ];
           rows.push({
+            id: rows.length + 1,
             world_id,
             player_id,
             source_after,
@@ -70,23 +129,27 @@ function fixture() {
             source_json,
             summary,
             created_at,
-            model: "openai/gpt-6-luna",
-            requested_tier: "fast",
-            prompt_version: 1,
+            model,
+            requested_tier,
+            prompt_version,
           });
         },
       };
     },
   } as unknown as DatabaseSync;
-  const log = new EventLog(db, new EventCatalog(gameEventDefinitions));
+  const log = new EventLog(rawDb, new EventCatalog(gameEventDefinitions));
   return {
-    history: new HistorySummaries(log),
+    history: new HistorySummaries(log, db),
+    reopen: () => new HistorySummaries(log, db),
     log,
+    db,
     rows,
+    legacy,
     events,
     sql,
+    rawSql,
     inserts,
-    fail: (error: Error) => {
+    fail: (error: Error | undefined) => {
       insertFailure = error;
     },
     max: (id: number) => {
@@ -110,7 +173,69 @@ test("summary and cursor share one atomic insert, with explicit source provenanc
   );
   expect(f.sql.at(-1)).toBe("ROLLBACK");
   expect(f.inserts).toHaveLength(1);
-  expect(f.sql.join("\n")).not.toMatch(/INSERT INTO events|DELETE|UPDATE events/);
+  expect(f.sql.join("\n")).not.toMatch(/\bevents\b|DELETE/);
+  expect(f.rawSql.join("\n")).not.toMatch(/INSERT|BEGIN|COMMIT|ROLLBACK/);
+});
+
+test("legacy rows copy into the independent store once without mutating raw history", () => {
+  const f = fixture();
+  const row = legacyRow();
+  f.legacy.push(row);
+  const history = f.reopen();
+  expect(history.cursor(scope)).toBe(10);
+  expect(history.context(scope)).toContain("legacy summary");
+  expect(f.rows[0]).toEqual(row);
+  f.reopen();
+  expect(f.inserts).toHaveLength(1);
+  expect(f.legacy).toEqual([row]);
+  expect(f.rawSql.join("\n")).not.toMatch(/INSERT|DELETE|UPDATE|BEGIN|COMMIT|ROLLBACK/);
+});
+
+test("invalid, conflicting or discontinuous legacy rows fail with summary rollback", () => {
+  for (const invalid of [
+    { model: "other-model" },
+    { requested_tier: "default" },
+    { prompt_version: 2 },
+    { created_at: -1 },
+    { world_id: "" },
+    { source_json: "{}" },
+    { source_through: 11 },
+    { summary: " " },
+  ]) {
+    const f = fixture();
+    f.legacy.push(legacyRow(invalid));
+    expect(() => f.reopen()).toThrow();
+    expect(f.sql.at(-1)).toBe("ROLLBACK");
+    expect(f.inserts).toHaveLength(0);
+  }
+  const conflict = fixture();
+  conflict.history.save(scope, source, "different summary", 200);
+  conflict.legacy.push(legacyRow());
+  expect(() => conflict.reopen()).toThrow(/Conflicting/);
+  expect(conflict.sql.at(-1)).toBe("ROLLBACK");
+  const gap = fixture();
+  gap.legacy.push(
+    legacyRow({ source_after: 5, source_json: JSON.stringify({ ...source, after: 5 }) }),
+  );
+  expect(() => gap.reopen()).toThrow(/cursor/);
+  expect(gap.sql.at(-1)).toBe("ROLLBACK");
+});
+
+test("legacy import failures propagate and can be retried without consuming the source", () => {
+  const f = fixture();
+  f.legacy.push(legacyRow());
+  f.fail(new Error("import failure"));
+  expect(() => f.reopen()).toThrow("import failure");
+  expect(f.sql.at(-1)).toBe("ROLLBACK");
+  expect(f.rows).toEqual([]);
+  f.fail(undefined);
+  expect(f.reopen().cursor(scope)).toBe(10);
+  expect(f.legacy).toHaveLength(1);
+});
+
+test("the raw event connection cannot double as the summary store", () => {
+  const f = fixture();
+  expect(() => new HistorySummaries(f.log, f.log.db)).toThrow(/separate/);
 });
 
 test("bad completion or failed insert never moves the stored cursor", () => {

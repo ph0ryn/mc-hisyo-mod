@@ -7,6 +7,8 @@ import { ResponseHooks } from "../hooks/responseHooks.js";
 import { protocolVersion } from "../protocol/bridge.js";
 import { gameEventDefinitions } from "../protocol/gameEvent.js";
 import { openDatabase } from "../storage/database.js";
+import { HistorySummaries } from "../storage/historySummaries.js";
+import { openSummaryDatabase } from "../storage/summaryDatabase.js";
 import { ConnectionFile, type ConnectionInfo } from "./connectionFile.js";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
 
@@ -26,6 +28,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
   const directory = new PrivateDataDirectory(options.dataDirectory);
   const discovery = new ConnectionFile(directory);
   let db: DatabaseSync | undefined;
+  let summaryDb: DatabaseSync | undefined;
   let bridge: DirectorBridge | undefined;
   let shutdown: Promise<void> | undefined;
   const close = (): Promise<void> => {
@@ -36,10 +39,12 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
       } catch (error) {
         errors.push(error);
       }
-      try {
-        db?.close();
-      } catch (error) {
-        errors.push(error);
+      for (const database of [summaryDb, db]) {
+        try {
+          database?.close();
+        } catch (error) {
+          errors.push(error);
+        }
       }
       try {
         discovery.close();
@@ -52,12 +57,15 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
   try {
     directory.assertStorageFiles();
     db = openDatabase(directory.databasePath);
+    summaryDb = openSummaryDatabase(directory.summaryDatabasePath);
     directory.assertStorageFiles();
     const catalog = new EventCatalog(gameEventDefinitions);
+    const eventLog = new EventLog(db, catalog);
     const token = randomBytes(32).toString("base64url");
     bridge = new DirectorBridge({
       token,
-      eventLog: new EventLog(db, catalog),
+      eventLog,
+      history: new HistorySummaries(eventLog, summaryDb),
       hooks: new ResponseHooks(db, catalog),
     });
     bridge.on("fault", options.onFault);

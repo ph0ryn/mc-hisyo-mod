@@ -522,15 +522,15 @@ test("only valid bound displayed:true ACKs become exact HUD facts", () => {
   expect(() => validateDirectorActivity({ ...input, position: [0, 0, 0] })).toThrow();
 });
 
-test("schema 0 creates nullable-seq events and AI memory; v3 reopens without table changes", () => {
+test("schema 0 creates only raw nullable-seq events and hooks at version 2", () => {
   const fresh = port([[{ user_version: 0 }]]);
   initializeDatabase(fresh.db);
-  expect(fresh.transactions[1]).toContain("seq INTEGER CHECK(seq IS NULL OR seq > 0)");
-  expect(fresh.transactions[1]).toContain("PRAGMA user_version = 2;");
-  expect(fresh.transactions.join("\n")).toContain("PRAGMA user_version = 3;");
-  const current = port([[{ user_version: 3 }]]);
-  initializeDatabase(current.db);
-  expect(current.transactions).toHaveLength(1);
+  const sql = fresh.transactions.join("\n");
+  expect(sql).toContain("seq INTEGER CHECK(seq IS NULL OR seq > 0)");
+  expect(sql).toContain("CREATE TABLE response_hooks");
+  expect(sql).toContain("PRAGMA user_version = 2;");
+  expect(sql).not.toContain("history_summaries");
+  expect(sql).not.toContain("PRAGMA user_version = 3");
 });
 
 test("actual scheduler stores request reasons before judge and stops on storage failure", async () => {
@@ -695,13 +695,13 @@ test("lifecycle recording failures propagate without retry or fabricated success
   expect(f.transactions).toEqual([]);
 });
 
-test("v2 upgrades add AI memory without replacing raw events or hooks", () => {
-  const p = port([[{ user_version: 2 }]]);
-  initializeDatabase(p.db);
-  const sql = p.transactions.join("\n");
-  expect(sql).toContain("CREATE TABLE history_summaries");
-  expect(sql).toContain("PRAGMA user_version = 3");
-  expect(sql).not.toMatch(/DROP|DELETE|CREATE TABLE events|CREATE TABLE response_hooks/);
+test("raw v2 and legacy v3 reopen without changing schemas or existing summary rows", () => {
+  for (const version of [2, 3]) {
+    const p = port([[{ user_version: version }]]);
+    initializeDatabase(p.db);
+    expect(p.transactions).toHaveLength(1);
+    expect(p.transactions.join("\n")).not.toMatch(/CREATE|DROP|DELETE|user_version/);
+  }
 });
 
 test("v1 and unknown schema versions fail before even write-affecting PRAGMAs", () => {

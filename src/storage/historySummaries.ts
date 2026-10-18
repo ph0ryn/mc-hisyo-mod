@@ -1,4 +1,4 @@
-import type { SQLOutputValue } from "node:sqlite";
+import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { compactHistory, type HistorySource } from "../events/compactHistory.js";
@@ -9,6 +9,20 @@ import {
   summaryInputBytes,
   validateSummaryText,
 } from "../protocol/history.js";
+import { summaryTransaction } from "./summaryDatabase.js";
+
+const summaryColumns = [
+  "world_id",
+  "player_id",
+  "source_after",
+  "source_through",
+  "source_json",
+  "summary",
+  "created_at",
+  "model",
+  "requested_tier",
+  "prompt_version",
+] as const;
 
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const SourceSchema = Type.Object(
@@ -42,6 +56,9 @@ function decode(
     row.player_id !== scope.playerId ||
     typeof row.source_json !== "string" ||
     typeof row.summary !== "string" ||
+    !Check(counter, row.id) ||
+    row.id === 0 ||
+    !Check(counter, row.created_at) ||
     row.model !== "openai/gpt-6-luna" ||
     row.requested_tier !== "fast" ||
     row.prompt_version !== 1
@@ -57,20 +74,57 @@ function decode(
 
 /** Derived memory never enters the raw event log or its source cursor namespace. */
 export class HistorySummaries {
-  constructor(readonly log: EventLog) {}
+  constructor(
+    readonly log: EventLog,
+    readonly db: DatabaseSync,
+  ) {
+    if (db === log.db) throw new Error("History summaries require a separate database connection");
+    this.#importLegacy();
+  }
+
+  /** Copy only: raw v3 rows remain available to older compatible readers and retries. */
+  #importLegacy(): void {
+    const legacy = this.log.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'history_summaries'")
+      .get();
+    if (!legacy) return;
+    summaryTransaction(this.db, () => {
+      const rows = this.log.db.prepare("SELECT * FROM history_summaries ORDER BY id").all();
+      for (const row of rows) {
+        if (typeof row.world_id !== "string" || typeof row.player_id !== "string")
+          throw new Error("Invalid legacy history summary scope");
+        const scope = { worldId: row.world_id, playerId: row.player_id };
+        validateScope(scope);
+        const { source } = decode(row, scope);
+        const existing = this.db
+          .prepare(
+            "SELECT * FROM history_summaries WHERE world_id = ? AND player_id = ? AND source_after = ?",
+          )
+          .get(scope.worldId, scope.playerId, source.after);
+        if (existing) {
+          decode(existing, scope);
+          if (!summaryColumns.every((column) => existing[column] === row[column]))
+            throw new Error("Conflicting legacy history summary");
+          continue;
+        }
+        if (this.cursor(scope) !== source.after)
+          throw new Error("Invalid legacy history summary cursor continuity");
+        this.db
+          .prepare(`INSERT INTO history_summaries (${summaryColumns.join(", ")})
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(...summaryColumns.map((column) => row[column]!));
+      }
+    });
+  }
 
   cursor(scope: WorldScope): number {
     validateScope(scope);
-    const row = this.log.db
+    const row = this.db
       .prepare(
-        `SELECT source_through FROM history_summaries WHERE world_id = ? AND player_id = ? ORDER BY id DESC LIMIT 1`,
+        `SELECT * FROM history_summaries WHERE world_id = ? AND player_id = ? ORDER BY id DESC LIMIT 1`,
       )
       .get(scope.worldId, scope.playerId);
-    if (!row) return 0;
-    const cursor = row.source_through;
-    if (typeof cursor !== "number" || !Number.isSafeInteger(cursor) || cursor < 1)
-      throw new Error("Invalid stored summary cursor");
-    return cursor;
+    return row ? decode(row, scope).source.through : 0;
   }
 
   next(scope: WorldScope): { source: HistorySource; backlog: boolean } | undefined {
@@ -102,9 +156,9 @@ export class HistorySummaries {
     validateSource(source);
     validateSummaryText(summary);
     if (!Check(counter, createdAt)) throw new Error("Invalid summary creation time");
-    this.log.atomic(() => {
+    summaryTransaction(this.db, () => {
       if (this.cursor(scope) !== source.after) throw new Error("Stale history summary cursor");
-      this.log.db
+      this.db
         .prepare(`INSERT INTO history_summaries
         (world_id, player_id, source_after, source_through, source_json, summary, created_at, model, requested_tier, prompt_version)
         VALUES (?, ?, ?, ?, ?, ?, ?, 'openai/gpt-6-luna', 'fast', 1)`)
@@ -122,7 +176,7 @@ export class HistorySummaries {
 
   context(scope: WorldScope): string {
     validateScope(scope);
-    const rows = this.log.db
+    const rows = this.db
       .prepare(
         `SELECT * FROM history_summaries WHERE world_id = ? AND player_id = ? ORDER BY id DESC LIMIT 5`,
       )

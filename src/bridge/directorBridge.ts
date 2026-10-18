@@ -41,7 +41,7 @@ import {
 } from "../protocol/bridge.js";
 import { GameEventSchema, type GameEvent } from "../protocol/gameEvent.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
-import { HistorySummaries } from "../storage/historySummaries.js";
+import type { HistorySummaries } from "../storage/historySummaries.js";
 import {
   HistorySummaryRequestSchema,
   HistorySummaryResultSchema,
@@ -64,6 +64,7 @@ interface Connection {
 interface BridgeOptions {
   token: string;
   eventLog: EventLog;
+  history: HistorySummaries;
   hooks: ResponseHooks;
   helloTimeoutMs?: number;
 }
@@ -113,7 +114,7 @@ export class DirectorBridge extends EventEmitter<{
     if (options.eventLog.db !== options.hooks.db)
       throw new Error("History and hooks must share one database");
     this.#options = options;
-    this.history = new HistorySummaries(options.eventLog);
+    this.history = options.history;
     this.on("judgmentRequested", (batch) => {
       this.#requireWorld(batch.binding);
       this.#storage(() => options.eventLog.appendActivities(judgmentActivities(batch)));
