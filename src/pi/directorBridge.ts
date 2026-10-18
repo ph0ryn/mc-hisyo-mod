@@ -238,7 +238,8 @@ export default function directorBridge(
               messages: [{ role: "user", content: params.input, timestamp: Date.now() }],
             },
             {
-              serviceTier: "fast",
+              // Fast mode's compatible wire name; some ChatGPT endpoints reject "fast".
+              serviceTier: "priority",
               reasoningEffort: "medium",
               maxTokens: 4096,
               cacheRetention: "none",

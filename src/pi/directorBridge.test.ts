@@ -134,8 +134,14 @@ const summaryRequest = {
   input: "block_broken minecraft:oak_log ×3",
 };
 
-test("independent memory completion requests fast with unchanged medium reasoning and no tools", async () => {
+test("independent memory requests Fast via priority with unchanged medium reasoning and no tools", async () => {
   const h = await setup();
+  // The native provider forwards this literal; this endpoint rejects "fast" with HTTP 400.
+  h.complete.mockImplementation(async (_model, _context, options) =>
+    (options as { serviceTier: string }).serviceTier === "priority"
+      ? { stopReason: "stop", content: [{ type: "text", text: "木を集めた。" }] }
+      : { stopReason: "error", content: [], errorMessage: "400 Invalid service_tier" },
+  );
   const { ctx, controller } = h.context();
   h.emit("agent_start", ctx);
   expect(await h.peer.receive("director.history.summarize", summaryRequest)).toEqual({
@@ -152,7 +158,7 @@ test("independent memory completion requests fast with unchanged medium reasonin
   });
   expect(h.complete.mock.calls[0]![1]).not.toHaveProperty("tools");
   expect(h.complete.mock.calls[0]![2]).toMatchObject({
-    serviceTier: "fast",
+    serviceTier: "priority",
     reasoningEffort: "medium",
   });
   expect(controller.signal.aborted).toBe(false);

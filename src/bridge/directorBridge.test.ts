@@ -206,7 +206,7 @@ test("history completion is independent of run admission and rejects cancelled l
   ).toBe("石を採掘した。");
   expect(h.native).toHaveLength(0);
   expect(h.complete.mock.calls[0]![2]).toMatchObject({
-    serviceTier: "fast",
+    serviceTier: "priority",
     reasoningEffort: "medium",
   });
   const response = deferred<unknown>();
