@@ -85,6 +85,17 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     expect(prompt).toContain(
       "While the current instructions remain appropriate and are being carried out, let them stand without repeating or replacing them, even on polls",
     );
+    expect(prompt).toContain("You may also initiate casual conversation");
+    expect(prompt).toContain("while the player follows existing instructions");
+    expect(prompt).toContain(
+      "Not every message needs an instruction or a connection to the current goal",
+    );
+    expect(prompt).toContain(
+      "Once your intended guidance or conversation for this judgment is complete",
+    );
+    expect(prompt).not.toContain(
+      "Once the needed guidance has been delivered, finish the judgment",
+    );
     expect(prompt).toContain("Set or update needed hooks before send_message");
     expect(prompt).not.toContain("Stay silent when there is no useful new information");
     expect(prompt).not.toContain("send one concise, actionable instruction");
