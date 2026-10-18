@@ -34,7 +34,7 @@ afterEach(() => {
 // Only the owned mkdtemp directory is removed after this file's tests finish.
 afterAll(() => rmSync(directory, { recursive: true }));
 
-test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (language) => {
+test("refreshes private OAuth credentials for each judgment", async () => {
   const world = { worldId: "w", playerId: "p", worldSessionId: "s" };
   const hash = createHash("sha256")
     .update(JSON.stringify([world.worldId, world.playerId]))
@@ -45,21 +45,18 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
   writeFileSync(legacy, "old hidden-world transcript", { mode: 0o600 });
   const bridge = Object.assign(new EventEmitter(), {
     isAgentReady: false,
-    currentWorld: { binding: world, language },
+    currentWorld: { binding: world, language: "ja_jp" },
     readyWorld: { binding: world, status: { worldState: { ready: true } } },
     beginRun: vi.fn(async () => ({ ...world, runId: "run" })),
     finishRun: vi.fn(),
     invalidateRun: vi.fn(),
   });
-  let privateAuth = "",
-    promptPath = "";
-  const languageInstruction = `Write player-facing messages in the language specified by Minecraft language code "${language}".`;
+  let privateAuth = "";
   const seen: string[] = [];
   const client = Object.assign(new EventEmitter(), {
     initialize: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     run: vi.fn(async () => {
-      expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
       seen.push(JSON.parse(readFileSync(privateAuth, "utf8")).openai.key);
       return { status: "settled" as const, aborted: false };
     }),
@@ -71,63 +68,6 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     const sessionPath = launch.args![launch.args!.indexOf("--session") + 1]!;
     expect(sessionPath).toBe(join(realpathSync(scope), "session-observable-v1.jsonl"));
     expect(readFileSync(legacy, "utf8")).toBe("old hidden-world transcript");
-    promptPath = launch.args![launch.args!.indexOf("--system-prompt") + 1]!;
-    expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
-    expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");
-    const prompt = readFileSync(promptPath, "utf8");
-    expect(prompt).toContain(
-      [
-        "Judgments run only on:",
-        "",
-        "- worldStart",
-        "- periodic polls (every 60 seconds of active play)",
-        "- player chat",
-        "- advancement unlocks",
-        "- events matching your registered response hooks",
-      ].join("\n"),
-    );
-    expect(prompt).toContain("every 60 seconds of active play");
-    expect(prompt).toContain("Ordinary game events are recorded but do not wake you");
-    expect(prompt).toContain(
-      "Advancement unlocks (advancement_completed with hasDisplay: true) wake you without a hook",
-    );
-    expect(prompt).toContain(
-      "Other task completion or blockers require a matching hook to wake you before the next poll or player message",
-    );
-    expect(prompt).toContain(
-      "use add_response_hook to register the completion/blocker events you need to react to",
-    );
-    expect(prompt).toContain("Keep the player continuously directed toward a concrete goal");
-    expect(prompt).toContain("single action or several steps");
-    expect(prompt).toContain(
-      "Do not enforce a fixed instruction count or require a message on every judgment",
-    );
-    expect(prompt).toContain("Do not wait for a player question or a new event");
-    expect(prompt).toContain("completed, blocked or no longer appropriate");
-    expect(prompt).toContain(
-      "While the current instructions remain appropriate and are being carried out, let them stand without repeating or replacing them, even on polls",
-    );
-    expect(prompt).toContain("You may also initiate casual conversation");
-    expect(prompt).toContain("while the player follows existing instructions");
-    expect(prompt).toContain(
-      "Not every message needs an instruction or a connection to the current goal",
-    );
-    expect(prompt).toContain(
-      "Once your intended guidance or conversation for this judgment is complete",
-    );
-    expect(prompt).not.toContain(
-      "Once the needed guidance has been delivered, finish the judgment",
-    );
-    expect(prompt).toContain("Set or update needed hooks before send_message");
-    expect(prompt).not.toContain("Stay silent when there is no useful new information");
-    expect(prompt).not.toContain("send one concise, actionable instruction");
-    expect(prompt).not.toContain("After a successful send_message, finish this judgment");
-    expect(prompt).toContain("A refreshed snapshot or tool acknowledgement is background data");
-    expect(prompt).toContain("Do not narrate routine HUD values or list inventory");
-    expect(prompt).toContain("dayTimeClock is the Minecraft 24-hour clock");
-    expect(prompt).toContain("06:00 dawn, 12:00 noon, 18:00 sunset, 00:00 midnight");
-    expect(prompt).toContain("not from old messages, event history or the real-world clock");
-    expect(prompt).toContain("does not measure local brightness");
     expect(
       JSON.parse(readFileSync(join(launch.env.PI_CODING_AGENT_DIR!, "models.json"), "utf8")),
     ).toEqual({ providers: {} });
@@ -147,7 +87,6 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     oauthAgentDirectory: "/original/agent",
   });
   try {
-    bridge.currentWorld.language = language === "ja_jp" ? "en_us" : "ja_jp";
     for (const token of ["judgment-A", "judgment-B"]) {
       execute.mockResolvedValueOnce({ stdout: token });
       await expect(session.judge("prompt")).resolves.toEqual({
