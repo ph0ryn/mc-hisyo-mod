@@ -75,7 +75,17 @@ test.each(["ja_jp", "en_us"])("launches proactive guidance in %s", async (langua
     expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
     expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");
     const prompt = readFileSync(promptPath, "utf8");
-    expect(prompt).toContain("Judgments run only on worldStart, player chat, periodic polls");
+    expect(prompt).toContain(
+      [
+        "Judgments run only on:",
+        "",
+        "- worldStart",
+        "- periodic polls (every 60 seconds of active play)",
+        "- player chat",
+        "- advancement unlocks",
+        "- events matching your registered response hooks",
+      ].join("\n"),
+    );
     expect(prompt).toContain("every 60 seconds of active play");
     expect(prompt).toContain("Ordinary game events are recorded but do not wake you");
     expect(prompt).toContain(
