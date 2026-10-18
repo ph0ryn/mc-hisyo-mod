@@ -3,10 +3,12 @@ import type { DatabaseSync } from "node:sqlite";
 import { DirectorBridge } from "../bridge/directorBridge.js";
 import { EventCatalog } from "../events/eventCatalog.js";
 import { EventLog } from "../events/eventLog.js";
+import { ActivityLog } from "../events/activityLog.js";
 import { ResponseHooks } from "../hooks/responseHooks.js";
 import { protocolVersion } from "../protocol/bridge.js";
 import { gameEventDefinitions } from "../protocol/gameEvent.js";
 import { openDatabase } from "../storage/database.js";
+import { openActivityDatabase } from "../storage/activityDatabase.js";
 import { HistorySummaries } from "../storage/historySummaries.js";
 import { openSummaryDatabase } from "../storage/summaryDatabase.js";
 import { ConnectionFile, type ConnectionInfo } from "./connectionFile.js";
@@ -28,6 +30,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
   const directory = new PrivateDataDirectory(options.dataDirectory);
   const discovery = new ConnectionFile(directory);
   let db: DatabaseSync | undefined;
+  let activityDb: DatabaseSync | undefined;
   let summaryDb: DatabaseSync | undefined;
   let bridge: DirectorBridge | undefined;
   let shutdown: Promise<void> | undefined;
@@ -39,7 +42,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
       } catch (error) {
         errors.push(error);
       }
-      for (const database of [summaryDb, db]) {
+      for (const database of [summaryDb, activityDb, db]) {
         try {
           database?.close();
         } catch (error) {
@@ -57,6 +60,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
   try {
     directory.assertStorageFiles();
     db = openDatabase(directory.databasePath);
+    activityDb = openActivityDatabase(directory.activityDatabasePath);
     summaryDb = openSummaryDatabase(directory.summaryDatabasePath);
     directory.assertStorageFiles();
     const catalog = new EventCatalog(gameEventDefinitions);
@@ -65,8 +69,9 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
     bridge = new DirectorBridge({
       token,
       eventLog,
+      activityLog: new ActivityLog(activityDb),
       history: new HistorySummaries(eventLog, summaryDb),
-      hooks: new ResponseHooks(db, catalog),
+      hooks: new ResponseHooks(activityDb, catalog),
     });
     bridge.on("fault", options.onFault);
     const address = await bridge.listen();

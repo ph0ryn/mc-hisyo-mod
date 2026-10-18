@@ -128,11 +128,11 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 既存ディレクトリには所有者と`0700`を要求し、symlinkは拒否する。既存の権限を自動でchmodしない。
 親ディレクトリは信頼できる場所を使う。POSIX modeを検査する実装で、拡張ACLとWindows ACLは未検証、Windows起動は未対応。
 
-- raw履歴とhookは`history.sqlite`、要約とそのcursorは別の`summaries.sqlite`へ保存する。
-  両DBのmain / WAL / SHM / journalは、所有者・regular file・`0600`・link数1をopen前に検査する。
+- Modの観測は`history.sqlite`、CLI内部活動とhookは`activities.sqlite`、要約とそのcursorは`summaries.sqlite`へ分離する。
+  3つのDBのmain / WAL / SHM / journalは、所有者・regular file・`0600`・link数1をopen前に検査する。
 - `connection.json`へprotocolVersion、loopback接続先、port、token、PIDを公開する。[公開と削除の契約](<protocol.md>)を参照。
 - 接続情報が既にあれば停止する。内容が壊れていても読み飛ばして上書きしたり、PIDだけで古いと判断したりしない。
-- Ctrl-C / SIGINT / SIGTERMでlistenerと接続、両SQLite、自分の接続情報を順に閉じる。履歴・hook・要約は残す。
+- Ctrl-C / SIGINT / SIGTERMでlistenerと接続、3つのSQLite、自分の接続情報を順に閉じる。履歴・hook・要約は残す。
 - SIGKILLやcrash後の接続情報は自動回収しない。所有プロセスの停止を確認してから手動で処理する。
 
 起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
@@ -221,19 +221,21 @@ slot差分から「拾った」「クラフトした」とは断定しない。
 - hook一覧はID辞書順、既定8件・最大8件。`nextCursor`を次の`after`へ渡す。
   履歴の`through`とは異なりsnapshotではない。[一覧の契約](<tools.md>)を参照。
 
-両SQLiteは独立したschema versionを持ち、未対応versionは変換せず停止する。
-raw DBは新規ならversion 2を作り、既存version 2 / 3はversion・rawイベント・hookをそのまま保持する。
-要約DBは独立したversion 1。旧raw version 3に要約があれば、起動時に全行を検証して要約DB内の1 transactionでコピーする。
-元の要約は削除せず、同一行の再コピーは行わない。不正な行・既存コピーとの不一致・cursorの不連続はrollbackして停止する。
-新しい要約は要約DBだけへ書き、保存とcursor更新は同じtransactionで確定する。モデルの応答待ち中はtransactionを開かない。
-raw version 1など未対応DBは削除・修復せず拒否する。その場合は既存DBを退避し、別の空のdata directoryを使う。
+3つのSQLiteは独立したschema versionを持つ。Mod観測DBはversion 4、CLI活動DBと要約DBはそれぞれversion 1。
+観測DBは正の`seq`を必須とする`events`だけを持ち、活動DBは`seq: NULL`の`events`と`response_hooks`を持つ。
+未対応versionは変換・削除・修復せず拒否する。旧混在DBからの自動移行や要約コピーは実装しない。
+既存データは停止・バックアップ後に明示的に分離するか、別の空のdata directoryを使う。
+要約はMod観測だけから作り、保存とcursor更新は要約DB内の同じtransactionで確定する。モデルの応答待ち中はtransactionを開かない。
 
 ### ゲーム観測とCLI内部履歴
 
-[EventLog](<../src/events/eventLog.ts>)はゲーム観測と[CLI事実](<../src/events/directorActivity.ts>)を同じ単調増加`events.id`で保存する。
-ゲーム観測のSQL `seq`はsession内連番、CLI事実は`NULL`で、共通IDと混同しない。
-有効なplayer入力、正確な`displayed: true` ACK、hook CRUD・一致、開始 / poll / 入力 / hookの判断要求を記録する。
-hook CRUDとその事実は同一transaction。ゲームイベントは保存 → live hook照合 → 一致記録、判断理由は`judge`前に保存する。
+[EventLog](<../src/events/eventLog.ts>)はMod観測だけ、[ActivityLog](<../src/events/activityLog.ts>)は[CLI事実](<../src/events/directorActivity.ts>)だけを保存する。
+両DBの`events.id`は独立した単調増加IDで、同じ数値でも別の行を指す。検索は既定でMod観測、`event: director.*`の明示指定時だけCLI活動を選ぶ。
+`after`・`through`・`nextCursor`は選択したDB内だけで有効。両DBを混ぜた共通cursorはない。
+有効なplayer入力、正確な`displayed: true` ACK、hook CRUD・一致、開始 / poll / 入力 / hookの判断要求は活動DBへ記録する。
+hook CRUDとその活動記録は活動DB内の同一transaction。観測batchは観測DBで先に確定し、その後のlive hook照合・一致記録を活動DBで確定してから通知・ACKする。
+照合・活動保存が失敗した場合、観測は既に永続化され得るが通知・ACKは行わずfaultにする。2つのDBを跨ぐatomicityは保証しない。
+一致記録の`sourceEventId`は観測DBのIDで、判断理由は`judge`前に活動DBへ保存する。
 要求・一致はprovider実行や応答の証拠ではない。CLI事実は検索可能だがhook不可で、過去履歴を再照合しない。
 有効な古いbindingのHUD成功ACKは、stale fenceより先に記録する。結果が不明な表示は再送しない。
 

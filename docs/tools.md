@@ -26,6 +26,8 @@ Bash・OSファイル・書込・任意ネットワーク・操作代行のTool�
 
 hookと履歴検索のfilterは、公開されたpayload直下のscalarに対する型付き完全一致のAND条件。
 条件のないイベント保存を基本とし、hookを削除しても履歴は消さない。
+`get_recent_events`は既定でModの観測だけを検索する。`event`へ公開された`director.*`の名前を指定した場合だけ、別DBのCLI内部活動を検索する。
+ID・`through`・`nextCursor`は選んだDB内だけで有効で、観測と活動の間では使い回さない。
 履歴の欠損とページングの意味は[保存・検索の契約](<development.md#保存検索の契約>)を参照。
 
 hook一覧のbridge側実装は`director.hooks.list`の`query`で`after?`と`limit?`を受け、

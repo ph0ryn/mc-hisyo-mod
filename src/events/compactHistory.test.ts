@@ -106,6 +106,22 @@ test("consumes only a bounded whole-row prefix of one session, including gap pro
   expect(Buffer.byteLength(bounded.input)).toBeLessThanOrEqual(summaryInputBytes);
 });
 
+test("refuses CLI activity rather than projecting speech into game memory", () => {
+  const record = {
+    id: 1,
+    observation: {
+      worldId: "w",
+      playerId: "p",
+      worldSessionId: "s",
+      observedAt: 1,
+      origin: "cli",
+      event: "director.player_input",
+      data: { text: "CLI_ONLY_SENTINEL" },
+    },
+  } as unknown as StoredEvent;
+  expect(() => compactHistory(0, [record])).toThrow(/Mod observations/);
+});
+
 test("timestamp range uses all included rows, not arrival order", () => {
   const source = compactHistory(0, [
     row(1, "health_changed", { observedAt: 1000 }),

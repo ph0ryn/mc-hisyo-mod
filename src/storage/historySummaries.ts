@@ -11,19 +11,6 @@ import {
 } from "../protocol/history.js";
 import { summaryTransaction } from "./summaryDatabase.js";
 
-const summaryColumns = [
-  "world_id",
-  "player_id",
-  "source_after",
-  "source_through",
-  "source_json",
-  "summary",
-  "created_at",
-  "model",
-  "requested_tier",
-  "prompt_version",
-] as const;
-
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const SourceSchema = Type.Object(
   {
@@ -79,42 +66,6 @@ export class HistorySummaries {
     readonly db: DatabaseSync,
   ) {
     if (db === log.db) throw new Error("History summaries require a separate database connection");
-    this.#importLegacy();
-  }
-
-  /** Copy only: raw v3 rows remain available to older compatible readers and retries. */
-  #importLegacy(): void {
-    const legacy = this.log.db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'history_summaries'")
-      .get();
-    if (!legacy) return;
-    summaryTransaction(this.db, () => {
-      const rows = this.log.db.prepare("SELECT * FROM history_summaries ORDER BY id").all();
-      for (const row of rows) {
-        if (typeof row.world_id !== "string" || typeof row.player_id !== "string")
-          throw new Error("Invalid legacy history summary scope");
-        const scope = { worldId: row.world_id, playerId: row.player_id };
-        validateScope(scope);
-        const { source } = decode(row, scope);
-        const existing = this.db
-          .prepare(
-            "SELECT * FROM history_summaries WHERE world_id = ? AND player_id = ? AND source_after = ?",
-          )
-          .get(scope.worldId, scope.playerId, source.after);
-        if (existing) {
-          decode(existing, scope);
-          if (!summaryColumns.every((column) => existing[column] === row[column]))
-            throw new Error("Conflicting legacy history summary");
-          continue;
-        }
-        if (this.cursor(scope) !== source.after)
-          throw new Error("Invalid legacy history summary cursor continuity");
-        this.db
-          .prepare(`INSERT INTO history_summaries (${summaryColumns.join(", ")})
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(...summaryColumns.map((column) => row[column]!));
-      }
-    });
   }
 
   cursor(scope: WorldScope): number {

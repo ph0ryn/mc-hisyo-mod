@@ -4,13 +4,18 @@ import { join } from "node:path";
 import { expect, test } from "vite-plus/test";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
 
-test("both private SQLite files and all sidecars reject unsafe permissions and symlinks", () => {
+test("all three private SQLite files and sidecars reject unsafe permissions and symlinks", () => {
   const root = mkdtempSync(join(tmpdir(), "director-private-summary-"));
   const originalUmask = process.umask();
   try {
     const directory = new PrivateDataDirectory(join(root, "data"));
     expect(directory.summaryDatabasePath).toBe(join(directory.path, "summaries.sqlite"));
-    for (const base of [directory.databasePath, directory.summaryDatabasePath]) {
+    expect(directory.activityDatabasePath).toBe(join(directory.path, "activities.sqlite"));
+    for (const base of [
+      directory.databasePath,
+      directory.activityDatabasePath,
+      directory.summaryDatabasePath,
+    ]) {
       for (const suffix of ["", "-wal", "-shm", "-journal"]) {
         const path = `${base}${suffix}`;
         writeFileSync(path, "", { mode: 0o600 });

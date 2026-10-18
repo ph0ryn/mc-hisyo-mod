@@ -20,6 +20,7 @@ function optionalStat(path: string): BigIntStats | undefined {
 export class PrivateDataDirectory {
   readonly path: string;
   readonly databasePath: string;
+  readonly activityDatabasePath: string;
   readonly summaryDatabasePath: string;
   readonly connectionPath: string;
   readonly #identity: FileIdentity;
@@ -44,6 +45,7 @@ export class PrivateDataDirectory {
     this.path = realpathSync(requested);
     this.#identity = stat;
     this.databasePath = join(this.path, "history.sqlite");
+    this.activityDatabasePath = join(this.path, "activities.sqlite");
     this.summaryDatabasePath = join(this.path, "summaries.sqlite");
     this.connectionPath = join(this.path, "connection.json");
     this.assertCurrent();
@@ -70,7 +72,11 @@ export class PrivateDataDirectory {
 
   assertStorageFiles(): void {
     this.assertCurrent();
-    for (const databasePath of [this.databasePath, this.summaryDatabasePath]) {
+    for (const databasePath of [
+      this.databasePath,
+      this.activityDatabasePath,
+      this.summaryDatabasePath,
+    ]) {
       for (const suffix of ["", "-wal", "-shm", "-journal"]) {
         const stat = optionalStat(`${databasePath}${suffix}`);
         if (

@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Server } from "node:net";
 import { expect, onTestFinished, test, vi } from "vite-plus/test";
 import type { EventLog } from "../events/eventLog.js";
+import type { ActivityLog } from "../events/activityLog.js";
 import type { HistorySummaries } from "../storage/historySummaries.js";
 import type { ResponseHook, ResponseHooks } from "../hooks/responseHooks.js";
 import type { GameEvent } from "../protocol/gameEvent.js";
@@ -69,43 +70,94 @@ async function fixture(supportedEvents: string[] = []) {
   });
   let accept!: (peer: RpcPeer) => void;
   const rows: unknown[] = [];
+  const observations: GameEvent[] = [];
   let storageError: Error | undefined;
+  let activityError: Error | undefined;
   let appendsBeforeFailure = 0;
-  const db = {};
+  const activityDb = {};
   const matchedHooks: ResponseHook[] = [];
+  const registeredHooks: ResponseHook[] = [];
+  const rawSearch = vi.fn(() => ({ events: [], through: 41, hasKnownGaps: true, nextCursor: 3 }));
+  const activitySearch = vi.fn(() => ({
+    events: [],
+    through: 9,
+    hasKnownGaps: false,
+    nextCursor: 2,
+  }));
   const eventLog = {
-    db,
+    db: {},
     atomic: <T>(mutate: () => T): T => {
-      const before = rows.length;
+      const before = observations.length;
       try {
         return mutate();
       } catch (error) {
-        rows.splice(before);
+        observations.splice(before);
         throw error;
       }
     },
     append: (value: GameEvent) => {
       if (storageError && appendsBeforeFailure-- <= 0) throw storageError;
+      observations.push(value);
+      return { id: observations.length, observation: value };
+    },
+    search: rawSearch,
+    catalog: {
+      list: () => supportedEvents.map((name) => ({ name })),
+      validateFilter: vi.fn(),
+    },
+  } as unknown as EventLog;
+  const activityLog = {
+    db: activityDb,
+    atomic: <T>(mutate: () => T): T => {
+      const before = rows.length;
+      const hooksBefore = [...registeredHooks];
+      try {
+        return mutate();
+      } catch (error) {
+        rows.splice(before);
+        registeredHooks.splice(0, registeredHooks.length, ...hooksBefore);
+        throw error;
+      }
+    },
+    appendActivity: (value: unknown) => {
+      if (activityError || storageError) throw activityError ?? storageError;
       rows.push(value);
       return { id: rows.length, observation: value };
     },
-    appendActivity: (value: unknown) => {
-      if (storageError) throw storageError;
-      rows.push(value);
+    appendActivities: (values: unknown[]) => {
+      if (activityError || storageError) throw activityError ?? storageError;
+      rows.push(...values);
     },
-    appendActivities: (values: unknown[]) => rows.push(...values),
-    catalog: { list: () => supportedEvents.map((name) => ({ name })) },
-  } as unknown as EventLog;
+    search: activitySearch,
+  } as unknown as ActivityLog;
+  const hooks = {
+    db: activityDb,
+    catalog: eventLog.catalog,
+    match: vi.fn(() => matchedHooks),
+    add: (_scope: unknown, input: Omit<ResponseHook, "id">) => {
+      const hook = { ...input, filter: input.filter ?? {}, id: "registered-hook" };
+      registeredHooks.push(hook);
+      return hook;
+    },
+    remove: (_scope: unknown, id: string) => {
+      const index = registeredHooks.findIndex((hook) => hook.id === id);
+      if (index < 0) return false;
+      registeredHooks.splice(index, 1);
+      return true;
+    },
+    list: () => ({ hooks: [...registeredHooks] }),
+  } as unknown as ResponseHooks;
   const bridge = new DirectorBridge(
     {
       token: "a".repeat(43),
       eventLog,
+      activityLog,
       history: {
         context: () => "",
         next: () => undefined,
         save: () => {},
       } as unknown as HistorySummaries,
-      hooks: { db, match: () => matchedHooks } as unknown as ResponseHooks,
+      hooks,
     },
     (register) => {
       accept = register;
@@ -191,6 +243,12 @@ async function fixture(supportedEvents: string[] = []) {
     agent,
     native,
     rows,
+    observations,
+    eventLog,
+    activityLog,
+    rawSearch,
+    activitySearch,
+    hooks,
     matchedHooks,
     world,
     context,
@@ -198,6 +256,9 @@ async function fixture(supportedEvents: string[] = []) {
     tools,
     complete,
     memoryContext,
+    failActivities: (error: Error) => {
+      activityError = error;
+    },
     failStorage: (error: Error, afterObservations = 0) => {
       storageError = error;
       appendsBeforeFailure = afterObservations;
@@ -307,7 +368,7 @@ test("event batches persist in order before observation delivery and retain sing
   h.matchedHooks.push({ id: "hook", event: "block_broken", filter: {}, instruction: "report" });
   const delivered: unknown[] = [];
   h.bridge.on("observation", (stored, hooks) => {
-    expect(h.rows).toContainEqual(events.at(-1)); // Whole batch persisted before its first delivery.
+    expect(h.observations.slice(0, events.length)).toEqual(events); // Whole raw batch persisted before its first delivery.
     expect(hooks).toEqual(h.matchedHooks);
     expect(h.rows).toContainEqual(
       expect.objectContaining({
@@ -320,7 +381,7 @@ test("event batches persist in order before observation delivery and retain sing
   await expect(h.game.client.call("game.events", { events })).resolves.toEqual({ stored: 100 });
   expect(delivered).toEqual(events);
   const single = { ...events[0], seq: 101 };
-  const nextId = h.rows.length + 1;
+  const nextId = h.observations.length + 1;
   await expect(h.game.client.call("game.event", single)).resolves.toEqual({ stored: nextId });
   expect(delivered.at(-1)).toEqual(single);
 });
@@ -337,7 +398,7 @@ test("event batches reject invalid scope, capabilities and malformed input witho
     position: [1, 2, 3],
     data: {},
   };
-  const before = [...h.rows];
+  const before = { activities: [...h.rows], observations: [...h.observations] };
   for (const params of [
     { events: [] },
     { events: [event, { ...event, seq: 2, worldSessionId: "stale" }] },
@@ -347,7 +408,7 @@ test("event batches reject invalid scope, capabilities and malformed input witho
     { events: Array(1025).fill(event) },
   ]) {
     await expect(h.game.client.call("game.events", params)).rejects.toThrow();
-    expect(h.rows).toEqual(before);
+    expect({ activities: h.rows, observations: h.observations }).toEqual(before);
   }
   await expect(h.agent.client.call("game.events", { events: [event] })).rejects.toMatchObject({
     code: -32010,
@@ -356,7 +417,7 @@ test("event batches reject invalid scope, capabilities and malformed input witho
   await expect(h.game.client.call("game.events", { events: [event] })).rejects.toThrow(
     "write failed",
   );
-  expect(h.rows).toEqual(before);
+  expect({ activities: h.rows, observations: h.observations }).toEqual(before);
 });
 
 test("a failed event batch rolls back its earlier observations without delivering hooks", async () => {
@@ -371,15 +432,141 @@ test("a failed event batch rolls back its earlier observations without deliverin
     position: [1, 2, 3],
     data: {},
   };
-  const before = [...h.rows];
+  const before = { activities: [...h.rows], observations: [...h.observations] };
   const delivered: unknown[] = [];
   h.bridge.on("observation", (stored) => delivered.push(stored));
   h.failStorage(new Error("second write failed"), 1);
   await expect(
     h.game.client.call("game.events", { events: [event, { ...event, seq: 2 }] }),
   ).rejects.toThrow("second write failed");
-  expect(h.rows).toEqual(before);
+  expect({ activities: h.rows, observations: h.observations }).toEqual(before);
   expect(delivered).toEqual([]);
+});
+
+test.each(["match", "audit"])(
+  "%s failure leaves the raw batch durable but emits no observation or ACK",
+  async (stage) => {
+    const h = await fixture(["block_broken"]);
+    const events = [1, 2].map((seq) => ({
+      ...h.world,
+      seq,
+      tick: 20,
+      observedAt: 1000,
+      event: "block_broken",
+      dimension: "minecraft:overworld",
+      position: [1, 2, 3],
+      data: {},
+    }));
+    h.matchedHooks.push({ id: "hook", event: "block_broken", filter: {}, instruction: "report" });
+    const before = [...h.rows];
+    const failure = new Error(`${stage} failed`);
+    if (stage === "match")
+      vi.spyOn(h.hooks, "match").mockImplementation(() => {
+        expect(h.observations).toEqual(events); // Raw commit precedes activity work.
+        throw failure;
+      });
+    else {
+      const append = h.activityLog.appendActivity.bind(h.activityLog);
+      vi.spyOn(h.activityLog, "appendActivity")
+        .mockImplementationOnce(append)
+        .mockImplementationOnce(() => {
+          throw failure;
+        });
+    }
+    const delivered = vi.fn();
+    const faults = vi.fn();
+    h.bridge.on("observation", delivered);
+    h.bridge.on("fault", faults);
+    await expect(h.game.client.call("game.events", { events })).rejects.toBe(failure);
+    expect(h.observations).toEqual(events);
+    expect(h.rows).toEqual(before); // The whole activity audit batch rolls back.
+    expect(delivered).not.toHaveBeenCalled();
+    expect(faults).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(h.bridge.readyWorld).toBeUndefined();
+  },
+);
+
+test("event queries keep raw and explicit Director activity cursors independent", async () => {
+  const h = await fixture(["block_broken"]);
+  const run = await h.bridge.beginRun();
+  for (const query of [{}, { event: "block_broken", after: 3, through: 41, limit: 1 }]) {
+    await expect(h.agent.client.call("director.events.get", { ...run, query })).resolves.toEqual({
+      events: [],
+      through: 41,
+      hasKnownGaps: true,
+      nextCursor: 3,
+    });
+    expect(h.rawSearch).toHaveBeenLastCalledWith({ worldId: "w", playerId: "p" }, query);
+  }
+  const query = {
+    event: "director.status_reported",
+    filter: { paused: true },
+    after: 2,
+    through: 9,
+    limit: 1,
+  };
+  await expect(h.agent.client.call("director.events.get", { ...run, query })).resolves.toEqual({
+    events: [],
+    through: 9,
+    hasKnownGaps: false,
+    nextCursor: 2,
+  });
+  expect(h.activitySearch).toHaveBeenCalledExactlyOnceWith({ worldId: "w", playerId: "p" }, query);
+  expect(h.rawSearch).toHaveBeenCalledTimes(2);
+  const result = (await h.agent.client.call("director.events.list", run)) as { events: unknown[] };
+  expect(result.events).toContainEqual(
+    expect.objectContaining({ name: "block_broken", origin: "game", hookable: true }),
+  );
+  expect(result.events).toContainEqual(
+    expect.objectContaining({ name: "director.status_reported", origin: "cli", hookable: false }),
+  );
+});
+
+test.each(["add", "remove"])(
+  "hook %s rolls back its mutation when activity audit fails",
+  async (method) => {
+    const h = await fixture(["block_broken"]);
+    const run = await h.bridge.beginRun();
+    const added = (await h.agent.client.call("director.hooks.add", {
+      ...run,
+      event: "block_broken",
+      instruction: "report",
+    })) as ResponseHook;
+    expect(h.rows.at(-1)).toMatchObject({
+      event: "director.hook_added",
+      data: { hookId: added.id },
+    });
+    const before = h.hooks.list(h.world);
+    const rawAtomic = vi.spyOn(h.eventLog, "atomic");
+    const failure = new Error("audit failed");
+    h.failActivities(failure);
+    const params =
+      method === "add"
+        ? { ...run, event: "block_broken", instruction: "report again" }
+        : { ...run, id: added.id };
+    await expect(h.agent.client.call(`director.hooks.${method}`, params)).rejects.toBe(failure);
+    expect(h.hooks.list(h.world)).toEqual(before);
+    expect(h.observations).toEqual([]);
+    expect(rawAtomic).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["raw", "hooks"])("bridge rejects invalid %s database ownership", (invalid) => {
+  const raw = {};
+  const activities = {};
+  expect(
+    () =>
+      new DirectorBridge(
+        {
+          token: "a".repeat(43),
+          eventLog: { db: raw } as EventLog,
+          activityLog: { db: invalid === "raw" ? raw : activities } as ActivityLog,
+          hooks: { db: invalid === "hooks" ? raw : activities } as ResponseHooks,
+          history: {} as HistorySummaries,
+        },
+        () => new EventEmitter() as Server,
+      ),
+  ).toThrow(invalid === "raw" ? /separate/ : /Activity.*hooks/);
 });
 
 test("attachment retains the initial language and rejects missing or invalid language codes", async () => {

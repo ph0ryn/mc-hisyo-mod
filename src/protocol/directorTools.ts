@@ -38,7 +38,7 @@ export const directorTools = [
   {
     name: "get_recent_events",
     description:
-      "Search game and Director activity history for this world/player across sessions. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches. Gap flags cover admitted sequence holes only; CLI attachment boundaries mark unknown pre-ready, terminal and disconnected coverage, even when hasKnownGaps is false. Requests/matches do not prove provider execution.",
+      "Search Mod observations for this world/player across sessions by default. Set event to an advertised director.* type to search the separate CLI activity log. IDs, through and nextCursor belong only to the selected log; never reuse them across logs. Pages are byte-bounded; preserve through and resume nextCursor. Scalar filters are type-sensitive AND matches. Gap flags cover admitted Mod sequence holes only. Query director.session_attached/detached separately for unknown pre-ready, terminal and disconnected coverage; hasKnownGaps false does not prove completeness. Requests/matches do not prove provider execution.",
     args: Type.Object({ query: EventSearchRequestSchema.properties.query }, strict),
     method: "director.events.get",
   },

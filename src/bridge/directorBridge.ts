@@ -5,6 +5,7 @@ import { createServer, type AddressInfo } from "node:net";
 import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { EventLog, StoredEvent } from "../events/eventLog.js";
+import type { ActivityLog } from "../events/activityLog.js";
 import {
   activity,
   directorActivityCatalog,
@@ -64,6 +65,7 @@ interface Connection {
 interface BridgeOptions {
   token: string;
   eventLog: EventLog;
+  activityLog: ActivityLog;
   history: HistorySummaries;
   hooks: ResponseHooks;
   helloTimeoutMs?: number;
@@ -111,13 +113,15 @@ export class DirectorBridge extends EventEmitter<{
       throw new Error("Invalid bridge token");
     const timeout = options.helloTimeoutMs ?? 5_000;
     if (!Number.isSafeInteger(timeout) || timeout <= 0) throw new Error("Invalid hello timeout");
-    if (options.eventLog.db !== options.hooks.db)
-      throw new Error("History and hooks must share one database");
+    if (options.eventLog.db === options.activityLog.db)
+      throw new Error("Game observations and Director activity require separate databases");
+    if (options.activityLog.db !== options.hooks.db)
+      throw new Error("Activity and hooks must share one database");
     this.#options = options;
     this.history = options.history;
     this.on("judgmentRequested", (batch) => {
       this.#requireWorld(batch.binding);
-      this.#storage(() => options.eventLog.appendActivities(judgmentActivities(batch)));
+      this.#storage(() => options.activityLog.appendActivities(judgmentActivities(batch)));
     });
     this.#server.maxConnections = 4;
     this.#server.on("error", (error) => this.emit("fault", error));
@@ -411,7 +415,7 @@ export class DirectorBridge extends EventEmitter<{
       this.#requireWorld(params);
       if (connection.ready) throw new RpcError(-32002, "Game already ready");
       this.#storage(() =>
-        this.#options.eventLog.appendActivity(
+        this.#options.activityLog.appendActivity(
           activity(params, "director.session_attached", { beforeAttachment: "unknown" }),
         ),
       );
@@ -429,7 +433,7 @@ export class DirectorBridge extends EventEmitter<{
       if (!connection.ready) throw new RpcError(-32003, "Game is not ready");
       world.paused = params.paused;
       this.#storage(() =>
-        this.#options.eventLog.appendActivity(
+        this.#options.activityLog.appendActivity(
           activity(world.binding, "director.status_reported", { paused: params.paused }),
         ),
       );
@@ -452,7 +456,7 @@ export class DirectorBridge extends EventEmitter<{
       if (this.#closing || !connection.ready || !this.#playerMessageIntake)
         throw new RpcError(-32003, "Director is not accepting player messages");
       this.#storage(() =>
-        this.#options.eventLog.appendActivity(
+        this.#options.activityLog.appendActivity(
           activity(world.binding, "director.player_input", { text: params.text }),
         ),
       );
@@ -467,9 +471,9 @@ export class DirectorBridge extends EventEmitter<{
       this.#options.hooks.catalog.validateFilter(event, filter ?? {});
       const input = filter === undefined ? { event, instruction } : { event, filter, instruction };
       return this.#storage(() =>
-        this.#options.eventLog.atomic(() => {
+        this.#options.activityLog.atomic(() => {
           const hook = this.#options.hooks.add(scope, input);
-          this.#options.eventLog.appendActivity(
+          this.#options.activityLog.appendActivity(
             activity(params, "director.hook_added", {
               runId: params.runId,
               hookId: hook.id,
@@ -485,10 +489,10 @@ export class DirectorBridge extends EventEmitter<{
     this.#register(connection, "director.hooks.remove", "agent", HookRemoveSchema, (params) => {
       const scope = this.#requireRun(params);
       return this.#storage(() =>
-        this.#options.eventLog.atomic(() => {
+        this.#options.activityLog.atomic(() => {
           const removed = this.#options.hooks.remove(scope, params.id);
           if (removed)
-            this.#options.eventLog.appendActivity(
+            this.#options.activityLog.appendActivity(
               activity(params, "director.hook_removed", { runId: params.runId, hookId: params.id }),
             );
           return { removed };
@@ -514,7 +518,11 @@ export class DirectorBridge extends EventEmitter<{
             ? directorActivityCatalog
             : this.#options.eventLog.catalog
           ).validateFilter(event, filter ?? {});
-        return this.#storage(() => this.#options.eventLog.search(scope, params.query));
+        const log =
+          event !== undefined && isDirectorActivity(event)
+            ? this.#options.activityLog
+            : this.#options.eventLog;
+        return this.#storage(() => log.search(scope, params.query));
       },
     );
     this.#register(connection, "director.events.list", "agent", RunBindingSchema, (params) => {
@@ -551,22 +559,26 @@ export class DirectorBridge extends EventEmitter<{
       if (!world.supportedEvents.includes(event.event))
         throw new RpcError(-32602, "Unadvertised event");
     }
-    const results = this.#storage(() =>
-      this.#options.eventLog.atomic(() =>
-        events.map((event) => {
-          const stored = this.#options.eventLog.append(event);
-          const hooks = this.#options.hooks.match(event);
+    const results = this.#storage(() => {
+      const storedEvents = this.#options.eventLog.atomic(() =>
+        events.map((event) => this.#options.eventLog.append(event)),
+      );
+      // Independent databases: raw observations stay durable if later activity work fails.
+      // Neither delivery nor the game ACK happens until both local transactions succeed.
+      return this.#options.activityLog.atomic(() =>
+        storedEvents.map((stored) => {
+          const hooks = this.#options.hooks.match(stored.observation);
           for (const hook of hooks)
-            this.#options.eventLog.appendActivity(
-              activity(event, "director.hook_matched", {
+            this.#options.activityLog.appendActivity(
+              activity(stored.observation, "director.hook_matched", {
                 hookId: hook.id,
                 sourceEventId: stored.id,
               }),
             );
           return { stored, hooks };
         }),
-      ),
-    );
+      );
+    });
     for (const { stored, hooks } of results) this.emit("observation", stored, hooks);
     return results;
   }
@@ -626,7 +638,7 @@ export class DirectorBridge extends EventEmitter<{
     if (attached && !this.#storageFailed) {
       try {
         this.#storage(() =>
-          this.#options.eventLog.appendActivity(
+          this.#options.activityLog.appendActivity(
             activity(world.binding, "director.session_detached", {
               reason,
               afterLastObservation: "unknown",
@@ -707,7 +719,7 @@ export class DirectorBridge extends EventEmitter<{
       throw new RpcError(-32603, "Invalid game result or binding");
     if (method === "game.message.send")
       this.#storage(() =>
-        this.#options.eventLog.appendActivity(displayedActivity(captured, result)),
+        this.#options.activityLog.appendActivity(displayedActivity(captured, result)),
       );
     this.#requireRun(captured);
     return result;

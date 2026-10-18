@@ -1,4 +1,4 @@
-import type { StoredHistory } from "./eventLog.js";
+import type { StoredEvent } from "./eventLog.js";
 import { summaryInputBytes } from "../protocol/history.js";
 
 export interface HistorySource {
@@ -56,7 +56,7 @@ function valueText(value: unknown): string {
 }
 
 interface Projection {
-  entry: StoredHistory;
+  entry: StoredEvent;
   location: string;
   text: string;
   key: string;
@@ -75,12 +75,12 @@ function typeCounts(items: readonly Record<string, unknown>[], field: string): s
   );
 }
 
-function prepare(entry: StoredHistory): Projection {
+function prepare(entry: StoredEvent): Projection {
   const observation = entry.observation;
-  const { event, data } = observation;
-  const dimension = "dimension" in observation ? observation.dimension : "cli";
-  const location =
-    "position" in observation ? ` @${dimension}:${valueText(observation.position)}` : "";
+  if ("origin" in observation || !Number.isSafeInteger(observation.seq) || observation.seq <= 0)
+    throw new Error("History sources must contain only Mod observations");
+  const { event, data, dimension } = observation;
+  const location = ` @${dimension}:${valueText(observation.position)}`;
   let text: string;
   let seen: string[] = [];
   let sampleKey: string | undefined;
@@ -170,7 +170,7 @@ function project(entries: readonly Projection[]): string {
 /** A whole-row prefix of one source session. A high-water fence is NOT the consumed cursor. */
 export function compactHistory(
   after: number,
-  entries: readonly StoredHistory[],
+  entries: readonly StoredEvent[],
 ): HistorySource | undefined {
   if (!entries.length) return;
   const first = entries[0]!;

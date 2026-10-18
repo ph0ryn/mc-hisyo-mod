@@ -43,7 +43,8 @@ Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-m
 - [保存先](<../src/storage/historySummaries.ts>)はraw履歴の`history.sqlite`とは別の`summaries.sqlite`にある`history_summaries`。
   world / playerごとに元のID範囲・session・時刻・加工入力・要約・モデル・要求tierを保持する。
   正常な要約の保存とcursorの進行は要約DB内の同一transaction。rawイベントやhookは変更しない。
-  旧raw version 3の要約は起動時に検証してコピーし、元の行とversionを残す。再起動時の重複コピーは行わず、不一致は停止する。
+  入力元はMod由来の観測だけ。プレイヤーのチャット、AIのHUD発言、CLI内部活動、hook設定は別の`activities.sqlite`へ保存し、要約へ混ぜない。
+  旧DBからの自動移行・要約コピーは行わない。
 - pause中は定期実行までの経過時間を数えず、新しい要約を開始しない。進行中の要約は完了・保存まで続ける。
   ゲーム内時刻の取得を止める意味ではない。
   退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加要約もしない。

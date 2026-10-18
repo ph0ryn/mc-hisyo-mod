@@ -20,7 +20,7 @@ const source: HistorySource = {
   input: "RAW_PROJECTION_NOT_CONTEXT",
 };
 
-function legacyRow(overrides: Record<string, SQLOutputValue> = {}) {
+function storedRow(overrides: Record<string, SQLOutputValue> = {}) {
   return {
     id: 1,
     world_id: scope.worldId,
@@ -28,7 +28,7 @@ function legacyRow(overrides: Record<string, SQLOutputValue> = {}) {
     source_after: source.after,
     source_through: source.through,
     source_json: JSON.stringify(source),
-    summary: "legacy summary",
+    summary: "stored summary",
     created_at: 200,
     model: "openai/gpt-6-luna",
     requested_tier: "fast",
@@ -40,7 +40,6 @@ function legacyRow(overrides: Record<string, SQLOutputValue> = {}) {
 /** Independent SQL capture ports, not a simulated SQLite durability claim. */
 function fixture() {
   const rows: Record<string, SQLOutputValue>[] = [];
-  const legacy: Record<string, SQLOutputValue>[] = [];
   const events: Record<string, SQLOutputValue>[] = [];
   const sql: string[] = [];
   const rawSql: string[] = [];
@@ -54,23 +53,13 @@ function fixture() {
     prepare: (text: string) => {
       rawSql.push(text);
       return {
-        get: () =>
-          text.includes("sqlite_master")
-            ? legacy.length
-              ? { name: "history_summaries" }
-              : undefined
-            : text.includes("MAX(id)")
-              ? { id: max }
-              : { found: 0 },
+        get: () => (text.includes("MAX(id)") ? { id: max } : { found: 0 }),
         all: (...params: SQLInputValue[]) =>
-          text.includes("FROM history_summaries")
-            ? legacy
-            : events
-                .filter(
-                  (row) =>
-                    Number(row.id) > Number(params[2]) && Number(row.id) <= Number(params[3]),
-                )
-                .slice(0, Number(params.at(-1))),
+          events
+            .filter(
+              (row) => Number(row.id) > Number(params[2]) && Number(row.id) <= Number(params[3]),
+            )
+            .slice(0, Number(params.at(-1))),
       };
     },
   } as unknown as DatabaseSync;
@@ -144,7 +133,6 @@ function fixture() {
     log,
     db,
     rows,
-    legacy,
     events,
     sql,
     rawSql,
@@ -177,60 +165,30 @@ test("summary and cursor share one atomic insert, with explicit source provenanc
   expect(f.rawSql.join("\n")).not.toMatch(/INSERT|BEGIN|COMMIT|ROLLBACK/);
 });
 
-test("legacy rows copy into the independent store once without mutating raw history", () => {
+test("opening memory performs no raw-history inspection or automatic import", () => {
   const f = fixture();
-  const row = legacyRow();
-  f.legacy.push(row);
-  const history = f.reopen();
-  expect(history.cursor(scope)).toBe(10);
-  expect(history.context(scope)).toContain("legacy summary");
-  expect(f.rows[0]).toEqual(row);
   f.reopen();
-  expect(f.inserts).toHaveLength(1);
-  expect(f.legacy).toEqual([row]);
-  expect(f.rawSql.join("\n")).not.toMatch(/INSERT|DELETE|UPDATE|BEGIN|COMMIT|ROLLBACK/);
+  expect(f.rawSql).toEqual([]);
+  expect(f.sql).toEqual([]);
+  expect(f.rows).toEqual([]);
 });
 
-test("invalid, conflicting or discontinuous legacy rows fail with summary rollback", () => {
+test("invalid stored summary metadata or provenance fails before exposing memory", () => {
   for (const invalid of [
     { model: "other-model" },
     { requested_tier: "default" },
     { prompt_version: 2 },
     { created_at: -1 },
-    { world_id: "" },
     { source_json: "{}" },
     { source_through: 11 },
     { summary: " " },
   ]) {
     const f = fixture();
-    f.legacy.push(legacyRow(invalid));
-    expect(() => f.reopen()).toThrow();
-    expect(f.sql.at(-1)).toBe("ROLLBACK");
+    f.rows.push(storedRow(invalid));
+    expect(() => f.history.cursor(scope)).toThrow();
+    expect(() => f.history.context(scope)).toThrow();
     expect(f.inserts).toHaveLength(0);
   }
-  const conflict = fixture();
-  conflict.history.save(scope, source, "different summary", 200);
-  conflict.legacy.push(legacyRow());
-  expect(() => conflict.reopen()).toThrow(/Conflicting/);
-  expect(conflict.sql.at(-1)).toBe("ROLLBACK");
-  const gap = fixture();
-  gap.legacy.push(
-    legacyRow({ source_after: 5, source_json: JSON.stringify({ ...source, after: 5 }) }),
-  );
-  expect(() => gap.reopen()).toThrow(/cursor/);
-  expect(gap.sql.at(-1)).toBe("ROLLBACK");
-});
-
-test("legacy import failures propagate and can be retried without consuming the source", () => {
-  const f = fixture();
-  f.legacy.push(legacyRow());
-  f.fail(new Error("import failure"));
-  expect(() => f.reopen()).toThrow("import failure");
-  expect(f.sql.at(-1)).toBe("ROLLBACK");
-  expect(f.rows).toEqual([]);
-  f.fail(undefined);
-  expect(f.reopen().cursor(scope)).toBe(10);
-  expect(f.legacy).toHaveLength(1);
 });
 
 test("the raw event connection cannot double as the summary store", () => {
