@@ -18,6 +18,7 @@ import {
   EmptySchema,
   EventSearchRequestSchema,
   GameAttachSchema,
+  GameEventsSchema,
   GameStateRequestSchema,
   GameStateResultSchema,
   GameStatusSchema,
@@ -38,7 +39,7 @@ import {
   type RunBinding,
   type WorldBinding,
 } from "../protocol/bridge.js";
-import { GameEventSchema } from "../protocol/gameEvent.js";
+import { GameEventSchema, type GameEvent } from "../protocol/gameEvent.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 
 export interface AttachedWorld {
@@ -378,23 +379,12 @@ export class DirectorBridge extends EventEmitter<{
       return { paused: params.paused };
     });
     this.#register(connection, "game.event", "game", GameEventSchema, (params) => {
-      const world = this.#requireWorld(params);
-      if (!world.supportedEvents.includes(params.event))
-        throw new RpcError(-32602, "Unadvertised event");
-      const stored = this.#storage(() => this.#options.eventLog.append(params));
-      const hooks = this.#storage(() => this.#options.hooks.match(params));
-      this.#storage(() =>
-        this.#options.eventLog.appendActivities(
-          hooks.map((hook) =>
-            activity(world.binding, "director.hook_matched", {
-              hookId: hook.id,
-              sourceEventId: stored.id,
-            }),
-          ),
-        ),
-      );
-      this.emit("observation", stored, hooks);
-      return { stored: stored.id };
+      const [result] = this.#storeEvents([params]);
+      return { stored: result!.stored.id };
+    });
+    this.#register(connection, "game.events", "game", GameEventsSchema, (params) => {
+      this.#storeEvents(params.events);
+      return { stored: params.events.length };
     });
     this.#register(connection, "game.player_message", "game", PlayerMessageSchema, (params) => {
       const world = this.#requireWorld(params);
@@ -493,6 +483,32 @@ export class DirectorBridge extends EventEmitter<{
       if (!params.text.trim()) throw new RpcError(-32602, "AI message is blank");
       return this.#forward("game.message.send", params, SendMessageResultSchema);
     });
+  }
+
+  #storeEvents(events: readonly GameEvent[]) {
+    for (const event of events) {
+      const world = this.#requireWorld(event);
+      if (!world.supportedEvents.includes(event.event))
+        throw new RpcError(-32602, "Unadvertised event");
+    }
+    const results = this.#storage(() =>
+      this.#options.eventLog.atomic(() =>
+        events.map((event) => {
+          const stored = this.#options.eventLog.append(event);
+          const hooks = this.#options.hooks.match(event);
+          for (const hook of hooks)
+            this.#options.eventLog.appendActivity(
+              activity(event, "director.hook_matched", {
+                hookId: hook.id,
+                sourceEventId: stored.id,
+              }),
+            );
+          return { stored, hooks };
+        }),
+      ),
+    );
+    for (const { stored, hooks } of results) this.emit("observation", stored, hooks);
+    return results;
   }
 
   #register<T extends TSchema>(

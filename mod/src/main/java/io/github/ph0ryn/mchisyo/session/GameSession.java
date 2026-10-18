@@ -5,6 +5,7 @@ import io.github.ph0ryn.mchisyo.observation.ObservedEvent;
 import io.github.ph0ryn.mchisyo.protocol.RunBinding;
 import io.github.ph0ryn.mchisyo.protocol.WorldBinding;
 import io.github.ph0ryn.mchisyo.reference.PackagedReferences;
+import io.github.ph0ryn.mchisyo.transport.JsonLineCodec;
 import io.github.ph0ryn.mchisyo.transport.RpcError;
 import io.github.ph0ryn.mchisyo.transport.RpcPeer;
 import java.util.*;
@@ -60,7 +61,13 @@ public final class GameSession implements AutoCloseable {
     private RunBinding run;
     private Object runIdentity;
     private long seq;
-    private int eventPending;
+    private static final long OBSERVATION_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
+    private static final int EVENT_BATCH_BYTES = JsonLineCodec.DEFAULT_MAX_FRAME_BYTES - 256; // RPC envelope headroom.
+    private record QueuedObservation(JsonObject value, int bytes) {}
+    private final ArrayDeque<QueuedObservation> observations = new ArrayDeque<>();
+    private int observationBytes;
+    private boolean eventPending;
+    private long lastEventFlush = System.nanoTime();
     private final ArrayDeque<JsonObject> statuses = new ArrayDeque<>();
 
     public GameSession(RpcPeer peer, GamePort game, String worldId, String playerId, String language, List<String> events, boolean paused) {
@@ -180,24 +187,41 @@ public final class GameSession implements AutoCloseable {
         } while (params != null);
     }
     public void observation(ObservedEvent event) {
-        JsonObject params;
+        try {
+            synchronized (state) {
+                if (closed || !ready) return;
+                if (seq >= 9007199254740991L) throw new IllegalStateException("Observation sequence exhausted");
+                JsonObject params = world.toJson(); params.addProperty("seq", ++seq);
+                params.addProperty("event", event.name()); params.addProperty("dimension", event.dimension());
+                params.add("position", JSON.toJsonTree(event.position())); params.addProperty("tick", event.tick());
+                params.addProperty("observedAt", event.observedAt()); params.add("data", JSON.toJsonTree(event.data()));
+                int bytes = JsonLineCodec.encode(params, EVENT_BATCH_BYTES - 1).length; // LF budgets the array comma.
+                if (observationBytes + bytes > RpcPeer.MAX_QUEUED_BYTES) throw new IllegalStateException("Observation queue byte limit reached");
+                observations.addLast(new QueuedObservation(params, bytes)); observationBytes += bytes;
+            }
+        } catch (IllegalArgumentException | IllegalStateException error) { peer.close(error); }
+    }
+    public void flushObservations(long nowNanos) {
+        JsonArray batch = new JsonArray();
         synchronized (state) {
-            if (closed || !ready) return;
-            if (seq >= 9007199254740991L || eventPending >= 32) { params = null; }
-            else {
-                params = world.toJson(); params.addProperty("seq", ++seq); eventPending++;
+            if (closed || !ready || eventPending || observations.isEmpty() || nowNanos - lastEventFlush < OBSERVATION_INTERVAL_NANOS) return;
+            // ponytail: one <=1024-event / 1 MiB batch per second; drain faster if measured sustained traffic needs it.
+            int bytes = 0;
+            while (!observations.isEmpty() && batch.size() < 1024 && bytes + observations.peekFirst().bytes() <= EVENT_BATCH_BYTES) {
+                QueuedObservation event = observations.removeFirst(); batch.add(event.value());
+                bytes += event.bytes(); observationBytes -= event.bytes();
             }
+            eventPending = true; lastEventFlush = nowNanos;
         }
-        if (params == null) { close(); return; }
-        params.addProperty("event", event.name()); params.addProperty("dimension", event.dimension());
-        params.add("position", JSON.toJsonTree(event.position())); params.addProperty("tick", event.tick());
-        params.addProperty("observedAt", event.observedAt()); params.add("data", JSON.toJsonTree(event.data()));
-        request("game.event", params).whenComplete((ack, error) -> {
-            synchronized (state) { eventPending--; }
+        JsonObject params = new JsonObject(); params.add("events", batch);
+        request("game.events", params).whenComplete((ack, error) -> {
             if (error == null) {
-                try { exact(ack, Set.of("stored")); safeCounter(ack.getAsJsonObject().get("stored"), false); }
-                catch (RuntimeException invalidAck) { close(); }
+                try {
+                    exact(ack, Set.of("stored"));
+                    if (safeCounter(ack.getAsJsonObject().get("stored"), false) != batch.size()) throw invalid();
+                } catch (RuntimeException invalidAck) { close(); }
             }
+            synchronized (state) { eventPending = false; }
         });
     }
     private CompletionStage<JsonElement> request(String method, JsonObject params) {
@@ -206,7 +230,7 @@ public final class GameSession implements AutoCloseable {
         } catch (RuntimeException error) { close(); return CompletableFuture.failedFuture(stale()); }
     }
     private void invalidateRun() { run = null; runIdentity = null; }
-    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); statuses.clear(); } }
+    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); statuses.clear(); observations.clear(); observationBytes = 0; } }
     @Override public void close() { invalidate(); peer.close(); }
     public static RpcError stale() { return new RpcError(-32001, "Inactive or stale execution binding"); }
     private static RpcError invalid() { return new RpcError(-32602, "Invalid method parameters"); }

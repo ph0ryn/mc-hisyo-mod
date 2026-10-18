@@ -120,7 +120,11 @@ final class DirectorClient {
             synchronized (this) { active = a; }
         }
         if (a == null) return;
-        if (a.session != null) { a.session.pause(client.isPaused()); return; }
+        if (a.session != null) {
+            a.session.pause(client.isPaused());
+            a.session.flushObservations(System.nanoTime());
+            return;
+        }
         if (a.probing || a.began || !server.isReady()) return;
         a.probing = true; Attempt captured = a;
         server.submit(() -> {

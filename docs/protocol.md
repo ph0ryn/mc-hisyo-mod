@@ -117,13 +117,20 @@ CLIからModへの要求例。
 `state`全体は[共有fixture](<../src/protocol/fixtures/gameSnapshot.json>)、必須fieldと範囲は[現在状態の契約](<gameState.md>)を参照。
 一部のfieldだけを返す応答は受け付けない。
 
-Modからのイベント通知例。
+Modは観測イベントを1秒間隔で`game.events`の1 requestへまとめ、保存件数のACKを待つ。送信例。
 
 ```json
-{"jsonrpc":"2.0","method":"game.event","params":{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","seq":85,"tick":12042,"observedAt":1792130000000,"event":"block_broken","dimension":"minecraft:overworld","position":[10.5,64,20.5],"data":{"blockId":"minecraft:stone","position":[10,64,20]}}}
+{"jsonrpc":"2.0","id":"42","method":"game.events","params":{"events":[{"worldId":"world-1","playerId":"player-1","worldSessionId":"w1","seq":85,"tick":12042,"observedAt":1792130000000,"event":"block_broken","dimension":"minecraft:overworld","position":[10.5,64,20.5],"data":{"blockId":"minecraft:stone","position":[10,64,20]}}]}}
+{"jsonrpc":"2.0","id":"42","result":{"stored":1}}
 ```
 
-`seq`は`worldSessionId`内で1から増加するイベント番号とし、順序や欠損の確認に使う。
+`seq`は収集時に`worldSessionId`内で1から増加させ、元の順序・tick・`observedAt`を保持する。
+空のbatchは送らず、最大1024件かつ1 MiBのframeに収まる範囲で分割する。ACK待ちは1 requestだけで、残りは次の送信時刻まで待つ。
+全件のscope・capabilityを確認し、rawとhook一致の履歴を同じtransactionで保存してから、順に通知し`{stored: 件数}`を返す。
+観測queueは4 MiBまで。単一イベントのframe超過、queue超過、エラー・timeout・件数不一致のACKは切断とし、黙って捨てて継続しない。
+退出・切断で未送信queueは破棄するため、通常でも末尾約1秒分は未配送になり得る。ACK待ち・backlog・tick遅延があれば未確定範囲はさらに広がる。再送・永続queueはない。
+チャット・pause通知は即送信するため、保存IDの順序が観測の発生時刻順とは限らない。
+CLIは従来の`game.event`も受け付け、こちらのACKは保存IDの`{stored: ID}`のまま。新Modには`game.events`対応CLIが必要なので、両方を更新する。
 共通schemaとイベント定義は[gameEvent.ts](<../src/protocol/gameEvent.ts>)、
 共有fixtureは[blockBroken.json](<../src/protocol/fixtures/blockBroken.json>)と
 [observerEvents.json](<../src/protocol/fixtures/observerEvents.json>)を参照。
@@ -135,7 +142,7 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 [RpcPeer](<../src/transport/rpcPeer.ts>)が実装済み。
 認証bridgeでもこのpeerを使う。以下は実装契約であり、unit testによる実TCPの通信検証実績ではない。
 
-- JSON-RPCの単一オブジェクトのみ。batchは未対応。schema外のenvelopeキーは拒否する。
+- JSON-RPCの単一オブジェクトのみ。JSON-RPC batch配列は未対応。`game.events`のparams内イベント配列とは別。schema外のenvelopeキーは拒否する。
 - UTF-8のバイト列でLFまで蓄積し、分割された多バイト文字を途中でdecodeしない。
 - フレーム上限はLFを除き**1 MiB**。上限超過、不正UTF-8、途中のままEOFになったframeは接続を閉じる。
 - 送信待ちバイト列は**4 MiB**、未完了requestは送受信各**64件**、非同期notification処理も64件まで。
@@ -193,7 +200,8 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
 | `game.run.clear` | CLI → Mod | 一致する判断bindingの無効化通知 |
 | `game.status` | Mod → CLI | プレイ中・ポーズ中などの状態通知 |
 | `game.detach` | Mod → CLI | ワールド退出通知 |
-| `game.event` | Mod → CLI | ゲーム内イベントの通知 |
+| `game.events` | Mod → CLI | 観測の一括保存・通知。ACKは保存件数 |
+| `game.event` | Mod → CLI | 互換用の単一イベント。ACKは保存ID |
 | `game.player_message` | Mod → CLI | プレイヤーからAIへのチャット入力 |
 | `game.state.get` | Pi拡張 → CLI → Mod | ゲーム状態の取得 |
 | `game.message.send` | Pi拡張 → CLI → Mod | AIの発言表示 |

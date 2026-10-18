@@ -3,7 +3,8 @@ import { EventEmitter } from "node:events";
 import type { Server } from "node:net";
 import { expect, onTestFinished, test, vi } from "vite-plus/test";
 import type { EventLog } from "../events/eventLog.js";
-import type { ResponseHooks } from "../hooks/responseHooks.js";
+import type { ResponseHook, ResponseHooks } from "../hooks/responseHooks.js";
+import type { GameEvent } from "../protocol/gameEvent.js";
 import extension from "../pi/directorBridge.js";
 import { directorToolNames } from "../pi/piPolicy.js";
 import { staleRunErrorCode, type RunBinding, type WorldBinding } from "../protocol/bridge.js";
@@ -59,7 +60,7 @@ async function drain() {
   for (let i = 0; i < 30; i++) await tick();
 }
 
-async function fixture() {
+async function fixture(supportedEvents: string[] = []) {
   vi.useFakeTimers();
   onTestFinished(() => {
     vi.useRealTimers();
@@ -67,18 +68,38 @@ async function fixture() {
   let accept!: (peer: RpcPeer) => void;
   const rows: unknown[] = [];
   let storageError: Error | undefined;
+  let appendsBeforeFailure = 0;
   const db = {};
+  const matchedHooks: ResponseHook[] = [];
   const eventLog = {
     db,
+    atomic: <T>(mutate: () => T): T => {
+      const before = rows.length;
+      try {
+        return mutate();
+      } catch (error) {
+        rows.splice(before);
+        throw error;
+      }
+    },
+    append: (value: GameEvent) => {
+      if (storageError && appendsBeforeFailure-- <= 0) throw storageError;
+      rows.push(value);
+      return { id: rows.length, observation: value };
+    },
     appendActivity: (value: unknown) => {
       if (storageError) throw storageError;
       rows.push(value);
     },
     appendActivities: (values: unknown[]) => rows.push(...values),
-    catalog: { list: () => [] },
+    catalog: { list: () => supportedEvents.map((name) => ({ name })) },
   } as unknown as EventLog;
   const bridge = new DirectorBridge(
-    { token: "a".repeat(43), eventLog, hooks: { db } as ResponseHooks },
+    {
+      token: "a".repeat(43),
+      eventLog,
+      hooks: { db, match: () => matchedHooks } as unknown as ResponseHooks,
+    },
     (register) => {
       accept = register;
       return new EventEmitter() as Server;
@@ -145,7 +166,7 @@ async function fixture() {
     worldId: "w",
     playerId: "p",
     language: "ja_jp",
-    supportedEvents: [],
+    supportedEvents,
     paused: false,
   })) as WorldBinding;
   await game.client.call("game.ready", world);
@@ -155,15 +176,107 @@ async function fixture() {
     agent,
     native,
     rows,
+    matchedHooks,
     world,
     context,
     emit,
     tools,
-    failStorage: (error: Error) => {
+    failStorage: (error: Error, afterObservations = 0) => {
       storageError = error;
+      appendsBeforeFailure = afterObservations;
     },
   };
 }
+
+test("event batches persist in order before observation delivery and retain single-event compatibility", async () => {
+  const h = await fixture(["block_broken"]);
+  const events = Array.from({ length: 100 }, (_, index) => ({
+    ...h.world,
+    seq: index + 1,
+    tick: index + 20,
+    observedAt: index + 1000,
+    event: "block_broken",
+    dimension: "minecraft:overworld",
+    position: [1, 2, 3],
+    data: { blockId: "minecraft:stone", position: [1, 2, 3] },
+  }));
+  h.matchedHooks.push({ id: "hook", event: "block_broken", filter: {}, instruction: "report" });
+  const delivered: unknown[] = [];
+  h.bridge.on("observation", (stored, hooks) => {
+    expect(h.rows).toContainEqual(events.at(-1)); // Whole batch persisted before its first delivery.
+    expect(hooks).toEqual(h.matchedHooks);
+    expect(h.rows).toContainEqual(
+      expect.objectContaining({
+        event: "director.hook_matched",
+        data: { hookId: "hook", sourceEventId: stored.id },
+      }),
+    );
+    delivered.push(stored.observation);
+  });
+  await expect(h.game.client.call("game.events", { events })).resolves.toEqual({ stored: 100 });
+  expect(delivered).toEqual(events);
+  const single = { ...events[0], seq: 101 };
+  const nextId = h.rows.length + 1;
+  await expect(h.game.client.call("game.event", single)).resolves.toEqual({ stored: nextId });
+  expect(delivered.at(-1)).toEqual(single);
+});
+
+test("event batches reject invalid scope, capabilities and malformed input without partial delivery", async () => {
+  const h = await fixture(["block_broken"]);
+  const event = {
+    ...h.world,
+    seq: 1,
+    tick: 20,
+    observedAt: 1000,
+    event: "block_broken",
+    dimension: "minecraft:overworld",
+    position: [1, 2, 3],
+    data: {},
+  };
+  const before = [...h.rows];
+  for (const params of [
+    { events: [] },
+    { events: [event, { ...event, seq: 2, worldSessionId: "stale" }] },
+    { events: [event, { ...event, seq: 2, event: "health_changed" }] },
+    { events: [event, { ...event, seq: 2, observedAt: "now" }] },
+    { events: [event], extra: true },
+    { events: Array(1025).fill(event) },
+  ]) {
+    await expect(h.game.client.call("game.events", params)).rejects.toThrow();
+    expect(h.rows).toEqual(before);
+  }
+  await expect(h.agent.client.call("game.events", { events: [event] })).rejects.toMatchObject({
+    code: -32010,
+  });
+  h.failStorage(new Error("write failed"));
+  await expect(h.game.client.call("game.events", { events: [event] })).rejects.toThrow(
+    "write failed",
+  );
+  expect(h.rows).toEqual(before);
+});
+
+test("a failed event batch rolls back its earlier observations without delivering hooks", async () => {
+  const h = await fixture(["block_broken"]);
+  const event = {
+    ...h.world,
+    seq: 1,
+    tick: 20,
+    observedAt: 1000,
+    event: "block_broken",
+    dimension: "minecraft:overworld",
+    position: [1, 2, 3],
+    data: {},
+  };
+  const before = [...h.rows];
+  const delivered: unknown[] = [];
+  h.bridge.on("observation", (stored) => delivered.push(stored));
+  h.failStorage(new Error("second write failed"), 1);
+  await expect(
+    h.game.client.call("game.events", { events: [event, { ...event, seq: 2 }] }),
+  ).rejects.toThrow("second write failed");
+  expect(h.rows).toEqual(before);
+  expect(delivered).toEqual([]);
+});
 
 test("attachment retains the initial language and rejects missing or invalid language codes", async () => {
   const h = await fixture();

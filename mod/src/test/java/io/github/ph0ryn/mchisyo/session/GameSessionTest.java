@@ -93,7 +93,8 @@ public final class GameSessionTest {
         JsonObject ack = json("{\"jsonrpc\":\"2.0\",\"result\":{\"ready\":true}}"); ack.add("id", readyId);
         peer.receive((ack + "\n").getBytes(StandardCharsets.UTF_8)); assertTrue(!baseline[0]); assertTrue(game.queue.size() == 1);
         game.queue.remove().run(); assertTrue(baseline[0]);
-        JsonObject admitted = wire.last().getAsJsonObject("params");
+        long flushTime = System.nanoTime() + TimeUnit.SECONDS.toNanos(1); session.flushObservations(flushTime);
+        JsonObject admitted = wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject();
         assertTrue(admitted.get("seq").getAsInt() == 1); assertTrue(admitted.get("dimension").getAsString().equals("minecraft:the_nether"));
         assertTrue(admitted.get("tick").getAsLong() == 17); assertTrue(admitted.get("observedAt").getAsLong() == 23);
         assertTrue(admitted.getAsJsonArray("position").get(0).getAsDouble() == 3);
@@ -101,8 +102,10 @@ public final class GameSessionTest {
         assertTrue(pending.take(server, player, id) == null); // Unknown event ACK never retains/replays JOIN.
         reply(peer, wire, json("{\"stored\":1}"));
         session.observation(new ObservedEvent("health_changed", "minecraft:overworld", List.of(30d, 40d, 50d), 99, 101, Map.of("previous", 20, "current", 19)));
-        assertTrue(wire.last().getAsJsonObject("params").get("seq").getAsInt() == 2);
-        assertTrue(wire.last().getAsJsonObject("params").get("event").getAsString().equals("health_changed")); session.close();
+        session.flushObservations(flushTime + TimeUnit.SECONDS.toNanos(1));
+        JsonObject health = wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject();
+        assertTrue(health.get("seq").getAsInt() == 2);
+        assertTrue(health.get("event").getAsString().equals("health_changed")); session.close();
         pending.capture(server, player, id, joined); pending.retain(server, new Object(), id); assertTrue(pending.take(server, player, id) == null);
         pending.capture(server, player, id, joined); assertTrue(pending.take(server, player, UUID.randomUUID()) == null); assertTrue(pending.take(server, player, id) == null);
         pending.capture(server, player, id, joined); assertTrue(pending.take(new Object(), player, id) == null); assertTrue(pending.take(server, player, id) == joined);
@@ -122,6 +125,7 @@ public final class GameSessionTest {
         failedWire.beforeSchedule = failed::close;
         failedGame.queue.add(() -> {
             ObservedEvent taken = pending.take(server, player, id); failed.observation(taken);
+            failed.flushObservations(System.nanoTime() + TimeUnit.SECONDS.toNanos(1));
             if (failed.isReady()) baseline[0] = true;
         });
         failedGame.queue.remove().run(); assertTrue(!baseline[0]);
@@ -210,9 +214,12 @@ public final class GameSessionTest {
         assertTrue(wire.last().getAsJsonObject("params").get("worldSessionId").getAsString().equals("session"));
         reply(peer, wire, json("{\"accepted\":true}")); accepted.toCompletableFuture().join();
         ObservedEvent fact = new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 4, 5, Map.of());
-        session.observation(fact); assertTrue(wire.last().getAsJsonObject("params").get("seq").getAsInt() == 1);
+        long flushTime = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        session.observation(fact); session.flushObservations(flushTime);
+        assertTrue(wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject().get("seq").getAsInt() == 1);
         reply(peer, wire, json("{\"stored\":1}")); session.observation(fact);
-        assertTrue(wire.last().getAsJsonObject("params").get("seq").getAsInt() == 2); reply(peer, wire, json("{\"stored\":2}"));
+        session.flushObservations(flushTime + TimeUnit.SECONDS.toNanos(1));
+        assertTrue(wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject().get("seq").getAsInt() == 2); reply(peer, wire, json("{\"stored\":1}"));
         receive(peer, "game.run.bind", new RunBinding(WORLD, PLAYER, "session", "other").toJson(), 3);
         assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
         JsonObject message = RUN.toJson(); message.addProperty("text", "hello");
@@ -264,6 +271,88 @@ public final class GameSessionTest {
     }
 
     @Test
+    void observationsAreBatchedEachSecondWithoutBurstDisconnects() {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire);
+        GameSession session = new GameSession(peer, new Game(), WORLD, PLAYER, "ja_jp", List.of("block_broken"), false);
+        session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+        reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
+        reply(peer, wire, RUN.worldBinding().toJson()); reply(peer, wire, json("{\"ready\":true}"));
+        long now = System.nanoTime(); int before = wire.sent.size();
+        for (int i = 1; i <= 100; i++) {
+            session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), i, 1000 + i, Map.of("order", i)));
+        }
+        assertFalse(peer.isClosed(), "A burst must not consume one pending RPC per event");
+        assertEquals(before, wire.sent.size(), "No immediate event requests");
+        session.flushObservations(now); assertEquals(before, wire.sent.size());
+        session.flushObservations(now + TimeUnit.SECONDS.toNanos(1));
+        assertEquals(before + 1, wire.sent.size());
+        assertEquals("game.events", wire.last().get("method").getAsString());
+        JsonArray events = wire.last().getAsJsonObject("params").getAsJsonArray("events");
+        assertEquals(100, events.size());
+        for (int i = 0; i < events.size(); i++) {
+            JsonObject event = events.get(i).getAsJsonObject();
+            assertEquals(i + 1, event.get("seq").getAsInt());
+            assertEquals(i + 1, event.get("tick").getAsInt());
+            assertEquals(1001 + i, event.get("observedAt").getAsInt());
+            assertEquals(i + 1, event.getAsJsonObject("data").get("order").getAsInt());
+            assertEquals("session", event.get("worldSessionId").getAsString());
+        }
+        session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 101, 1101, Map.of()));
+        session.flushObservations(now + TimeUnit.SECONDS.toNanos(2));
+        assertEquals(before + 1, wire.sent.size(), "Only one batch may await ACK");
+        reply(peer, wire, json("{\"stored\":100}"));
+        session.flushObservations(now + TimeUnit.SECONDS.toNanos(2));
+        assertEquals(before + 2, wire.sent.size());
+        assertEquals(101, wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject().get("seq").getAsInt());
+        reply(peer, wire, json("{\"stored\":0}")); assertTrue(peer.isClosed(), "Partial ACK is not success");
+    }
+
+    @Test
+    void largeUnicodeBatchesSplitWithinTheWireByteLimit() {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire);
+        GameSession session = new GameSession(peer, new Game(), WORLD, PLAYER, "ja_jp", List.of("block_broken"), false);
+        session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+        reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
+        reply(peer, wire, RUN.worldBinding().toJson()); reply(peer, wire, json("{\"ready\":true}"));
+        for (int i = 1; i <= 5; i++) session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), i, i,
+                Map.of("text", "😀\"\\\uD800".repeat(40000))));
+        long now = System.nanoTime(); int seq = 1;
+        for (int second = 1; seq <= 5; second++) {
+            session.flushObservations(now + TimeUnit.SECONDS.toNanos(second));
+            JsonArray events = wire.last().getAsJsonObject("params").getAsJsonArray("events");
+            assertTrue(io.github.ph0ryn.mchisyo.transport.JsonLineCodec.encode(wire.last()).length - 1 <= 1024 * 1024);
+            assertTrue(events.size() < 5, "Must split by encoded UTF-8 bytes, not character count");
+            for (JsonElement event : events) assertEquals(seq++, event.getAsJsonObject().get("seq").getAsInt());
+            reply(peer, wire, json("{\"stored\":" + events.size() + "}")); assertFalse(peer.isClosed());
+        }
+        int before = wire.sent.size(); session.flushObservations(now + TimeUnit.SECONDS.toNanos(10)); assertEquals(before, wire.sent.size());
+        session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 6, 6, Map.of()));
+        session.close(); session.flushObservations(now + TimeUnit.SECONDS.toNanos(11)); assertEquals(before, wire.sent.size());
+    }
+
+    @Test
+    void exactObservationByteBudgetCannotLeaveAnUnsendableQueueHead() {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire);
+        GameSession session = new GameSession(peer, new Game(), WORLD, PLAYER, "ja_jp", List.of("block_broken"), false);
+        session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+        reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
+        reply(peer, wire, RUN.worldBinding().toJson()); reply(peer, wire, json("{\"ready\":true}"));
+        long now = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 1, 1, Map.of("text", "")));
+        session.flushObservations(now);
+        int overhead = io.github.ph0ryn.mchisyo.transport.JsonLineCodec.encode(wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0)).length;
+        reply(peer, wire, json("{\"stored\":1}"));
+        String maximum = "a".repeat(1024 * 1024 - 256 - overhead);
+        session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 1, 1, Map.of("text", maximum)));
+        session.flushObservations(now + TimeUnit.SECONDS.toNanos(1));
+        assertEquals(1, wire.last().getAsJsonObject("params").getAsJsonArray("events").size());
+        assertEquals(maximum, wire.last().getAsJsonObject("params").getAsJsonArray("events").get(0).getAsJsonObject().getAsJsonObject("data").get("text").getAsString());
+        reply(peer, wire, json("{\"stored\":1}")); assertFalse(peer.isClosed());
+        session.observation(new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 1, 1, Map.of("text", maximum + "a")));
+        assertTrue(peer.isClosed(), "Reject the first unsendable event instead of sending an empty batch");
+    }
+
+    @Test
     void observationOverloadClosesPeer() {
         ObservedEvent fact = new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 4, 5, Map.of());
         Wire overloadWire = new Wire(); RpcPeer overloadPeer = new RpcPeer(overloadWire);
@@ -271,8 +360,10 @@ public final class GameSessionTest {
         overload.start(CompletableFuture.completedFuture(overloadPeer), "a".repeat(43));
         reply(overloadPeer, overloadWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         reply(overloadPeer, overloadWire, RUN.worldBinding().toJson()); reply(overloadPeer, overloadWire, json("{\"ready\":true}"));
-        for (int i = 1; i <= 32; i++) { overload.observation(fact); assertTrue(overloadWire.last().getAsJsonObject("params").get("seq").getAsInt() == i); }
-        int before = overloadWire.sent.size(); overload.observation(fact); assertTrue(overloadPeer.isClosed()); assertTrue(overloadWire.sent.size() == before);
+        ObservedEvent large = new ObservedEvent(fact.name(), fact.dimension(), fact.position(), fact.tick(), fact.observedAt(), Map.of("text", "a".repeat(600000)));
+        int before = overloadWire.sent.size();
+        for (int i = 0; i < 6; i++) { overload.observation(large); assertFalse(overloadPeer.isClosed()); }
+        overload.observation(large); assertTrue(overloadPeer.isClosed()); assertEquals(before, overloadWire.sent.size());
     }
 
     @Test

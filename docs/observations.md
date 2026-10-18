@@ -29,7 +29,9 @@ var observations = ServerObservations.register(isScopedPlayer, sink); // 最小�
 ```
 
 - `isScopedPlayer`は、今回の統合サーバー・プレイヤーに絞るpredicate。scope外の変化は送らない。
-- predicateとsinkはserver threadで呼ばれる。sinkは不変DTOを非blockingで送信queueへ渡す。
+- predicateとsinkはserver threadで呼ばれる。sinkは不変DTOを非blockingで観測queueへ渡す。
+  client tickから1秒間隔で配列にまとめて送信し、元の順序・tick・観測時刻を保持する。
+  ACK待ちは1 batchだけ。上限・切断時の未配送範囲は[通信契約](<protocol.md#メッセージ形式>)を参照。
 - `ObservedEvent`は名前、dimension、座標、tick、観測時刻、dataだけを持つ。
   world / player / session / seqの付与と、その寿命の検証は接続側の責務。
 - attach・detach・session交換時は、server threadで`observations.clearBaselines()`を呼ぶ。

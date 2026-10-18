@@ -58,6 +58,10 @@ export const GameStatusSchema = Type.Object(
   },
   strict,
 );
+export const GameEventsSchema = Type.Object(
+  { events: Type.Array(GameEventSchema, { minItems: 1, maxItems: 1024 }) },
+  strict,
+);
 export const PlayerMessageSchema = Type.Object(
   {
     ...WorldBindingSchema.properties,
