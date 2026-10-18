@@ -55,6 +55,11 @@ test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
     promptPath = launch.args![launch.args!.indexOf("--system-prompt") + 1]!;
     expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
     expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");
+    const prompt = readFileSync(promptPath, "utf8");
+    expect(prompt).toContain("Periodic judgments normally send zero or one message");
+    expect(prompt).toContain("Stay silent when there is no useful new information");
+    expect(prompt).toContain("After a successful send_message, finish this judgment");
+    expect(prompt).toContain("Do not narrate routine HUD values or list inventory");
     expect(
       JSON.parse(readFileSync(join(launch.env.PI_CODING_AGENT_DIR!, "models.json"), "utf8")),
     ).toEqual({ providers: {} });

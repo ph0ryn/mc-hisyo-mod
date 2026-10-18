@@ -132,6 +132,35 @@ test("registers exactly the ten scoped tools", async () => {
   ]);
 });
 
+test("refreshes background state before the judgment, never as a new input after tools", async () => {
+  const h = await setup();
+  const { ctx } = h.context();
+  h.emit("agent_start", ctx);
+  const messages = [
+    { role: "user", content: '{"poll":true}' },
+    { role: "assistant", content: [{ type: "toolCall", name: "send_message" }] },
+    {
+      role: "toolResult",
+      toolName: "send_message",
+      content: [{ type: "text", text: '{"displayed":true}' }],
+    },
+  ];
+  const pending = Promise.resolve(h.emit("context", ctx, { messages }));
+  h.peer.states[0]!.result.resolve({ ...binding, state: snapshot });
+  expect(await pending).toEqual({
+    messages: [
+      expect.objectContaining({ content: expect.stringContaining("CURRENT_GAME_STATE") }),
+      ...messages,
+    ],
+  });
+  expect(messages).toHaveLength(3);
+  // Speech is not hard-capped: an important correction can still be displayed.
+  for (const text of ["advice", "important correction"]) {
+    await h.tools.get("send_message")!.execute("id", { text }, ctx.signal, undefined, ctx);
+  }
+  expect(h.peer.calls.filter((method) => method === "game.message.send")).toHaveLength(2);
+});
+
 test.each([
   ["get_game_state", "game.state.get", { query: {} }, { query: {} }],
   ["send_message", "game.message.send", { text: "hello" }, { text: "hello" }],

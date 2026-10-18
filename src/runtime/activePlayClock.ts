@@ -10,6 +10,11 @@ export class ActivePlayClock {
     this.#playing = playing;
   }
 
+  restart(nowMs: number): void {
+    this.#advance(nowMs);
+    this.#elapsedMs = 0;
+  }
+
   /** A delayed sample reserves at most one poll and discards missed intervals. */
   poll(nowMs: number): boolean {
     this.#advance(nowMs);

@@ -50,6 +50,12 @@ export class JudgmentQueue {
     });
   }
 
+  cancelPoll(): void {
+    this.#update((batch) => {
+      batch.poll = false;
+    });
+  }
+
   enqueueMessage(binding: WorldBinding, text: string): void {
     this.#requireBinding(binding);
     this.#update((batch) => {

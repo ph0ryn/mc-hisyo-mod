@@ -232,14 +232,20 @@ export default function directorBridge(
       const captured = requireRun(binding, ctx.signal);
       const state = await getState(ctx, ctx.signal);
       requireRun(captured, ctx.signal);
+      // Keep tool acknowledgements last: a refresh must not look like another player request.
+      const index = Math.max(
+        0,
+        event.messages.findLastIndex((message) => message.role === "user"),
+      );
       return {
         messages: [
-          ...event.messages,
+          ...event.messages.slice(0, index),
           {
             role: "user" as const,
-            content: `CURRENT_GAME_STATE\n${JSON.stringify(state)}`,
+            content: `CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(state)}`,
             timestamp: Date.now(),
           },
+          ...event.messages.slice(index),
         ],
       };
     } catch (error) {

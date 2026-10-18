@@ -207,7 +207,13 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
         .then((result) => {
           // not_started still owns this exact batch; started + settled consumes it,
           // including an aborted judgment. Incoming reasons remain in the pending queue.
-          if (result.status === "settled") world.batch = undefined;
+          if (result.status === "settled") {
+            if (world.batch!.hooks.length && this.#current(world)) {
+              world.clock.restart(this.#now());
+              world.queue.cancelPoll();
+            }
+            world.batch = undefined;
+          }
         })
         .catch((error: unknown) => {
           if (this.#world === world) this.#fail(asError(error));

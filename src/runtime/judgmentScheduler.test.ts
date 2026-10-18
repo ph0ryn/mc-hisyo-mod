@@ -543,6 +543,40 @@ test("poll waits for active 60 seconds and does not replay missed intervals", as
   expect(f.session.judge).toHaveBeenCalledTimes(3);
 });
 
+test.each([false, true])(
+  "hook settlement clears queued polls and restarts 60 active seconds (paused: %s)",
+  async (paused) => {
+    const f = fixture();
+    await tick();
+    f.session.settle();
+    await tick();
+    f.at(59_000);
+    f.bridge.emit("observation", stored(1), [hook("important")]);
+    f.at(60_000);
+    expect(f.scheduler.poll(world)).toBe(true);
+    f.bridge.message("keep this input");
+    if (paused) f.bridge.pause(true);
+    f.at(70_000);
+    f.session.settle({ status: "settled", aborted: paused });
+    await tick();
+    const resumedAt = paused ? 1_000_000 : 70_000;
+    f.at(resumedAt);
+    if (paused) f.bridge.pause(false);
+    expect(f.session.batches()[2]).toMatchObject({
+      poll: false,
+      playerMessages: ["keep this input"],
+    });
+    f.session.settle();
+    await tick();
+    f.at(resumedAt + 59_999);
+    expect(f.scheduler.poll(world)).toBe(false);
+    f.at(resumedAt + 60_000);
+    expect(f.scheduler.poll(world)).toBe(true);
+    expect(f.session.batches()[3]).toMatchObject({ poll: true });
+    expect(f.faults).toEqual([]);
+  },
+);
+
 test("busy polling coalesces with all pending player and hook reasons", async () => {
   const f = fixture();
   await tick();
