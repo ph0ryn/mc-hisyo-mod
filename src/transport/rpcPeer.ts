@@ -96,8 +96,9 @@ export class RpcPeer extends EventEmitter<{ close: [reason: Error] }> {
     this.#handlers.set(method, handler);
   }
 
-  async call(method: string, params: RpcParams): Promise<unknown> {
+  async call(method: string, params: RpcParams, timeoutMs = this.#timeoutMs): Promise<unknown> {
     if (this.#failure) throw this.#failure;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid RPC timeout");
     if (this.#pending.size >= maxPendingRequests)
       throw new Error("RPC pending request limit reached");
     const id = String(++this.#nextId);
@@ -107,7 +108,7 @@ export class RpcPeer extends EventEmitter<{ close: [reason: Error] }> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => this.close(new Error(`RPC request ${method} timed out`)),
-        this.#timeoutMs,
+        timeoutMs,
       );
       timer.unref();
       this.#pending.set(id, { resolve, reject, timer });

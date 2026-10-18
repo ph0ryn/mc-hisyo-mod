@@ -41,6 +41,13 @@ import {
 } from "../protocol/bridge.js";
 import { GameEventSchema, type GameEvent } from "../protocol/gameEvent.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
+import { HistorySummaries } from "../storage/historySummaries.js";
+import {
+  HistorySummaryRequestSchema,
+  HistorySummaryResultSchema,
+  summaryInputBytes,
+  validateSummaryText,
+} from "../protocol/history.js";
 
 export interface AttachedWorld {
   binding: WorldBinding;
@@ -73,6 +80,8 @@ export class DirectorBridge extends EventEmitter<{
   peerClosed: [role: BridgeRole | undefined, reason: Error];
   fault: [error: Error];
 }> {
+  readonly history: HistorySummaries;
+  #summarizing = false;
   readonly #options: BridgeOptions;
   readonly #server: ReturnType<typeof createServer>;
   readonly #connections = new Set<Connection>();
@@ -104,6 +113,7 @@ export class DirectorBridge extends EventEmitter<{
     if (options.eventLog.db !== options.hooks.db)
       throw new Error("History and hooks must share one database");
     this.#options = options;
+    this.history = new HistorySummaries(options.eventLog);
     this.on("judgmentRequested", (batch) => {
       this.#requireWorld(batch.binding);
       this.#storage(() => options.eventLog.appendActivities(judgmentActivities(batch)));
@@ -135,6 +145,51 @@ export class DirectorBridge extends EventEmitter<{
 
   get isAgentReady(): boolean {
     return this.#agent?.ready === true;
+  }
+
+  /** Independent, world-bound completion. No main run or tool ownership is acquired. */
+  async summarizeHistory(
+    binding: WorldBinding,
+    input: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    signal.throwIfAborted();
+    if (this.#requireWorld(binding).paused || !this.#agent?.ready || this.#summarizing)
+      throw new Error("History summarizer is not available");
+    const agent = this.#agent;
+    const request = { ...binding, requestId: randomUUID(), input };
+    if (
+      !Check(HistorySummaryRequestSchema, request) ||
+      Buffer.byteLength(input) > summaryInputBytes
+    )
+      throw new Error("Invalid history summary request");
+    this.#summarizing = true;
+    const cancel = () => {
+      try {
+        agent.peer.notify("director.history.cancel", { ...binding, requestId: request.requestId });
+      } catch {
+        agent.peer.close(new Error("History cancellation transport failed"));
+      }
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      // The normal transport deadline is only 5s. Keep it for tools, not model completions.
+      const result = await agent.peer.call("director.history.summarize", request, 300_000);
+      if (
+        !Check(HistorySummaryResultSchema, result) ||
+        !sameWorldBinding(result, binding) ||
+        result.requestId !== request.requestId
+      )
+        throw new Error("Invalid history summary result or binding");
+      signal.throwIfAborted();
+      if (agent !== this.#agent || this.#requireWorld(binding).paused || result.cancelled)
+        throw new Error("History summary became stale");
+      validateSummaryText(result.summary);
+      return result.summary;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+      this.#summarizing = false;
+    }
   }
 
   /** Retain input synchronously before returning, or throw RpcError to refuse it. */
@@ -322,6 +377,10 @@ export class DirectorBridge extends EventEmitter<{
       else this.#agent = connection;
       clearTimeout(timer);
       return { protocolVersion, role: params.role };
+    });
+    this.#register(connection, "director.history.get", "agent", RunBindingSchema, (params) => {
+      const scope = this.#requireRun(params);
+      return { ...params, text: this.#storage(() => this.history.context(scope)) };
     });
     this.#register(connection, "director.ready", "agent", EmptySchema, () => {
       if (connection.ready) throw new RpcError(-32002, "Agent already ready");

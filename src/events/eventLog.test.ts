@@ -522,12 +522,13 @@ test("only valid bound displayed:true ACKs become exact HUD facts", () => {
   expect(() => validateDirectorActivity({ ...input, position: [0, 0, 0] })).toThrow();
 });
 
-test("schema 0 creates v2 nullable-seq events; v2 reopens without table changes", () => {
+test("schema 0 creates nullable-seq events and AI memory; v3 reopens without table changes", () => {
   const fresh = port([[{ user_version: 0 }]]);
   initializeDatabase(fresh.db);
   expect(fresh.transactions[1]).toContain("seq INTEGER CHECK(seq IS NULL OR seq > 0)");
   expect(fresh.transactions[1]).toContain("PRAGMA user_version = 2;");
-  const current = port([[{ user_version: 2 }]]);
+  expect(fresh.transactions.join("\n")).toContain("PRAGMA user_version = 3;");
+  const current = port([[{ user_version: 3 }]]);
   initializeDatabase(current.db);
   expect(current.transactions).toHaveLength(1);
 });
@@ -694,8 +695,17 @@ test("lifecycle recording failures propagate without retry or fabricated success
   expect(f.transactions).toEqual([]);
 });
 
+test("v2 upgrades add AI memory without replacing raw events or hooks", () => {
+  const p = port([[{ user_version: 2 }]]);
+  initializeDatabase(p.db);
+  const sql = p.transactions.join("\n");
+  expect(sql).toContain("CREATE TABLE history_summaries");
+  expect(sql).toContain("PRAGMA user_version = 3");
+  expect(sql).not.toMatch(/DROP|DELETE|CREATE TABLE events|CREATE TABLE response_hooks/);
+});
+
 test("v1 and unknown schema versions fail before even write-affecting PRAGMAs", () => {
-  for (const version of [1, 3, -1, 99, "2", null]) {
+  for (const version of [1, 4, -1, 99, "2", null]) {
     const p = port([[{ user_version: version }]]);
     expect(() => initializeDatabase(p.db)).toThrow("Preserve the existing database");
     expect(p.transactions).toEqual([]);

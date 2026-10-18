@@ -4,7 +4,8 @@
 
 - ルートの単一TypeScriptパッケージをVite+で検査・ビルド・テストする。
 - 独立したFabricプロジェクトをJava 21でビルドする。
-- イベントと応答hookをSQLiteへ保存し、worldId / playerId単位で再読込する。
+- イベント・応答hook・[AI用の定期活動記憶](<context.md#ai用の定期活動記憶>)をSQLiteへ保存し、worldId / playerId単位で再読込する。
+- プレイ中1分ごとに、加工済みの観測を同じモデルのFast / mediumで独立要約し、主判断へ自動注入する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
 - 32種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
@@ -20,8 +21,9 @@
 **CLI通常モード・1秒timer・single-flight scheduler・Mod登録 / 通信は実装済み。**
 `--bridge-only`はPiも判断も起動しない。Pi用flagとの併用は拒否する。
 通常モードは設定を検証してからbridge資源を開き、ready worldでPiを開始する。
-実ゲーム、実Pi / provider、実SQLite / TCP / Files境界の受入れは未実施。
-実装済みと動作受入れ済みを混同しない。
+実ゲーム・実Pi / providerを含む一連の受入れは未実施。
+要約のschema移行・再open後のcursor・rollback・密な観測のページングは使い捨てSQLiteで確認したが、
+実TCPや本番ファイル境界の検証を代替しない。実装済みと動作受入れ済みを混同しない。
 
 ## 検証コマンド
 
@@ -217,9 +219,10 @@ slot差分から「拾った」「クラフトした」とは断定しない。
 - hook一覧はID辞書順、既定8件・最大8件。`nextCursor`を次の`after`へ渡す。
   履歴の`through`とは異なりsnapshotではない。[一覧の契約](<tools.md>)を参照。
 
-SQLiteにはschema versionを保存し、未対応versionは自動変換せず停止する。
-現在はversion 2。新規version 0を初期化し、2を再利用する。version 1は拒否してDBを残す。
-自動migrationはないため、既存DBを削除せず退避し、別の空のdata directoryを使う。
+SQLiteにはschema versionを保存し、未対応versionは変換せず停止する。
+現在はversion 3。新規version 0を初期化し、version 2には要約tableとindexだけをtransactionで追加する。
+既存のrawイベント・hookは保持し、要約cursorは0から始める。version 3は再利用する。
+version 1など未対応DBは削除・修復せず拒否する。その場合は既存DBを退避し、別の空のdata directoryを使う。
 
 ### ゲーム観測とCLI内部履歴
 

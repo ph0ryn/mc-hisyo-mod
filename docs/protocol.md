@@ -148,7 +148,8 @@ Modは収集できるイベントの部分集合だけを通知し、CLIのschem
 - 送信待ちバイト列は**4 MiB**、未完了requestは送受信各**64件**、非同期notification処理も64件まで。
   送信待ちの上限超過は接続を閉じ、request数の超過は明示的なエラーにする。
 - handlerの同期部分は受信順に呼ぶ。非同期の完了順は保証せず、応答はIDで対応付ける。
-- requestの既定timeoutは**5秒**。timeoutや切断でpeerを閉じ、そのpeerの全pending requestを失敗させる。
+- requestの既定timeoutは**5秒**。独立した`director.history.summarize`だけは呼出単位で**5分**にする。
+  timeoutや切断でpeerを閉じ、そのpeerの全pending requestを失敗させる。
   遅れて完了したhandlerの応答は送らず、要求を再送しない。
 - JSON parse失敗は`-32700`、不正なrequestやbatchは`-32600`、不明なmethodは`-32601`。
   不明・不正なnotification、handler失敗のnotification、重複した未完了request ID、
@@ -210,6 +211,9 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
 | `director.hooks.add` / `remove` / `list` | Pi拡張 → CLI | hookの管理とページング |
 | `director.events.get` | Pi拡張 → CLI | イベント履歴と既知の欠損の取得 |
 | `director.events.list` | Pi拡張 → CLI | 対応イベント、schema、照合可能フィールドの一覧 |
+| `director.history.summarize` | CLI → Pi拡張 | world / player / sessionとrequest IDに束縛した独立要約。Toolなし |
+| `director.history.cancel` | CLI → Pi拡張 | 一致する要約requestだけを取消す通知。実完了までslotを保持 |
+| `director.history.get` | Pi拡張 → CLI | 認証済みの現在runに束縛した保存済み要約の背景情報 |
 
 表のhandler・送信処理は接続済み。`director.context.get`は実装せず、最新状態は`game.state.get`、起動理由は判断batchで渡す。
 

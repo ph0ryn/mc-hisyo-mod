@@ -17,6 +17,17 @@ import {
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import { directorToolNames, physicalModelApis } from "./piPolicy.js";
+import { sameWorldBinding } from "../protocol/bridge.js";
+import {
+  HistoryCancelSchema,
+  HistoryContextSchema,
+  HistorySummaryRequestSchema,
+  historyContextBytes,
+  summaryInputBytes,
+  summarySystemPrompt,
+  validateSummaryText,
+  type HistorySummaryRequest,
+} from "../protocol/history.js";
 
 class CancelledRun extends Error {}
 
@@ -63,11 +74,13 @@ export default function directorBridge(
   let retired = false;
   let active = false;
   let abortActive: (() => void) | undefined;
+  let summaryFlight: { request: HistorySummaryRequest; controller: AbortController } | undefined;
 
   function retire(ctx?: ExtensionContext): void {
     // Abort is synchronous; throwing from a Pi context handler alone is not fail-closed.
     retired = true;
     ready = false;
+    summaryFlight?.controller.abort();
     binding = undefined;
     if (ctx) ctx.abort();
     else abortActive?.();
@@ -185,6 +198,72 @@ export default function directorBridge(
       requireHost(ctx);
       peer = await connect();
       peer.on("close", () => retire());
+      peer.handle("director.history.cancel", (params) => {
+        if (!Check(HistoryCancelSchema, params))
+          throw new RpcError(-32602, "Invalid summary cancellation");
+        if (
+          summaryFlight &&
+          summaryFlight.request.requestId === params.requestId &&
+          sameWorldBinding(summaryFlight.request, params)
+        )
+          summaryFlight.controller.abort();
+        return {};
+      });
+      peer.handle("director.history.summarize", async (params) => {
+        if (
+          retired ||
+          !ready ||
+          summaryFlight ||
+          !Check(HistorySummaryRequestSchema, params) ||
+          Buffer.byteLength(params.input) > summaryInputBytes
+        )
+          throw new RpcError(-32602, "Invalid or overlapping history request");
+        requireHost(ctx);
+        const model = ctx.modelRegistry.find("openai", "gpt-6-luna");
+        if (
+          !model ||
+          !physicalModelApis.has(model.api) ||
+          ctx.model?.provider !== model.provider ||
+          ctx.model.id !== model.id
+        )
+          throw new RpcError(-32603, "History requires the same pinned native model");
+        const flight = { request: params, controller: new AbortController() };
+        summaryFlight = flight;
+        const { input: _input, ...requestBinding } = params;
+        try {
+          const response = await ctx.modelRegistry.complete(
+            model,
+            {
+              systemPrompt: summarySystemPrompt,
+              messages: [{ role: "user", content: params.input, timestamp: Date.now() }],
+            },
+            {
+              serviceTier: "fast",
+              reasoningEffort: "medium",
+              maxTokens: 4096,
+              cacheRetention: "none",
+              signal: flight.controller.signal,
+            },
+          );
+          if (flight.controller.signal.aborted || retired)
+            return { ...requestBinding, summary: "", cancelled: true };
+          if (response.stopReason !== "stop") throw new Error("Incomplete summary completion");
+          const summary = response.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join("\n")
+            .trim();
+          validateSummaryText(summary);
+          return { ...requestBinding, summary, cancelled: false };
+        } catch {
+          if (flight.controller.signal.aborted || retired)
+            return { ...requestBinding, summary: "", cancelled: true };
+          // Provider errors may contain credentials or input; never put them on the bridge.
+          throw new RpcError(-32603, "History model completion failed");
+        } finally {
+          summaryFlight = undefined;
+        }
+      });
       peer.handle("director.run.bind", (params) => {
         if (retired || !ready || active || !Check(RunBindingSchema, params))
           throw new RpcError(-32001, "Director is not ready to bind an idle run");
@@ -238,6 +317,13 @@ export default function directorBridge(
       requireHost(ctx);
       const captured = requireRun(binding, ctx.signal);
       const state = await getState(ctx, ctx.signal);
+      const history = await request(captured, "director.history.get", {}, ctx.signal);
+      if (
+        !Check(HistoryContextSchema, history) ||
+        !sameRunBinding(history, captured) ||
+        Buffer.byteLength(history.text) > historyContextBytes
+      )
+        throw new Error("Invalid required history context or binding");
       requireRun(captured, ctx.signal);
       // Keep tool acknowledgements last: a refresh must not look like another player request.
       const index = Math.max(
@@ -249,7 +335,7 @@ export default function directorBridge(
           ...event.messages.slice(0, index),
           {
             role: "user" as const,
-            content: `CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(state)}`,
+            content: `${history.text ? `${history.text}\n\n` : ""}CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(state)}`,
             timestamp: Date.now(),
           },
           ...event.messages.slice(index),

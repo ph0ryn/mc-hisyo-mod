@@ -10,6 +10,7 @@ import { directorToolNames } from "../pi/piPolicy.js";
 import { staleRunErrorCode, type RunBinding, type WorldBinding } from "../protocol/bridge.js";
 import snapshot from "../protocol/fixtures/gameSnapshot.json" with { type: "json" };
 import { JudgmentScheduler } from "../runtime/judgmentScheduler.js";
+import { HistoryWorker } from "../runtime/historyWorker.js";
 import { startPiSession } from "../runtime/piSession.js";
 import { RpcError, type RpcPeer } from "../transport/rpcPeer.js";
 import { DirectorBridge } from "./directorBridge.js";
@@ -149,11 +150,19 @@ async function fixture(supportedEvents: string[] = []) {
     } as unknown as ExtensionAPI,
     () => Promise.resolve(agent.client),
   );
+  const memoryContext = vi.spyOn(bridge.history, "context").mockReturnValue("");
+  const complete = vi.fn<(...args: unknown[]) => Promise<unknown>>(() =>
+    Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: "石を採掘した。" }] }),
+  );
   function context() {
     const controller = new AbortController();
     const ctx = {
       mode: "rpc",
-      model: { api: "openai-completions" },
+      model: { api: "openai-completions", provider: "openai", id: "gpt-6-luna" },
+      modelRegistry: {
+        find: () => ({ api: "openai-completions", provider: "openai", id: "gpt-6-luna" }),
+        complete,
+      },
       signal: controller.signal,
       abort: () => controller.abort(),
     } as unknown as ExtensionContext;
@@ -181,12 +190,96 @@ async function fixture(supportedEvents: string[] = []) {
     context,
     emit,
     tools,
+    complete,
+    memoryContext,
     failStorage: (error: Error, afterObservations = 0) => {
       storageError = error;
       appendsBeforeFailure = afterObservations;
     },
   };
 }
+
+test("history completion is independent of run admission and rejects cancelled late results", async () => {
+  const h = await fixture();
+  expect(
+    await h.bridge.summarizeHistory(h.world, "observed events", new AbortController().signal),
+  ).toBe("石を採掘した。");
+  expect(h.native).toHaveLength(0);
+  expect(h.complete.mock.calls[0]![2]).toMatchObject({
+    serviceTier: "fast",
+    reasoningEffort: "medium",
+  });
+  const response = deferred<unknown>();
+  h.complete.mockImplementation(() => response.promise);
+  const controller = new AbortController();
+  const pending = h.bridge.summarizeHistory(h.world, "more observations", controller.signal);
+  controller.abort();
+  expect((h.complete.mock.calls[1]![2] as { signal: AbortSignal }).signal.aborted).toBe(true);
+  await expect(
+    h.bridge.summarizeHistory(h.world, "overlap", new AbortController().signal),
+  ).rejects.toThrow("History summarizer is not available");
+  const rejected = expect(pending).rejects.toThrow();
+  response.resolve({ stopReason: "stop", content: [{ type: "text", text: "late" }] });
+  await rejected;
+});
+
+test("real bridge pause cancels independent memory and resume cannot revive its result", async () => {
+  const h = await fixture();
+  const attached = h.bridge.readyWorld!;
+  vi.spyOn(h.bridge.history, "next").mockReturnValue({
+    source: {
+      after: 0,
+      through: 1,
+      sourceSessionId: h.world.worldSessionId,
+      sourceCount: 1,
+      firstObservedAt: 1,
+      lastObservedAt: 1,
+      input: "attachment observed",
+    },
+    backlog: false,
+  });
+  const save = vi.spyOn(h.bridge.history, "save").mockImplementation(() => {});
+  const response = deferred<unknown>();
+  h.complete.mockImplementation(() => response.promise);
+  let now = 0;
+  const worker = new HistoryWorker({ bridge: h.bridge, now: () => now });
+  try {
+    now = 60_000;
+    expect(worker.poll(h.world)).toBe(true);
+    const signal = (h.complete.mock.calls[0]![2] as { signal: AbortSignal }).signal;
+    await h.game.client.call("game.status", { ...h.world, paused: true });
+    expect(signal.aborted).toBe(true);
+    expect(attached.paused).toBe(false); // Host emits fresh snapshots, never its mutable world.
+    await h.game.client.call("game.status", { ...h.world, paused: false });
+    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "late" }] });
+    await drain();
+    expect(save).not.toHaveBeenCalled();
+  } finally {
+    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "cleanup" }] });
+    await worker.close();
+  }
+});
+
+test("saved history is authenticated, run-bound, fresh and not exposed as a new game tool", async () => {
+  const h = await fixture();
+  const run = await h.bridge.beginRun();
+  h.memoryContext.mockReturnValue("saved memory");
+  expect(await h.agent.client.call("director.history.get", run)).toEqual({
+    ...run,
+    text: "saved memory",
+  });
+  expect(h.memoryContext).toHaveBeenCalledWith({
+    worldId: run.worldId,
+    playerId: run.playerId,
+  });
+  await expect(h.game.client.call("director.history.get", run)).rejects.toThrow(
+    "forbidden bridge role",
+  );
+  await expect(
+    h.agent.client.call("director.history.get", { ...run, runId: "stale" }),
+  ).rejects.toThrow();
+  expect(h.tools.size).toBe(10);
+});
 
 test("event batches persist in order before observation delivery and retain single-event compatibility", async () => {
   const h = await fixture(["block_broken"]);

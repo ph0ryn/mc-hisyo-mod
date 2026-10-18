@@ -16,6 +16,12 @@ function fixture(args = ["--api-key-env", "KEY"]) {
       order.push("scheduler");
     }),
   });
+  const history = Object.assign(new EventEmitter<{ fault: [error: Error] }>(), {
+    poll: vi.fn((_binding: WorldBinding) => false),
+    close: vi.fn(async () => {
+      order.push("history");
+    }),
+  });
   const bridge = {
     get readyWorld() {
       return readyWorld;
@@ -48,6 +54,10 @@ function fixture(args = ["--api-key-env", "KEY"]) {
       order.push("createScheduler");
       return scheduler;
     }),
+    createHistoryWorker: vi.fn(() => {
+      order.push("createHistory");
+      return history;
+    }),
     everySecond: vi.fn((callback) => {
       sample = callback;
       return () => {
@@ -67,6 +77,7 @@ function fixture(args = ["--api-key-env", "KEY"]) {
   return {
     order,
     scheduler,
+    history,
     base,
     ports,
     stop,
@@ -87,6 +98,7 @@ test.each(["--help", "--bridge-only"])(
     expect(f.ports.readText).not.toHaveBeenCalled();
     expect(f.ports.readEnv).not.toHaveBeenCalled();
     expect(f.ports.createScheduler).not.toHaveBeenCalled();
+    expect(f.ports.createHistoryWorker).not.toHaveBeenCalled();
     expect(f.ports.everySecond).not.toHaveBeenCalled();
     expect(f.ports.startBridge).toHaveBeenCalledTimes(flag === "--help" ? 0 : 1);
     await runtime?.close();
@@ -141,7 +153,7 @@ test("default launch forwards the OAuth source without its refresh grant", async
 test("normal composition snapshots config before bridge, polls only current binding, routes faults", async () => {
   const f = fixture();
   const runtime = (await startDirectorRuntime(f.options, f.ports))!;
-  expect(f.order).toEqual(["config", "bridge", "createScheduler"]);
+  expect(f.order).toEqual(["config", "bridge", "createScheduler", "createHistory"]);
   expect(f.ports.createScheduler).toHaveBeenCalledWith(
     expect.objectContaining({
       bridge: f.base.bridge,
@@ -158,13 +170,14 @@ test("normal composition snapshots config before bridge, polls only current bind
   f.ready(next);
   f.sample();
   expect(f.scheduler.poll.mock.calls).toEqual([[world], [next]]);
+  expect(f.history.poll.mock.calls).toEqual([[world], [next]]);
   const fault = new Error("fault");
   f.scheduler.emit("fault", fault);
   expect(f.onFault).toHaveBeenCalledExactlyOnceWith(fault);
   await runtime.close();
   f.sample();
   expect(f.scheduler.poll).toHaveBeenCalledTimes(2);
-  expect(f.order.slice(-3)).toEqual(["timer", "scheduler", "base"]);
+  expect(f.order.slice(-4)).toEqual(["timer", "history", "scheduler", "base"]);
 });
 
 test("shutdown is published before reentry and waits for scheduler termination before base", async () => {
@@ -189,7 +202,28 @@ test("shutdown is published before reentry and waits for scheduler termination b
   expect(f.scheduler.poll).not.toHaveBeenCalled();
   release();
   await closing;
-  expect(f.order.slice(-3)).toEqual(["timer", "scheduler", "base"]);
+  expect(f.order.slice(-4)).toEqual(["timer", "history", "scheduler", "base"]);
+});
+
+test("history faults are routed and shutdown awaits its pending completion before closing SQLite", async () => {
+  const f = fixture();
+  let release!: () => void;
+  f.history.close.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const runtime = (await startDirectorRuntime(f.options, f.ports))!;
+  const failure = new Error("summary failure");
+  f.history.emit("fault", failure);
+  expect(f.onFault).toHaveBeenCalledExactlyOnceWith(failure);
+  const closing = runtime.close();
+  expect(f.base.close).not.toHaveBeenCalled();
+  release();
+  await closing;
+  expect(f.base.close).toHaveBeenCalledOnce();
+  expect(f.history.listenerCount("fault")).toBe(0);
 });
 
 test("cleanup attempts base and retains all cleanup failures", async () => {
@@ -203,13 +237,17 @@ test("cleanup attempts base and retains all cleanup failures", async () => {
   expect(f.base.close).toHaveBeenCalledTimes(1);
 });
 
-test.each(["scheduler", "timer", "aborted"])(
+test.each(["scheduler", "history", "timer", "aborted"])(
   "partial %s startup cleans owned resources",
   async (stage) => {
     const f = fixture();
     if (stage === "scheduler")
       f.ports.createScheduler = () => {
         throw new Error("create");
+      };
+    if (stage === "history")
+      f.ports.createHistoryWorker = () => {
+        throw new Error("history create");
       };
     if (stage === "timer")
       f.ports.everySecond = () => {

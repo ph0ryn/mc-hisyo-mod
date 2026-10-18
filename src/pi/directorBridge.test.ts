@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { EventEmitter } from "node:events";
 import type { TObject } from "typebox";
 import { Check } from "typebox/value";
-import { expect, test } from "vite-plus/test";
+import { expect, test, vi } from "vite-plus/test";
 import { staleRunErrorCode, type RunBinding } from "../protocol/bridge.js";
 import snapshot from "../protocol/fixtures/gameSnapshot.json" with { type: "json" };
 import type { RpcParams } from "../protocol/jsonRpc.js";
@@ -26,6 +26,11 @@ class ManualPeer extends EventEmitter<{ close: [Error] }> {
   readonly calls: string[] = [];
   readonly requests: { method: string; params: RpcParams }[] = [];
   closes = 0;
+  historyText = "";
+  historyReply = (params: RpcParams): unknown => {
+    if (Array.isArray(params)) throw new Error("Expected history binding object");
+    return { ...params, text: this.historyText };
+  };
   handle(method: string, handler: (params: unknown) => unknown) {
     this.handlers.set(method, handler);
   }
@@ -33,6 +38,7 @@ class ManualPeer extends EventEmitter<{ close: [Error] }> {
     this.calls.push(method);
     this.requests.push({ method, params });
     if (method === "director.ready") return Promise.resolve({ ready: true });
+    if (method === "director.history.get") return Promise.resolve(this.historyReply(params));
     if (method === "game.state.get") {
       const result = deferred();
       this.states.push({ params, result });
@@ -80,6 +86,9 @@ const binding: RunBinding = {
 
 async function setup() {
   const peer = new ManualPeer();
+  const complete = vi.fn<(...args: unknown[]) => Promise<unknown>>(() =>
+    Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: "木を集めた。" }] }),
+  );
   const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
   const tools = new Map<
     string,
@@ -102,7 +111,8 @@ async function setup() {
     const controller = new AbortController();
     const ctx = {
       mode: "rpc",
-      model: { api },
+      model: { api, provider: "openai", id: "gpt-6-luna" },
+      modelRegistry: { find: () => ({ api, provider: "openai", id: "gpt-6-luna" }), complete },
       signal: controller.signal,
       abort: () => controller.abort(),
     } as unknown as ExtensionContext;
@@ -113,8 +123,115 @@ async function setup() {
   }
   await emit("session_start", context().ctx);
   peer.receive("director.run.bind", binding);
-  return { peer, context, emit, tools };
+  return { peer, context, emit, tools, complete };
 }
+
+const summaryRequest = {
+  worldId: "world",
+  playerId: "player",
+  worldSessionId: "session",
+  requestId: "memory-1",
+  input: "block_broken minecraft:oak_log ×3",
+};
+
+test("independent memory completion requests fast with unchanged medium reasoning and no tools", async () => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  expect(await h.peer.receive("director.history.summarize", summaryRequest)).toEqual({
+    worldId: "world",
+    playerId: "player",
+    worldSessionId: "session",
+    requestId: "memory-1",
+    summary: "木を集めた。",
+    cancelled: false,
+  });
+  expect(h.complete).toHaveBeenCalledOnce();
+  expect(h.complete.mock.calls[0]![1]).toMatchObject({
+    messages: [{ role: "user", content: summaryRequest.input }],
+  });
+  expect(h.complete.mock.calls[0]![1]).not.toHaveProperty("tools");
+  expect(h.complete.mock.calls[0]![2]).toMatchObject({
+    serviceTier: "fast",
+    reasoningEffort: "medium",
+  });
+  expect(controller.signal.aborted).toBe(false);
+  expect(h.peer.calls).toEqual(["director.ready"]);
+});
+
+test("summary cancellation keeps its slot until completion settles, without cancelling the main run", async () => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  const response = deferred();
+  h.complete.mockImplementation(() => response.promise);
+  const pending = h.peer.receive("director.history.summarize", summaryRequest);
+  h.peer.receive("director.history.cancel", {
+    worldId: binding.worldId,
+    playerId: binding.playerId,
+    worldSessionId: binding.worldSessionId,
+    requestId: "memory-1",
+  });
+  expect((h.complete.mock.calls[0]![2] as { signal: AbortSignal }).signal.aborted).toBe(true);
+  await expect(
+    h.peer.receive("director.history.summarize", { ...summaryRequest, requestId: "second" }),
+  ).rejects.toThrow("overlapping");
+  response.resolve({ stopReason: "stop", content: [{ type: "text", text: "late summary" }] });
+  expect(await pending).toMatchObject({ summary: "", cancelled: true });
+  expect(controller.signal.aborted).toBe(false);
+});
+
+test.each([
+  { stopReason: "length", content: [{ type: "text", text: "truncated" }] },
+  { stopReason: "stop", content: [{ type: "text", text: " " }] },
+  { stopReason: "stop", content: [{ type: "text", text: "あ".repeat(401) }] },
+])("invalid or truncated summaries fail without a tier/reasoning fallback", async (response) => {
+  const h = await setup();
+  h.complete.mockResolvedValue(response);
+  await expect(h.peer.receive("director.history.summarize", summaryRequest)).rejects.toThrow(
+    "History model completion failed",
+  );
+  expect(h.complete).toHaveBeenCalledTimes(1);
+});
+
+test("refreshes saved compact memory at every context call without persisting it", async () => {
+  const h = await setup();
+  const { ctx } = h.context();
+  h.emit("agent_start", ctx);
+  const messages = [
+    { role: "user", content: "judge" },
+    { role: "toolResult", content: "ACK" },
+  ];
+  for (const text of ["木を集めた。", "鉄を採掘した。"]) {
+    h.peer.historyText = text;
+    const pending = Promise.resolve(h.emit("context", ctx, { messages }));
+    h.peer.states.at(-1)!.result.resolve({ ...binding, state: snapshot });
+    expect(await pending).toMatchObject({
+      messages: [
+        { content: expect.stringContaining(`${text}\n\nCURRENT_GAME_STATE`) },
+        ...messages,
+      ],
+    });
+  }
+  expect(messages).toHaveLength(2);
+  expect(h.peer.calls.filter((method) => method === "director.history.get")).toHaveLength(2);
+});
+
+test.each([
+  { ...binding, text: "あ".repeat(2001) },
+  { ...binding, runId: "stale", text: "history" },
+  { text: "unbound" },
+])("malformed, oversized or stale memory fails closed", async (result) => {
+  const h = await setup();
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  h.peer.historyReply = () => result;
+  const pending = Promise.resolve(h.emit("context", ctx, { messages: [] }));
+  h.peer.states[0]!.result.resolve({ ...binding, state: snapshot });
+  await expect(pending).rejects.toThrow("history context");
+  expect(controller.signal.aborted).toBe(true);
+  expect(h.peer.closes).toBe(1);
+});
 
 test("registers exactly the ten scoped tools", async () => {
   const h = await setup();

@@ -12,12 +12,12 @@ export function openDatabase(path: string): DatabaseSync {
   }
 }
 
-/** Version 1 cannot represent truthful CLI-origin facts. Deliberately no migration. */
+/** Version 1 cannot represent truthful CLI-origin facts; only the additive v2 upgrade is supported. */
 export function initializeDatabase(db: Pick<DatabaseSync, "prepare" | "exec">): void {
   const version = db.prepare("PRAGMA user_version").get()?.user_version;
-  if (typeof version !== "number" || (version !== 0 && version !== 2))
+  if (typeof version !== "number" || ![0, 2, 3].includes(version))
     throw new Error(
-      "Unsupported database schema: expected version 2. Preserve the existing database and select a new empty data directory; automatic migration is not supported.",
+      "Unsupported database schema: expected version 3 (or upgradeable version 2). Preserve the existing database and select a compatible data directory; version 1 migration is not supported.",
     );
   db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 1000;");
   if (version === 0) {
@@ -51,5 +51,39 @@ export function initializeDatabase(db: Pick<DatabaseSync, "prepare" | "exec">): 
         PRAGMA user_version = 2;
         COMMIT;
       `);
+  }
+  if (version === 0 || version === 2) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(`
+        CREATE TABLE history_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          world_id TEXT NOT NULL,
+          player_id TEXT NOT NULL,
+          source_after INTEGER NOT NULL CHECK(source_after >= 0),
+          source_through INTEGER NOT NULL CHECK(source_through > source_after),
+          source_json TEXT NOT NULL CHECK(json_valid(source_json)),
+          summary TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          model TEXT NOT NULL,
+          requested_tier TEXT NOT NULL,
+          prompt_version INTEGER NOT NULL,
+          UNIQUE(world_id, player_id, source_after)
+        ) STRICT;
+        CREATE INDEX history_summaries_scope ON history_summaries(world_id, player_id, id);
+        PRAGMA user_version = 3;
+        COMMIT;
+      `);
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "History schema upgrade and rollback failed",
+        );
+      }
+      throw error;
+    }
   }
 }

@@ -5,12 +5,17 @@ import type { CliOptions } from "../cliOptions.js";
 import { startBridgeRuntime, type BridgeRuntime } from "./bridgeRuntime.js";
 import { resolveTrustedConfig, type ConfigInput } from "./directorConfig.js";
 import { JudgmentScheduler, type JudgmentSchedulerOptions } from "./judgmentScheduler.js";
+import { HistoryWorker, type HistoryWorkerOptions } from "./historyWorker.js";
 
 export interface DirectorRuntimePorts extends Omit<ConfigInput, "homeDirectory"> {
   startBridge: typeof startBridgeRuntime;
   createScheduler: (
     options: JudgmentSchedulerOptions,
   ) => Pick<JudgmentScheduler, "poll" | "close"> &
+    Pick<EventEmitter<{ fault: [error: Error] }>, "on" | "off">;
+  createHistoryWorker: (
+    options: HistoryWorkerOptions,
+  ) => Pick<HistoryWorker, "poll" | "close"> &
     Pick<EventEmitter<{ fault: [error: Error] }>, "on" | "off">;
   everySecond: (sample: () => void) => () => void;
 }
@@ -19,6 +24,7 @@ const resources: DirectorRuntimePorts = {
   readEnv: (name) => process.env[name],
   startBridge: startBridgeRuntime,
   createScheduler: (options) => new JudgmentScheduler(options),
+  createHistoryWorker: (options) => new HistoryWorker(options),
   everySecond: (sample) => {
     const timer = setInterval(sample, 1_000);
     return () => clearInterval(timer);
@@ -47,6 +53,7 @@ export async function startDirectorRuntime(
     config?.dataDirectory ?? resolve(options.dataDirectory ?? join(homeDirectory, ".mc-hisyo"));
   let base: BridgeRuntime | undefined;
   let scheduler: ReturnType<DirectorRuntimePorts["createScheduler"]> | undefined;
+  let history: ReturnType<DirectorRuntimePorts["createHistoryWorker"]> | undefined;
   let cancelTimer: (() => void) | undefined;
   let closing = false;
   let shutdown: Promise<void> | undefined;
@@ -54,14 +61,14 @@ export async function startDirectorRuntime(
     if (shutdown) return shutdown;
     const errors: unknown[] = [];
     let schedulerShutdown: Promise<void> | undefined;
+    let historyShutdown: Promise<void> | undefined;
     // Publish before timer disposal or scheduler invalidation can reenter close().
     shutdown = Promise.resolve().then(async () => {
-      try {
-        await schedulerShutdown;
-      } catch (error) {
-        errors.push(error);
+      for (const result of await Promise.allSettled([historyShutdown, schedulerShutdown])) {
+        if (result.status === "rejected") errors.push(result.reason);
       }
       scheduler?.off("fault", onFault);
+      history?.off("fault", onFault);
       try {
         await base?.close();
       } catch (error) {
@@ -72,6 +79,11 @@ export async function startDirectorRuntime(
     closing = true;
     try {
       cancelTimer?.();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      historyShutdown = history?.close();
     } catch (error) {
       errors.push(error);
     }
@@ -99,6 +111,8 @@ export async function startDirectorRuntime(
         ...(onLog ? { onLog } : {}),
       });
       scheduler.on("fault", onFault);
+      history = ports.createHistoryWorker({ bridge: base.bridge });
+      history.on("fault", onFault);
       signal.throwIfAborted();
       cancelTimer = ports.everySecond(() => {
         if (closing || signal.aborted) return;
@@ -106,6 +120,7 @@ export async function startDirectorRuntime(
         if (world) {
           try {
             scheduler!.poll(world.binding);
+            if (!closing && !signal.aborted) history!.poll(world.binding);
           } catch (error) {
             onFault(error instanceof Error ? error : new Error("Director polling failed"));
           }
