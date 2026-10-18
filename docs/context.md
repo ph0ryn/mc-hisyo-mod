@@ -30,19 +30,23 @@ CLIは開始・poll・入力・hookの理由を判断前に記録して渡す。
 ## AI用の定期活動記憶
 
 通常モードでは、プレイ中の累積1分ごとに[独立worker](<../src/runtime/historyWorker.ts>)が未要約の観測を古い順に処理する。
-主判断やhookとは別の時計・取消・single-flightを持ち、Toolや新しいPi sessionは起動しない。人向け履歴UIも追加しない。
-モデルは主判断と同じ`openai/gpt-6-luna`、要求は`serviceTier: fast`・`reasoningEffort: medium`に固定する。
-Fastのアカウント別利用可否や実際の提供tierは未検証。別tier・別モデルへ自動fallbackしない。
+主判断とは独立して経過時間・取消・single-flightを管理し、Toolや新しいPi sessionは起動しない。人向け履歴UIも追加しない。
+モデルは主判断と同じ`openai/gpt-6-luna`、要約の思考量は`reasoningEffort: low`とする。主判断の`medium`は変えない。
+Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-mode.md)である`serviceTier: priority`で要求する。
+隔離した実Piで成功を確認したが、応答の実提供tierは未取得。別tier・別モデルへ自動fallbackしない。
 
 - [前処理](<../src/events/compactHistory.ts>)でraw JSONを短い観測テキストへ変える。
   同一操作の連続を数え、移動・周辺sampleは件数、観測した種類、最初／最後のsampleなどへ集約する。
   到着順と観測時刻の範囲、既知のsequence欠損、省略、観測の限界を残す。構造物metadataを発見扱いにしない。
 - 1回の対象は同じsource sessionの連続prefix、最大500行。system指示と入力は合計12,000 UTF-8 bytes以内。
   応答は日本語の事実を最大3項目、1,200 bytes以内とする。完全な記録ではなく、詳細はraw履歴を検索する。
-- [保存先](<../src/storage/historySummaries.ts>)は同じSQLiteの`history_summaries`。
+- [保存先](<../src/storage/historySummaries.ts>)はraw履歴の`history.sqlite`とは別の`summaries.sqlite`にある`history_summaries`。
   world / playerごとに元のID範囲・session・時刻・加工入力・要約・モデル・要求tierを保持する。
-  正常な要約の保存とcursorの進行は同一transaction。rawイベントやhookは変更しない。
-- pause・退出・終了では先に結果を無効化して取消す。遅い完了を保存せず、終了時の追加要約もしない。
+  正常な要約の保存とcursorの進行は要約DB内の同一transaction。rawイベントやhookは変更しない。
+  旧raw version 3の要約は起動時に検証してコピーし、元の行とversionを残す。再起動時の重複コピーは行わず、不一致は停止する。
+- pause中は定期実行までの経過時間を数えず、新しい要約を開始しない。進行中の要約は完了・保存まで続ける。
+  ゲーム内時刻の取得を止める意味ではない。
+  退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加要約もしない。
   空の差分では呼び出さず、重なった周期を後から連打しない。取消・失敗時はcursorを進めず、失敗は通常のruntime faultとして扱う。
 - 再接続後も同じworld / playerのcursorから継続し、以前のsessionも古い順に読む。
   件数・入力上限を超える量が続けば遅れるため、最新状態と同一視しない。

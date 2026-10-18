@@ -179,7 +179,9 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
   入力を保持して正常終了した場合だけ`accepted: true`を返す。判断の開始・完了を意味しない。
   gameが未ready、受付未登録・解除後・bridge終了中は`-32003`で拒否する。bridge-onlyでも成功扱いにして捨てない。
   pause中の受付は可能だが、判断実行の可否はruntimeが制御する。拒否されたnotificationは接続を閉じる。
-- pause・detach・切断でrunを即時無効化し、Modへ`game.run.clear`を通知する。
+- pause中は新規runをbindせず、定期実行までの経過時間も数えない。ゲーム内時刻は引き続き取得できる。
+  開始済みのrun・Tool・要約は継続する。
+  detach・切断・明示取消でrunを即時無効化し、Modへ`game.run.clear`を通知する。
   clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。
 - 判断はsingle-flight。無効化してもslotを保持し、呼出側が`agent_settled`を確認して`finishRun`するまで次を開始しない。
 - Tool要求にはworld / player / session / runの完全一致が必要。Modからの応答もawait後にbindingを再確認する。
@@ -226,9 +228,9 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
 不正・異なるbinding・通知と一致しないエラーはfatal。例外を投げるだけで次provider要求を止めたことにしない。
 
 次の`beginRun`はnative bindを送る**前**にこの不確定状態を待つ。
-実際の`game.status`で解除し、pauseやstatus履歴を捏造しない。待機の取消はそのwaiterだけを起こし、共有状態を勝手に解除しない。
+実際のunpausedな`game.status`で解除し、pauseやstatus履歴を捏造しない。待機の取消はそのwaiterだけを起こし、共有状態を勝手に解除しない。
 `readyWorld`、チャット / hook受付、active-play時計はこの待機だけを理由に変更しない。
-pause・退出・closeのfenceもabort / cleanupより先で、slotは実settledまたは子の終了確認まで保持する。
+退出・close・明示取消のfenceもabort / cleanupより先で、slotは実settledまたは子の終了確認まで保持する。
 
 有効な`displayed: true`の同じcaptured binding ACKは、後着でstaleになっていても履歴へ保存してからstaleを返す。
 曖昧な表示・状態取得は再送せず、不正なACKを成功記録しない。

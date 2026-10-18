@@ -5,7 +5,7 @@
 - ルートの単一TypeScriptパッケージをVite+で検査・ビルド・テストする。
 - 独立したFabricプロジェクトをJava 21でビルドする。
 - イベント・応答hook・[AI用の定期活動記憶](<context.md#ai用の定期活動記憶>)をSQLiteへ保存し、worldId / playerId単位で再読込する。
-- プレイ中1分ごとに、加工済みの観測を同じモデルのFast / mediumで独立要約し、主判断へ自動注入する。
+- プレイ中1分ごとに、加工済みの観測を同じモデルのFast / lowで独立要約し、主判断へ自動注入する。主判断はmediumを維持する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
 - 32種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
@@ -16,14 +16,14 @@
 - Pi stdio driverでmetadataを検査し、単一判断の開始・実際のsettled・取消・子プロセス終了を管理する。
 - 隔離したPi sessionを起動し、world / player単位の会話再開と、binding無効化時の取消・終了を管理する。
 - [保留キュー](<scheduling.md#保留キュー>)でチャット順序・発火時のhookとイベントを保持し、容量超過を明示エラーにする。
-- [scheduler](<scheduling.md#実行制御>)で開始・チャット・一致hookを単一判断へ渡し、pause・退出・過負荷時の取消と所有権を管理する。
+- [scheduler](<scheduling.md#実行制御>)で開始・チャット・一致hookを単一判断へ渡し、pause中の新規開始制限と、退出・過負荷時の取消・所有権を管理する。
 
 **CLI通常モード・1秒timer・single-flight scheduler・Mod登録 / 通信は実装済み。**
 `--bridge-only`はPiも判断も起動しない。Pi用flagとの併用は拒否する。
 通常モードは設定を検証してからbridge資源を開き、ready worldでPiを開始する。
 実ゲーム・実Pi / providerを含む一連の受入れは未実施。
-要約のschema移行・再open後のcursor・rollback・密な観測のページングは使い捨てSQLiteで確認したが、
-実TCPや本番ファイル境界の検証を代替しない。実装済みと動作受入れ済みを混同しない。
+要約の別DBへのコピー・再open後のcursor・rollback・密な観測のページングは使い捨てSQLiteで確認した。
+合成観測と隔離DBによる実TCP / 実Piの独立Fast要求も確認したが、実ゲームや既存ユーザーDBでの受入れを代替しない。
 
 ## 検証コマンド
 
@@ -128,10 +128,11 @@ node dist/cli.mjs --bridge-only --data-dir /absolute/private/state
 既存ディレクトリには所有者と`0700`を要求し、symlinkは拒否する。既存の権限を自動でchmodしない。
 親ディレクトリは信頼できる場所を使う。POSIX modeを検査する実装で、拡張ACLとWindows ACLは未検証、Windows起動は未対応。
 
-- `history.sqlite`へ履歴とhookを保存する。既存のmain / WAL / SHM / journalは、所有者・regular file・`0600`・link数1をopen前に検査する。
+- raw履歴とhookは`history.sqlite`、要約とそのcursorは別の`summaries.sqlite`へ保存する。
+  両DBのmain / WAL / SHM / journalは、所有者・regular file・`0600`・link数1をopen前に検査する。
 - `connection.json`へprotocolVersion、loopback接続先、port、token、PIDを公開する。[公開と削除の契約](<protocol.md>)を参照。
 - 接続情報が既にあれば停止する。内容が壊れていても読み飛ばして上書きしたり、PIDだけで古いと判断したりしない。
-- Ctrl-C / SIGINT / SIGTERMでlistenerと接続、SQLite、自分の接続情報を順に閉じる。履歴とhookは残す。
+- Ctrl-C / SIGINT / SIGTERMでlistenerと接続、両SQLite、自分の接続情報を順に閉じる。履歴・hook・要約は残す。
 - SIGKILLやcrash後の接続情報は自動回収しない。所有プロセスの停止を確認してから手動で処理する。
 
 起動表示へtokenは出さない。`--help`はstateを作らず、SQLiteやPiも起動しない。
@@ -169,7 +170,8 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
   refresh tokenや他providerの認証は子へ渡さず、いずれのkey / tokenも引数や診断へ出さない。
 - モデル定義はPiの組込catalogを消さない。毎判断で正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
 - scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
-- pauseはbinding無効化後に取消し、実settledまで予約を保つ。detach・agent切断・開始済みか不明な失敗では子を終了する。
+- pause中は新しい判断を開始せず、開始済みの判断・Tool・要約は続ける。明示取消ではbinding無効化後に取消し、実settledまで予約を保つ。
+  detach・agent切断・開始済みか不明な失敗では子を終了する。
   終了を確認できなければleaseと予約を残し、別の所有者へ渡さない。
 
 これはPiの起動・Tool policyであり、OSやネットワークのsandboxではない。`--offline`も推論先へのHTTPを禁止しない。
@@ -219,10 +221,12 @@ slot差分から「拾った」「クラフトした」とは断定しない。
 - hook一覧はID辞書順、既定8件・最大8件。`nextCursor`を次の`after`へ渡す。
   履歴の`through`とは異なりsnapshotではない。[一覧の契約](<tools.md>)を参照。
 
-SQLiteにはschema versionを保存し、未対応versionは変換せず停止する。
-現在はversion 3。新規version 0を初期化し、version 2には要約tableとindexだけをtransactionで追加する。
-既存のrawイベント・hookは保持し、要約cursorは0から始める。version 3は再利用する。
-version 1など未対応DBは削除・修復せず拒否する。その場合は既存DBを退避し、別の空のdata directoryを使う。
+両SQLiteは独立したschema versionを持ち、未対応versionは変換せず停止する。
+raw DBは新規ならversion 2を作り、既存version 2 / 3はversion・rawイベント・hookをそのまま保持する。
+要約DBは独立したversion 1。旧raw version 3に要約があれば、起動時に全行を検証して要約DB内の1 transactionでコピーする。
+元の要約は削除せず、同一行の再コピーは行わない。不正な行・既存コピーとの不一致・cursorの不連続はrollbackして停止する。
+新しい要約は要約DBだけへ書き、保存とcursor更新は同じtransactionで確定する。モデルの応答待ち中はtransactionを開かない。
+raw version 1など未対応DBは削除・修復せず拒否する。その場合は既存DBを退避し、別の空のdata directoryを使う。
 
 ### ゲーム観測とCLI内部履歴
 

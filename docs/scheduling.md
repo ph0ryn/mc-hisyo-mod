@@ -47,12 +47,14 @@ schedulerはreadyのworldごとに時計を作り、attach時点から非pause�
 戻り値`true`は予約の受付・集約であり実行完了ではない。未到達・古いbinding・停止中は`false`、計時や受付の失敗は`fault`で明示して停止する。
 プレイヤー入力・hookは同じ次回batchに保持し、pollだけのために別slotや割込みを作らない。
 hookを含む判断が`settled`になった時点で、保留pollだけを取り消し、そこから60秒のactive-play計時をやり直す。
-無言・pause取消を含むが、`not_started`ではリセットしない。保留のチャット・hookは残し、pause中の時間は引き続き数えない。
+無言・明示取消を含むが、`not_started`ではリセットしない。保留のチャット・hookは残し、pause中の時間は引き続き数えない。
 時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
 [runtime](<../src/runtime/directorRuntime.ts>)は1,000 msごとにready worldへこの入口を呼び、shutdown時にtimerを最初に止める。
 
-pause・退出・切断は実行中のbindingも直ちに無効化する。CLIはPiへabortを要求し、
-`agent_settled`を確認するまでslotを解放しない。停止待ちの間に復帰しても判断を重ねない。
+pause中は定期実行までの経過時間を数えず、新しい判断を開始しない。ゲーム内時刻の取得を止める意味ではない。
+開始済みの判断・Tool・独立要約は、同じbindingで完了まで続ける。
+退出・切断・明示停止では実行中のbindingを直ちに無効化し、CLIはPiへabortを要求する。
+`agent_settled`を確認するまでslotを解放せず、停止待ちの間に復帰しても判断を重ねない。
 
 ## 応答hook
 
@@ -107,7 +109,7 @@ CLIが実行待ちを管理し、同じhookの発火はイベントを失わず�
 処理待ち入力が容量上限を超えたら、明示エラーで判断処理を停止する。黙示的な破棄や永続inboxへの退避は行わない。
 
 現在は優先度別laneや入力割込みを設けず、同じqueueで順番に処理する。
-取消はpause・binding無効化・停止等で行い、入力到着だけで進行中の判断を中断しない。
+取消はbinding無効化・停止等で行い、pauseや入力到着だけで進行中の判断を中断しない。
 
 Piの`steer`は進行中のAPI応答を即座に中断する機能ではなく、次のLLM呼び出し前に入力を渡す仕組みである。
 実行の完了確認には`agent_settled`を使う。
