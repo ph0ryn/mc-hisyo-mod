@@ -116,6 +116,92 @@ function prepare(entry: StoredEvent): Projection {
   };
 }
 
+// Minecraft 1.21.11 Inventory.EQUIPMENT_SLOT_MAPPING; main hand is a selected hotbar slot.
+const equipmentSlots = new Map<string, number>([
+  ["feet", 36],
+  ["legs", 37],
+  ["chest", 38],
+  ["head", 39],
+  ["offHand", 40],
+  ["body", 41],
+  ["saddle", 42],
+]);
+
+function sameStackChange(a: Projection, b: Projection): boolean {
+  return ["beforeItemId", "beforeCount", "afterItemId", "afterCount"].every(
+    (field) => a.entry.observation.data[field] === b.entry.observation.data[field],
+  );
+}
+
+/** Coalesce views of a physical stack change, not repeated actions or selected-slot changes. */
+function stackMirrors(entries: readonly Projection[]) {
+  const omitted = new Set<Projection>();
+  const equipped = new Map<Projection, string>();
+  const containers = new Map<number, Projection>();
+  const snapshots = new Map<string, Projection>();
+  let previousScope: string | undefined;
+  for (const projection of entries) {
+    const { entry } = projection;
+    const { event, data, worldId, playerId, worldSessionId, dimension, tick, observedAt } =
+      entry.observation;
+    const scope = JSON.stringify([worldId, playerId, worldSessionId, dimension, tick]);
+    if (
+      scope !== previousScope ||
+      entry.missingSequencesBefore ||
+      event === "container_opened" ||
+      event === "container_closed"
+    ) {
+      containers.clear();
+      snapshots.clear();
+    }
+    previousScope = scope;
+    if (event === "container_slot_changed" && data.playerInventory === true) {
+      // Independent broadcast baseline: only the nearest preceding transition is eligible.
+      containers.set(data.containerSlot as number, projection);
+    } else if (event === "inventory_slot_changed") {
+      const slot = data.slot as number;
+      const prior = containers.get(slot);
+      containers.delete(slot);
+      if (prior && sameStackChange(prior, projection)) omitted.add(prior);
+      snapshots.set(`${observedAt}:${slot}`, projection);
+    } else if (event === "equipment_slot_changed" || event === "held_item_changed") {
+      let slot: number | undefined;
+      let equipment: string;
+      if (event === "equipment_slot_changed") {
+        equipment = data.slot as string;
+        slot = equipmentSlots.get(equipment);
+      } else if (data.hand === "off_hand") {
+        equipment = "offHand";
+        slot = 40;
+      } else {
+        if (typeof data.beforeSlot !== "number" || data.beforeSlot !== data.afterSlot) continue;
+        equipment = "mainHand";
+        slot = data.beforeSlot;
+      }
+      if (slot === undefined) continue;
+      const key = `${observedAt}:${slot}`;
+      const prior = snapshots.get(key);
+      if (prior && prior.entry.observation.event !== event && sameStackChange(prior, projection)) {
+        omitted.add(projection);
+        if (prior.entry.observation.event === "inventory_slot_changed")
+          equipped.set(prior, equipment);
+      } else if (event === "equipment_slot_changed") snapshots.set(key, projection);
+    }
+  }
+  return { omitted, equipped };
+}
+
+function timelineText(projection: Projection, lastId: number, count: number): string {
+  const range = `e${projection.entry.id}${count > 1 ? `..e${lastId}` : ""}`;
+  const { event, data } = projection.entry.observation;
+  if (count > 1 && (event === "grid_result_taken" || event === "furnace_result_taken")) {
+    const { count: quantity, ...context } = data;
+    const total = BigInt(quantity as number) * BigInt(count);
+    return `${range} ${event} ${valueText(context)} totalTaken=${total} creditedTakeEvents=${count}${projection.location}`;
+  }
+  return `${range}${count > 1 ? ` [${count} identical observations]` : ""} ${projection.text}`;
+}
+
 /** Timeline uses arrival order, not timestamp order. Samples are explicitly separate aggregates. */
 function project(entries: readonly Projection[]): string {
   const timeline: { projection: Projection; lastId: number; count: number }[] = [];
@@ -124,12 +210,25 @@ function project(entries: readonly Projection[]): string {
     { first: Projection; last: Projection; count: number; seen: Set<string> }
   >();
   const gaps: string[] = [];
-  for (const projection of entries) {
-    const entry = projection.entry;
-    if ("missingSequencesBefore" in entry && entry.missingSequencesBefore)
+  const { omitted, equipped } = stackMirrors(entries);
+  let separate = false;
+  for (const original of entries) {
+    const entry = original.entry;
+    if (entry.missingSequencesBefore) {
       gaps.push(
         `e${entry.id}: missing seq ${entry.missingSequencesBefore.from}..${entry.missingSequencesBefore.to}`,
       );
+      separate = true;
+    }
+    if (omitted.has(original)) continue;
+    const equipment = equipped.get(original);
+    const projection = equipment
+      ? {
+          ...original,
+          text: `${original.text} equipped=${equipment}`,
+          key: `${original.key}:equipped=${equipment}`,
+        }
+      : original;
     if (projection.sampleKey) {
       const prior = samples.get(projection.sampleKey);
       if (prior) {
@@ -144,19 +243,17 @@ function project(entries: readonly Projection[]): string {
           seen: new Set(projection.seen),
         });
     } else {
-      const prior = timeline.at(-1);
+      const prior = separate ? undefined : timeline.at(-1);
       if (prior?.projection.key === projection.key) {
         prior.count++;
         prior.lastId = entry.id;
       } else timeline.push({ projection, lastId: entry.id, count: 1 });
+      separate = false;
     }
   }
   return [
     ...gaps,
-    ...timeline.map(
-      ({ projection, lastId, count }) =>
-        `e${projection.entry.id}${count > 1 ? `..e${lastId} [${count} identical observations]` : ""} ${projection.text}`,
-    ),
+    ...timeline.map(({ projection, lastId, count }) => timelineText(projection, lastId, count)),
     ...[...samples].map(([kind, { first, last, count, seen }]) => {
       const start =
         first.entry.observation.event === "player_location_changed"

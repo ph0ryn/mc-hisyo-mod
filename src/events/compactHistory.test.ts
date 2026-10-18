@@ -122,6 +122,259 @@ test("refuses CLI activity rather than projecting speech into game memory", () =
   expect(() => compactHistory(0, [record])).toThrow(/Mod observations/);
 });
 
+const stackChange = {
+  beforeItemId: "minecraft:air",
+  beforeCount: 0,
+  afterItemId: "minecraft:stone",
+  afterCount: 3,
+};
+
+function stackRow(
+  id: number,
+  event: string,
+  data: Record<string, unknown>,
+  changes: Record<string, unknown> = {},
+): StoredEvent {
+  return row(id, event, {
+    tick: 200,
+    observedAt: 2000,
+    data: { ...stackChange, ...data },
+    ...changes,
+  });
+}
+
+test("renders one equipped inventory transition for matching container, equipment and hand mirrors", () => {
+  const source = compactHistory(0, [
+    stackRow(
+      1,
+      "container_slot_changed",
+      {
+        menuId: 1,
+        containerId: 2,
+        slot: 9,
+        containerSlot: 40,
+        playerInventory: true,
+      },
+      { observedAt: 1900, position: [3, 65, 0] },
+    ),
+    stackRow(2, "inventory_slot_changed", { slot: 40 }),
+    row(3, "health_changed", { tick: 200, observedAt: 2000 }),
+    stackRow(4, "equipment_slot_changed", { slot: "offHand" }),
+    stackRow(5, "held_item_changed", { hand: "off_hand", beforeSlot: null, afterSlot: null }),
+  ])!;
+  expect(source).toMatchObject({
+    through: 5,
+    sourceCount: 5,
+    firstObservedAt: 1900,
+    lastObservedAt: 2000,
+  });
+  expect(source.input).toContain("inventory_slot_changed");
+  expect(source.input).toContain("equipped=offHand");
+  expect(source.input.match(/afterItemId=minecraft:stone/gu)).toHaveLength(1);
+  expect(source.input).not.toContain("container_slot_changed");
+  expect(source.input).not.toContain("equipment_slot_changed");
+  expect(source.input).not.toContain("held_item_changed");
+  expect(source.input).toContain("health_changed");
+});
+
+test.each([
+  ["feet", 36],
+  ["legs", 37],
+  ["chest", 38],
+  ["head", 39],
+  ["offHand", 40],
+  ["body", 41],
+  ["saddle", 42],
+])("keeps the %s equipment meaning on physical inventory slot %i", (equipment, slot) => {
+  const source = compactHistory(0, [
+    stackRow(1, "inventory_slot_changed", { slot }),
+    stackRow(2, "equipment_slot_changed", { slot: equipment }),
+  ])!;
+  expect(source.input).toContain(`equipped=${equipment}`);
+  expect(source.input).not.toContain("equipment_slot_changed");
+  expect(source.sourceCount).toBe(2);
+});
+
+test("coalesces stable main-hand mirrors but preserves every hotbar selection change", () => {
+  const source = compactHistory(0, [
+    stackRow(1, "inventory_slot_changed", { slot: 3 }),
+    stackRow(2, "held_item_changed", { hand: "main_hand", beforeSlot: 3, afterSlot: 3 }),
+    stackRow(3, "held_item_changed", { hand: "main_hand", beforeSlot: 3, afterSlot: 4 }),
+    stackRow(4, "held_item_changed", {
+      hand: "main_hand",
+      beforeSlot: 4,
+      afterSlot: 5,
+      beforeItemId: "minecraft:stone",
+      beforeCount: 3,
+    }),
+  ])!;
+  expect(source.input).toContain("equipped=mainHand");
+  expect(source.input.match(/held_item_changed/gu)).toHaveLength(2);
+  expect(source.input).toContain("beforeSlot=3 afterSlot=4");
+  expect(source.input).toContain("beforeSlot=4 afterSlot=5");
+});
+
+test.each([
+  { tick: 201 },
+  { observedAt: 2001 },
+  { dimension: "minecraft:the_nether" },
+  { worldId: "other-world" },
+  { playerId: "other-player" },
+  { data: { beforeItemId: "minecraft:dirt" } },
+  { data: { beforeCount: 1 } },
+  { data: { afterItemId: "minecraft:dirt" } },
+  { data: { afterCount: 4 } },
+])("does not merge a different hand snapshot or transition: %j", ({ data = {}, ...changes }) => {
+  const source = compactHistory(0, [
+    stackRow(1, "inventory_slot_changed", { slot: 40 }),
+    stackRow(
+      2,
+      "held_item_changed",
+      {
+        hand: "off_hand",
+        beforeSlot: null,
+        afterSlot: null,
+        ...data,
+      },
+      changes,
+    ),
+  ])!;
+  expect(source.input).toContain("held_item_changed");
+});
+
+test("only pairs the nearest preceding container transition once, preserving cycles and later mutations", () => {
+  const container = { menuId: 1, containerId: 2, slot: 9, containerSlot: 3, playerInventory: true };
+  const source = compactHistory(0, [
+    stackRow(1, "container_slot_changed", container),
+    stackRow(2, "container_slot_changed", {
+      ...container,
+      beforeItemId: "minecraft:stone",
+      beforeCount: 3,
+      afterItemId: "minecraft:air",
+      afterCount: 0,
+    }),
+    stackRow(3, "container_slot_changed", container),
+    stackRow(4, "inventory_slot_changed", { slot: 3 }),
+    stackRow(5, "container_slot_changed", container, { observedAt: 2100 }),
+  ])!;
+  expect(source.input.match(/container_slot_changed/gu)).toHaveLength(3);
+  expect(source.input).toContain("e1 container_slot_changed");
+  expect(source.input).toContain("e2 container_slot_changed");
+  expect(source.input).not.toContain("e3 container_slot_changed");
+  expect(source.input).toContain("e4 inventory_slot_changed");
+  expect(source.input).toContain("e5 container_slot_changed");
+  expect(source).toMatchObject({ through: 5, sourceCount: 5 });
+});
+
+test("never confuses non-player crafting slots or menu indices with physical inventory slots", () => {
+  const source = compactHistory(0, [
+    stackRow(1, "container_slot_changed", {
+      menuId: 1,
+      containerId: 2,
+      slot: 0,
+      containerSlot: 40,
+      playerInventory: false,
+    }),
+    stackRow(2, "container_slot_changed", {
+      menuId: 1,
+      containerId: 2,
+      slot: 40,
+      containerSlot: 7,
+      playerInventory: true,
+    }),
+    stackRow(3, "inventory_slot_changed", { slot: 40 }),
+  ])!;
+  expect(source.input.match(/container_slot_changed/gu)).toHaveLength(2);
+});
+
+test("retains gap provenance even when its container representation is coalesced", () => {
+  const container = stackRow(3, "container_slot_changed", {
+    menuId: 1,
+    containerId: 2,
+    slot: 9,
+    containerSlot: 3,
+    playerInventory: true,
+  });
+  container.missingSequencesBefore = { from: 1, to: 2 };
+  const source = compactHistory(0, [
+    container,
+    stackRow(4, "inventory_slot_changed", { slot: 3 }),
+  ])!;
+  expect(source.input).toContain("e3: missing seq 1..2");
+  expect(source.input).not.toContain("container_slot_changed");
+  expect(source).toMatchObject({ through: 4, sourceCount: 2 });
+});
+
+test("does not coalesce across missing observations or menu lifecycle boundaries", () => {
+  const container = stackRow(1, "container_slot_changed", {
+    menuId: 1,
+    containerId: 2,
+    slot: 9,
+    containerSlot: 3,
+    playerInventory: true,
+  });
+  const inventory = stackRow(3, "inventory_slot_changed", { slot: 3 });
+  inventory.missingSequencesBefore = { from: 2, to: 2 };
+  expect(compactHistory(0, [container, inventory])!.input).toContain("container_slot_changed");
+  expect(
+    compactHistory(0, [
+      container,
+      row(2, "container_closed", { tick: 200, observedAt: 2000 }),
+      stackRow(3, "inventory_slot_changed", { slot: 3 }),
+    ])!.input,
+  ).toContain("container_slot_changed");
+});
+
+test.each(["grid_result_taken", "furnace_result_taken"])(
+  "totals real %s credits instead of treating repeated takes as duplicates",
+  (event) => {
+    const template = observations.find((observation) => observation.event === event)!;
+    const source = compactHistory(
+      0,
+      [1, 2, 3].map((id) =>
+        row(id, event, {
+          data: { ...template.data, count: 4 },
+        }),
+      ),
+    )!;
+    expect(source.input).toContain("totalTaken=12");
+    expect(source.input).toContain("creditedTakeEvents=3");
+    expect(source.input).not.toContain("identical observations");
+    expect(source).toMatchObject({ through: 3, sourceCount: 3 });
+  },
+);
+
+test("keeps partial-snapshot hand evidence when no matching inventory row is included", () => {
+  const source = compactHistory(0, [
+    stackRow(1, "held_item_changed", { hand: "off_hand", beforeSlot: null, afterSlot: null }),
+  ])!;
+  expect(source.input).toContain("held_item_changed");
+});
+
+test("keeps named equipment as the representative when its inventory counterpart is outside the prefix", () => {
+  const source = compactHistory(0, [
+    stackRow(1, "equipment_slot_changed", { slot: "offHand" }),
+    stackRow(2, "held_item_changed", { hand: "off_hand", beforeSlot: null, afterSlot: null }),
+  ])!;
+  expect(source.input).toContain("equipment_slot_changed");
+  expect(source.input).toContain("slot=offHand");
+  expect(source.input).not.toContain("held_item_changed");
+  expect(source).toMatchObject({ through: 2, sourceCount: 2 });
+});
+
+test("does not aggregate result credits across a gap on an intervening sample", () => {
+  const sample = row(2, "nearby_sampled", { seq: 3 });
+  sample.missingSequencesBefore = { from: 2, to: 2 };
+  const source = compactHistory(0, [
+    row(1, "grid_result_taken"),
+    sample,
+    row(3, "grid_result_taken", { seq: 4 }),
+  ])!;
+  expect(source.input).toContain("e2: missing seq 2..2");
+  expect(source.input.match(/grid_result_taken/gu)).toHaveLength(2);
+  expect(source.input).not.toContain("totalTaken=");
+});
+
 test("timestamp range uses all included rows, not arrival order", () => {
   const source = compactHistory(0, [
     row(1, "health_changed", { observedAt: 1000 }),
