@@ -25,7 +25,8 @@ test("renders every real observer fixture as bounded non-JSON source text", () =
     expect(source.through).toBe(1);
     expect(Buffer.byteLength(source.input)).toBeLessThanOrEqual(summaryInputBytes);
     expect(source.input).not.toContain('"worldId"');
-    if (observation.event === "structures_sampled") expect(source.input).toContain("not discovery");
+    if (observation.event === "structures_sampled")
+      expect(source.input).toContain("No retained observations.");
   }
 });
 
@@ -43,7 +44,7 @@ test("preserves health transition order, interaction locations and meaningful eq
   expect(source.input.indexOf("e2 health_changed")).toBeLessThan(
     source.input.indexOf("e3 health_changed"),
   );
-  expect(source.input).toContain("@minecraft:overworld:99,64,1");
+  expect(source.input).toContain("@overworld:99,64,1");
   expect(source.input).toContain("slot=");
 });
 
@@ -169,8 +170,8 @@ test("renders one equipped inventory transition for matching container, equipmen
     lastObservedAt: 2000,
   });
   expect(source.input).toContain("inventory_slot_changed");
-  expect(source.input).toContain("equipped=offHand");
-  expect(source.input.match(/afterItemId=minecraft:stone/gu)).toHaveLength(1);
+  expect(source.input).not.toContain("equipped=");
+  expect(source.input.match(/itemId=air->stone/gu)).toHaveLength(1);
   expect(source.input).not.toContain("container_slot_changed");
   expect(source.input).not.toContain("equipment_slot_changed");
   expect(source.input).not.toContain("held_item_changed");
@@ -190,7 +191,9 @@ test.each([
     stackRow(1, "inventory_slot_changed", { slot }),
     stackRow(2, "equipment_slot_changed", { slot: equipment }),
   ])!;
-  expect(source.input).toContain(`equipped=${equipment}`);
+  if (equipment === "offHand") expect(source.input).not.toContain("equipped=");
+  else expect(source.input).toContain(`equipped=${equipment}`);
+  expect(source.input).toContain(`slot=${slot}`);
   expect(source.input).not.toContain("equipment_slot_changed");
   expect(source.sourceCount).toBe(2);
 });
@@ -208,10 +211,11 @@ test("coalesces stable main-hand mirrors but preserves every hotbar selection ch
       beforeCount: 3,
     }),
   ])!;
-  expect(source.input).toContain("equipped=mainHand");
+  expect(source.input).not.toContain("equipped=");
+  expect(source.input).not.toContain("hand=");
   expect(source.input.match(/held_item_changed/gu)).toHaveLength(2);
-  expect(source.input).toContain("beforeSlot=3 afterSlot=4");
-  expect(source.input).toContain("beforeSlot=4 afterSlot=5");
+  expect(source.input).toContain("slot=3->4");
+  expect(source.input).toContain("slot=4->5");
 });
 
 test.each([
@@ -300,7 +304,7 @@ test("retains gap provenance even when its container representation is coalesced
     container,
     stackRow(4, "inventory_slot_changed", { slot: 3 }),
   ])!;
-  expect(source.input).toContain("e3: missing seq 1..2");
+  expect(source.input).toContain("e1: missing seq 1..2");
   expect(source.input).not.toContain("container_slot_changed");
   expect(source).toMatchObject({ through: 4, sourceCount: 2 });
 });
@@ -375,6 +379,151 @@ test("does not aggregate result credits across a gap on an intervening sample", 
   expect(source.input).not.toContain("totalTaken=");
 });
 
+test("shortens IDs and transitions, rounds only coordinates, and omits pickup defaults", () => {
+  const entries = [
+    row(14001, "block_broken", {
+      position: [387.654, -18.06, -0.04],
+      data: { blockId: "example:ore", position: [388.156, -19, 2.03] },
+    }),
+    stackRow(14003, "inventory_slot_changed", {
+      slot: 6,
+      beforeItemId: "minecraft:torch",
+      afterItemId: "minecraft:torch",
+      beforeCount: 19,
+      afterCount: 18,
+    }),
+    row(14004, "item_picked_up"),
+    row(14005, "item_picked_up", {
+      data: {
+        ...observations.find((entry) => entry.event === "item_picked_up")!.data,
+        infiniteMaterials: true,
+        entityPosition: [387.654, -18.06, -0.04],
+      },
+    }),
+    row(14006, "experience_changed", {
+      data: {
+        beforeLevel: 5,
+        afterLevel: 6,
+        beforeProgress: 0.3456789,
+        afterProgress: 0.1234567,
+        beforeTotalExperience: 59,
+        afterTotalExperience: 73,
+      },
+    }),
+  ];
+  const original = structuredClone(entries);
+  const source = compactHistory(14000, entries)!;
+  expect(source.input).toContain(
+    "e1 block_broken blockId=example:ore position=388.2,-19,2 @overworld:387.7,-18.1,0",
+  );
+  expect(source.input).toContain("slot=6");
+  expect(source.input).toContain("itemId=torch count=19->18");
+  expect(source.input).toContain("entityPosition=387.7,-18.1,0 infiniteMaterials=true");
+  expect(source.input).toContain("level=5->6 progress=0.3456789->0.1234567 totalExperience=59->73");
+  expect(source.input).not.toMatch(
+    /beforeItemId|afterCount|remainingCount|infiniteMaterials=false|e1400\d/u,
+  );
+  expect(source.input).not.toContain("Source session:");
+  expect(source.input).not.toContain(entries[0]!.observation.worldSessionId);
+  expect(source.input).not.toContain("Observed ms range:");
+  expect(source.input).not.toContain("Coordinates rounded");
+  expect(source).toMatchObject({ after: 14000, through: 14006, sourceCount: 5 });
+  expect(entries).toEqual(original);
+  expect(compactHistory(14006, [row(15000)])!.input).toContain("e1 block_broken");
+});
+
+test("filters only agreed samples and advancement notifications, retaining effects and progress", () => {
+  const effects = observations.find((entry) => entry.event === "status_effects_sampled")!.data;
+  const criterion = observations.find(
+    (entry) => entry.event === "advancement_criterion_granted",
+  )!.data;
+  const completed = observations.find((entry) => entry.event === "advancement_completed")!.data;
+  const entries = [
+    row(1, "structures_sampled"),
+    row(2, "status_effects_sampled", {
+      data: { ...effects, effects: [], effectsTruncated: false },
+    }),
+    row(3, "advancement_criterion_granted", {
+      data: { ...criterion, advancementId: "minecraft:recipes/tools/pickaxe", afterDone: false },
+    }),
+    row(4, "advancement_completed", {
+      data: { ...completed, advancementId: "minecraft:recipes/tools/pickaxe" },
+    }),
+    row(5, "advancement_criterion_granted", {
+      data: { ...criterion, advancementId: "minecraft:story/mine_diamond", afterDone: true },
+    }),
+    row(6, "advancement_completed", {
+      data: { ...completed, advancementId: "minecraft:story/mine_diamond" },
+    }),
+    row(7, "advancement_criterion_granted", {
+      data: { ...criterion, advancementId: "example:recipes/partial", afterDone: false },
+    }),
+    row(8, "status_effects_sampled"),
+    row(9, "status_effects_sampled", { data: { ...effects, effects: [], effectsTruncated: true } }),
+    row(10, "status_effect_changed"),
+  ];
+  const source = compactHistory(0, entries)!;
+  expect(source.input).not.toContain("structures_sampled");
+  expect(source.input).not.toContain("structure metadata");
+  expect(source.input).not.toContain("recipes/tools/pickaxe");
+  expect(source.input.match(/advancement_criterion_granted/gu)).toHaveLength(1);
+  expect(source.input).toContain("advancementId=example:recipes/partial");
+  expect(source.input).toContain("advancement_completed advancementId=story/mine_diamond");
+  expect(source.input).toContain("status_effects_sampled:overworld [2 samples");
+  expect(source.input).toContain("effectsTruncated=true");
+  expect(source.input).toContain("status_effect_changed");
+  expect(source).toMatchObject({
+    through: 10,
+    sourceCount: 10,
+    firstObservedAt: 1000,
+    lastObservedAt: 10000,
+  });
+});
+
+test("numbers source observations locally, including sample ranges and gaps on omitted rows", () => {
+  const filtered = row(14001, "structures_sampled");
+  filtered.missingSequencesBefore = { from: 20, to: 22 };
+  const source = compactHistory(14000, [
+    filtered,
+    row(14002, "block_broken"),
+    row(14004, "block_broken"),
+    row(14005, "player_location_changed", {
+      position: [1.234, 64.03, -2.678],
+      data: {
+        beforePosition: [0.123, 64, -3.456],
+        afterPosition: [1.234, 64.03, -2.678],
+        beforeBiomeId: "minecraft:plains",
+        afterBiomeId: "example:woods",
+        sampleIntervalTicks: 20,
+        minimumDistance: 1,
+        elapsedTicks: 20,
+      },
+    }),
+    row(14006, "player_location_changed"),
+  ])!;
+  expect(source.input).toContain("e1: missing seq 20..22");
+  expect(source.input).toContain("e2..e3 [2 identical observations] block_broken");
+  expect(source.input).toContain("player_location_changed:overworld [2 samples, e4..e5");
+  expect(source.input).toContain("first sampled position=0.1,64,-3.5");
+  expect(source.input).toContain("example:woods");
+  expect(source.input).toContain("last sampled move=0,64,0 -> 2,64,0 @overworld:2,64,0");
+  expect(source.input).not.toContain("e140");
+  expect(source).toMatchObject({ after: 14000, through: 14006, sourceCount: 5 });
+});
+
+test("lossy display formatting never broadens identical-observation grouping", () => {
+  const attempted = observations.find((entry) => entry.event === "item_use_attempted")!.data;
+  const source = compactHistory(0, [
+    row(1, "block_broken", { position: [1.01, 64, 0] }),
+    row(2, "block_broken", { position: [1.04, 64, 0] }),
+    row(3, "item_use_attempted", { data: { ...attempted, hand: "main_hand" } }),
+    row(4, "item_use_attempted", { data: { ...attempted, hand: "off_hand" } }),
+  ])!;
+  expect(source.input.match(/block_broken/gu)).toHaveLength(2);
+  expect(source.input.match(/item_use_attempted/gu)).toHaveLength(2);
+  expect(source.input).not.toMatch(/hand=|identical observations/u);
+});
+
 test("timestamp range uses all included rows, not arrival order", () => {
   const source = compactHistory(0, [
     row(1, "health_changed", { observedAt: 1000 }),
@@ -382,5 +531,5 @@ test("timestamp range uses all included rows, not arrival order", () => {
     row(3, "health_changed", { observedAt: 900 }),
   ])!;
   expect(source).toMatchObject({ firstObservedAt: 900, lastObservedAt: 5000 });
-  expect(source.input).toContain("900..5000");
+  expect(source.input).not.toContain("Observed ms range:");
 });

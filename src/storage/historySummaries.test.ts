@@ -1,4 +1,6 @@
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
+import { initializeDatabase } from "./database.js";
+import { initializeSummaryDatabase } from "./summaryDatabase.js";
 import { expect, test, vi } from "vite-plus/test";
 import observations from "../protocol/fixtures/observerEvents.json" with { type: "json" };
 import { gameEventDefinitions, type GameEvent } from "../protocol/gameEvent.js";
@@ -230,28 +232,42 @@ test("context is latest, chronological, bounded history; source input never recu
   expect(() => f.history.context(scope)).toThrow("Invalid stored history summary");
 });
 
-test("next spans raw transport pages, consumes one session prefix, not the high-water fence", () => {
+test("next spans filtered raw pages, consumes one session prefix, not the high-water fence", () => {
   const f = fixture();
+  const filtered: GameEvent = {
+    ...observations.find((entry) => entry.event === "structures_sampled")!,
+    position: sample.position,
+  };
   const search = vi.spyOn(f.log, "search");
   search.mockReturnValueOnce({
     events: [
-      { id: 1, observation: sample },
-      { id: 2, observation: { ...sample, seq: 2 } },
+      { id: 1, observation: filtered },
+      { id: 2, observation: { ...filtered, seq: 2 } },
     ],
     through: 100,
     hasKnownGaps: false,
     nextCursor: 2,
   });
   search.mockReturnValueOnce({
-    events: [{ id: 3, observation: { ...sample, worldSessionId: "new-session" } }],
+    events: [{ id: 3, observation: { ...sample, seq: 3 } }],
+    through: 100,
+    hasKnownGaps: false,
+    nextCursor: 3,
+  });
+  search.mockReturnValueOnce({
+    events: [{ id: 4, observation: { ...sample, worldSessionId: "new-session" } }],
     through: 100,
     hasKnownGaps: false,
   });
-  expect(f.history.next(scope)).toMatchObject({
-    source: { after: 0, through: 2, sourceCount: 2, sourceSessionId: sample.worldSessionId },
+  const next = f.history.next(scope)!;
+  expect(next).toMatchObject({
+    source: { after: 0, through: 3, sourceCount: 3, sourceSessionId: sample.worldSessionId },
     backlog: true,
   });
+  expect(next.source.input).toContain("e3 block_broken");
+  expect(next.source.input).not.toContain("structures_sampled");
   expect(search).toHaveBeenNthCalledWith(2, scope, { after: 2, through: 100, limit: 498 });
+  expect(search).toHaveBeenNthCalledWith(3, scope, { after: 3, through: 100, limit: 497 });
 });
 
 test("legacy hidden nearby data is redacted by the existing decoder before summarization", () => {
@@ -276,4 +292,77 @@ test("legacy hidden nearby data is redacted by the existing decoder before summa
   });
   f.max(1);
   expect(f.history.next(scope)!.source.input).not.toContain("diamond_ore");
+});
+
+test("simplifies model input without changing raw storage or stalling filtered prefixes", () => {
+  const raw = new DatabaseSync(":memory:");
+  const summaries = new DatabaseSync(":memory:");
+  try {
+    initializeDatabase(raw);
+    initializeSummaryDatabase(summaries);
+    const log = new EventLog(raw, new EventCatalog(gameEventDefinitions));
+    const history = new HistorySummaries(log, summaries);
+    const structure: GameEvent = {
+      ...observations.find((entry) => entry.event === "structures_sampled")!,
+      position: sample.position,
+    };
+    const emptyEffects: GameEvent = {
+      ...observations.find((entry) => entry.event === "status_effects_sampled")!,
+      position: sample.position,
+    };
+    log.append({ ...structure, seq: 1, observedAt: 5000 });
+    log.append({
+      ...emptyEffects,
+      seq: 2,
+      observedAt: 900,
+      data: { ...emptyEffects.data, effects: [], effectsTruncated: false },
+    });
+    const first = history.next(scope)!.source;
+    expect(first).toMatchObject({
+      after: 0,
+      through: 2,
+      sourceCount: 2,
+      firstObservedAt: 900,
+      lastObservedAt: 5000,
+      sourceSessionId: sample.worldSessionId,
+    });
+    expect(first.input).toContain("No retained observations.");
+    expect(first.input).not.toMatch(
+      /structures_sampled|status_effects_sampled|Source session:|Observed ms range:/u,
+    );
+    history.save(scope, first, "保持対象の観測なし。", 6000);
+    expect(history.cursor(scope)).toBe(2);
+    expect(history.next(scope)).toBeUndefined();
+
+    const inventory: GameEvent = {
+      ...observations.find((entry) => entry.event === "inventory_slot_changed")!,
+      position: sample.position,
+    };
+    log.append({ ...structure, seq: 3, observedAt: 7000 });
+    const stored = log.append({ ...inventory, seq: 4, observedAt: 8000 });
+    log.append({ ...structure, seq: 5, observedAt: 9000 });
+    const before = raw.prepare("SELECT * FROM events ORDER BY id").all();
+    const second = history.next(scope)!.source;
+    expect(second).toMatchObject({
+      after: 2,
+      through: 5,
+      sourceCount: 3,
+      firstObservedAt: 7000,
+      lastObservedAt: 9000,
+    });
+    expect(second.input).toContain("e2 inventory_slot_changed slot=0 itemId=air->stone count=0->3");
+    expect(second.input).not.toContain("e4 inventory_slot_changed");
+    expect(log.search(scope).events.find((entry) => entry.id === stored.id)).toEqual(stored);
+    history.save(scope, second, "stoneをslot 0に3個所持。", 10000);
+    expect(history.cursor(scope)).toBe(5);
+    expect(history.next(scope)).toBeUndefined();
+    expect(raw.prepare("SELECT * FROM events ORDER BY id").all()).toEqual(before);
+    const saved = summaries
+      .prepare("SELECT source_json FROM history_summaries ORDER BY id DESC LIMIT 1")
+      .get()!;
+    expect(JSON.parse(saved.source_json as string)).toEqual(second);
+  } finally {
+    summaries.close();
+    raw.close();
+  }
 });

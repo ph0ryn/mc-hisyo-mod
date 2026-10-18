@@ -22,6 +22,8 @@ const omittedFields = new Set([
   "containerId",
   "containerSlot",
   "menuId",
+  "hand",
+  "remainingCount",
 ]);
 
 function bounded(text: string, bytes: number): string {
@@ -35,21 +37,40 @@ function bounded(text: string, bytes: number): string {
 }
 
 /** Scalar text only, with explicit abbreviation; never dumps observation JSON. */
-function valueText(value: unknown): string {
+function valueText(value: unknown, field = ""): string {
   if (typeof value === "string") {
     // eslint-disable-next-line no-control-regex -- Untrusted values must remain single-line text.
-    return bounded(value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " "), 200);
+    const text = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
+    return bounded(text.replace(/^minecraft:(?=[a-z0-9/._-]+$)/u, ""), 200);
   }
   if (value === null) return "unknown";
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) {
-    const items = value.slice(0, 6).map(valueText);
+    if (field === "position" || field.endsWith("Position"))
+      return (value as number[])
+        .map((coordinate) => String(Math.round(coordinate * 10) / 10))
+        .join(",");
+    const items = value.slice(0, 6).map((item) => valueText(item));
     return `${items.join(",")}${value.length > 6 ? `,…[${value.length - 6} omitted]` : ""}`;
   }
   if (typeof value === "object" && value) {
-    return Object.entries(value)
+    const fields = value as Record<string, unknown>;
+    return Object.entries(fields)
       .filter(([key]) => !omittedFields.has(key))
-      .map(([key, entry]) => `${key}=${valueText(entry)}`)
+      .flatMap(([key, entry]) => {
+        const after = key.replace(/^before(?=[A-Z])/u, "after");
+        if (after !== key && Object.hasOwn(fields, after)) {
+          const name = key[6]!.toLowerCase() + key.slice(7);
+          const beforeText = valueText(entry, key);
+          return [
+            `${name}=${beforeText}${entry === fields[after] ? "" : `->${valueText(fields[after], after)}`}`,
+          ];
+        }
+        const before = key.replace(/^after(?=[A-Z])/u, "before");
+        return before !== key && Object.hasOwn(fields, before)
+          ? []
+          : [`${key}=${valueText(entry, key)}`];
+      })
       .join(" ");
   }
   throw new Error("Unsupported history value");
@@ -57,6 +78,7 @@ function valueText(value: unknown): string {
 
 interface Projection {
   entry: StoredEvent;
+  localId: number;
   location: string;
   text: string;
   key: string;
@@ -75,12 +97,12 @@ function typeCounts(items: readonly Record<string, unknown>[], field: string): s
   );
 }
 
-function prepare(entry: StoredEvent): Projection {
+function prepare(entry: StoredEvent, localId: number): Projection {
   const observation = entry.observation;
   if ("origin" in observation || !Number.isSafeInteger(observation.seq) || observation.seq <= 0)
     throw new Error("History sources must contain only Mod observations");
   const { event, data, dimension } = observation;
-  const location = ` @${dimension}:${valueText(observation.position)}`;
+  const location = ` @${valueText(dimension)}:${valueText(observation.position, "position")}`;
   let text: string;
   let seen: string[] = [];
   let sampleKey: string | undefined;
@@ -96,21 +118,27 @@ function prepare(entry: StoredEvent): Projection {
     ];
     sampleKey = `${event}:${dimension}`;
   } else if (event === "player_location_changed") {
-    text = `last sampled move=${valueText(data.beforePosition)} -> ${valueText(data.afterPosition)}${location}`;
+    text = `last sampled move=${valueText(data.beforePosition, "beforePosition")} -> ${valueText(data.afterPosition, "afterPosition")}${location}`;
     seen = [valueText(data.beforeBiomeId), valueText(data.afterBiomeId)];
-    sampleKey = `${event}:${dimension}`;
-  } else if (event === "structures_sampled") {
-    text = "structure metadata sampled (not discovery; IDs/locations omitted)";
     sampleKey = `${event}:${dimension}`;
   } else if (event === "status_effects_sampled") {
     text = `last ${valueText(data)}${location}`;
     sampleKey = `${event}:${dimension}`;
-  } else text = `${event} ${valueText(data)}${location}`;
+  } else {
+    const fields = { ...data };
+    if (event === "item_picked_up" && fields.infiniteMaterials === false)
+      delete fields.infiniteMaterials;
+    text = `${event} ${valueText(fields)}${location}`;
+  }
   return {
     entry,
+    localId,
     location,
     text: bounded(text, 2_000),
-    key: sampleKey ?? `${event}:${dimension}:${JSON.stringify(data)}:${location}`,
+    // Display rounding/omission must never broaden observation identity.
+    key:
+      sampleKey ??
+      `${event}:${dimension}:${JSON.stringify(data)}:${JSON.stringify(observation.position)}`,
     ...(sampleKey ? { sampleKey } : {}),
     seen,
   };
@@ -192,7 +220,7 @@ function stackMirrors(entries: readonly Projection[]) {
 }
 
 function timelineText(projection: Projection, lastId: number, count: number): string {
-  const range = `e${projection.entry.id}${count > 1 ? `..e${lastId}` : ""}`;
+  const range = `e${projection.localId}${count > 1 ? `..e${lastId}` : ""}`;
   const { event, data } = projection.entry.observation;
   if (count > 1 && (event === "grid_result_taken" || event === "furnace_result_taken")) {
     const { count: quantity, ...context } = data;
@@ -200,6 +228,18 @@ function timelineText(projection: Projection, lastId: number, count: number): st
     return `${range} ${event} ${valueText(context)} totalTaken=${total} creditedTakeEvents=${count}${projection.location}`;
   }
   return `${range}${count > 1 ? ` [${count} identical observations]` : ""} ${projection.text}`;
+}
+
+function omitObservation({ event, data }: StoredEvent["observation"]): boolean {
+  return (
+    event === "structures_sampled" ||
+    (event === "status_effects_sampled" &&
+      (data.effects as unknown[]).length === 0 &&
+      data.effectsTruncated === false) ||
+    ((event === "advancement_criterion_granted" || event === "advancement_completed") &&
+      (data.advancementId as string).startsWith("minecraft:recipes/")) ||
+    (event === "advancement_criterion_granted" && data.afterDone === true)
+  );
 }
 
 /** Timeline uses arrival order, not timestamp order. Samples are explicitly separate aggregates. */
@@ -216,19 +256,20 @@ function project(entries: readonly Projection[]): string {
     const entry = original.entry;
     if (entry.missingSequencesBefore) {
       gaps.push(
-        `e${entry.id}: missing seq ${entry.missingSequencesBefore.from}..${entry.missingSequencesBefore.to}`,
+        `e${original.localId}: missing seq ${entry.missingSequencesBefore.from}..${entry.missingSequencesBefore.to}`,
       );
       separate = true;
     }
-    if (omitted.has(original)) continue;
+    if (omitted.has(original) || omitObservation(entry.observation)) continue;
     const equipment = equipped.get(original);
-    const projection = equipment
-      ? {
-          ...original,
-          text: `${original.text} equipped=${equipment}`,
-          key: `${original.key}:equipped=${equipment}`,
-        }
-      : original;
+    const projection =
+      equipment && equipment !== "mainHand" && equipment !== "offHand"
+        ? {
+            ...original,
+            text: `${original.text} equipped=${equipment}`,
+            key: `${original.key}:equipped=${equipment}`,
+          }
+        : original;
     if (projection.sampleKey) {
       const prior = samples.get(projection.sampleKey);
       if (prior) {
@@ -246,20 +287,21 @@ function project(entries: readonly Projection[]): string {
       const prior = separate ? undefined : timeline.at(-1);
       if (prior?.projection.key === projection.key) {
         prior.count++;
-        prior.lastId = entry.id;
-      } else timeline.push({ projection, lastId: entry.id, count: 1 });
+        prior.lastId = projection.localId;
+      } else timeline.push({ projection, lastId: projection.localId, count: 1 });
       separate = false;
     }
   }
   return [
     ...gaps,
     ...timeline.map(({ projection, lastId, count }) => timelineText(projection, lastId, count)),
-    ...[...samples].map(([kind, { first, last, count, seen }]) => {
+    ...[...samples.values()].map(({ first, last, count, seen }) => {
+      const { event, dimension } = last.entry.observation;
       const start =
         first.entry.observation.event === "player_location_changed"
-          ? `first sampled position=${valueText(first.entry.observation.data.beforePosition)}; biomes=`
+          ? `first sampled position=${valueText(first.entry.observation.data.beforePosition, "beforePosition")}; biomes=`
           : "seen types=";
-      return `${kind} [${count} samples, e${first.entry.id}..e${last.entry.id}, not full chronology/path] ${seen.size ? `${start}${valueText([...seen])}; ` : ""}${last.text}`;
+      return `${event}:${valueText(dimension)} [${count} samples, e${first.localId}..e${last.localId}, not full chronology/path] ${seen.size ? `${start}${valueText([...seen])}; ` : ""}${last.text}`;
     }),
   ].join("\n");
 }
@@ -279,12 +321,14 @@ export function compactHistory(
   for (const entry of entries) {
     if (entry.id <= previous) throw new Error("History sources are not in cursor order");
     if (entry.observation.worldSessionId !== first.observation.worldSessionId) break;
-    const projection = prepare(entry);
+    // Input-local source-row labels; real IDs remain in cursor metadata.
+    const projection = prepare(entry, included.length + 1);
     const candidate = [...included, projection];
     const from = Math.min(minTime, entry.observation.observedAt);
     const to = Math.max(maxTime, entry.observation.observedAt);
-    const header = `Observed history; arrival order, grouped/abbreviated.\nSource session: ${valueText(first.observation.worldSessionId)}\nObserved ms range: ${from}..${to}\n`;
-    const text = header + project(candidate);
+    const header =
+      "Observed history; arrival order, grouped/abbreviated.\nDefault ID namespace: minecraft.\n";
+    const text = header + (project(candidate) || "No retained observations.");
     if (Buffer.byteLength(text) > summaryInputBytes) {
       if (!included.length) throw new Error("History source exceeds summary input budget");
       break;
