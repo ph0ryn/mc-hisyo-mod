@@ -202,7 +202,7 @@ final class DirectorClient {
                     });
                     return result;
                 }
-            }, files.worldId(), a.player.toString(), ServerObservations.supportedEvents(), client.isPaused());
+            }, files.worldId(), a.player.toString(), client.options.languageCode, ServerObservations.supportedEvents(), client.isPaused());
             synchronized (a) { if (!a.retired) { a.connection = connection; a.session = session; } }
             if (a.retired) { session.close(); connection.close(); return; }
             if (!local(a)) { retire(a); return; }

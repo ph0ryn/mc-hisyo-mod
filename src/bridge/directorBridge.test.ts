@@ -144,6 +144,7 @@ async function fixture() {
   const world = (await game.client.call("game.attach", {
     worldId: "w",
     playerId: "p",
+    language: "ja_jp",
     supportedEvents: [],
     paused: false,
   })) as WorldBinding;
@@ -163,6 +164,20 @@ async function fixture() {
     },
   };
 }
+
+test("attachment retains the initial language and rejects missing or invalid language codes", async () => {
+  const h = await fixture();
+  expect(h.bridge.currentWorld).toMatchObject({ language: "ja_jp" });
+  await h.game.client.call("game.detach", h.world);
+  const attach = { worldId: "w", playerId: "p", supportedEvents: [], paused: false };
+  for (const language of [undefined, null, "", 123, "a".repeat(17), "ja_jp\n"])
+    await expect(h.game.client.call("game.attach", { ...attach, language })).rejects.toMatchObject({
+      code: -32602,
+    });
+  expect(h.bridge.currentWorld).toBeUndefined();
+  await h.game.client.call("game.attach", { ...attach, language: "en_us" });
+  expect(h.bridge.currentWorld).toMatchObject({ language: "en_us" });
+});
 
 test("native withdrawal FIRST cancels without retirement; queued manual/tick wait for actual settlement and validated resume", async () => {
   const h = await fixture();

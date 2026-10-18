@@ -73,7 +73,7 @@ public final class GameSessionTest {
         ObservedEvent joined = new ObservedEvent("player_connection_changed", "minecraft:the_nether", position, 17, 23, data);
         pending.capture(server, player, id, joined); position.set(0, 99d); data.put("state", "leaving");
         Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game(); game.queuedInitialize = true;
-        GameSession session = new GameSession(peer, game, WORLD, PLAYER, List.of("player_connection_changed"), false);
+        GameSession session = new GameSession(peer, game, WORLD, PLAYER, "ja_jp", List.of("player_connection_changed"), false);
         boolean[] current = {true}, baseline = {false};
         CompletionStage<Void> start = session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
         Runnable admission = () -> {
@@ -114,7 +114,7 @@ public final class GameSessionTest {
         game.queue.remove().run(); assertTrue(!baseline[0]); assertTrue(pending.take(replacementServer, player, id) == joined);
         assertTrue(pending.take(new Object(), player, id) == null);
         Wire failedWire = new Wire(); RpcPeer failedPeer = new RpcPeer(failedWire); Game failedGame = new Game();
-        GameSession failed = new GameSession(failedPeer, failedGame, WORLD, PLAYER, List.of(), false);
+        GameSession failed = new GameSession(failedPeer, failedGame, WORLD, PLAYER, "ja_jp", List.of(), false);
         failed.start(CompletableFuture.completedFuture(failedPeer), "a".repeat(43));
         reply(failedPeer, failedWire, json("{\"protocolVersion\":1,\"role\":\"game\"}")); reply(failedPeer, failedWire, RUN.worldBinding().toJson());
         reply(failedPeer, failedWire, json("{\"ready\":true}"));
@@ -127,7 +127,7 @@ public final class GameSessionTest {
         failedGame.queue.remove().run(); assertTrue(!baseline[0]);
         assertTrue(!failed.isReady()); assertTrue(pending.take(server, player, id) == null); assertTrue(failedWire.sent.size() == 3);
         Wire badWire = new Wire(); RpcPeer badPeer = new RpcPeer(badWire); Game badGame = new Game();
-        GameSession bad = new GameSession(badPeer, badGame, WORLD, PLAYER, List.of(), false);
+        GameSession bad = new GameSession(badPeer, badGame, WORLD, PLAYER, "ja_jp", List.of(), false);
         pending.capture(server, player, id, joined);
         CompletionStage<Void> badStart = bad.start(CompletableFuture.completedFuture(badPeer), "a".repeat(43));
         badStart.whenComplete((ignored, error) -> { if (error != null) pending.retire(server); else badGame.queue.add(admission); });
@@ -167,12 +167,13 @@ public final class GameSessionTest {
     @Test
     void sessionLifecycleFencesQueuedWork() {
         Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
-        GameSession session = new GameSession(peer, game, WORLD, PLAYER, List.of("block_broken"), false);
+        GameSession session = new GameSession(peer, game, WORLD, PLAYER, "ja_jp", List.of("block_broken"), false);
         receive(peer, "game.run.bind", RUN.toJson(), 1); assertTrue(wire.last().getAsJsonObject("error").get("code").getAsInt() == -32001);
         CompletionStage<Void> started = session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
         assertTrue(wire.last().get("method").getAsString().equals("bridge.hello"));
         reply(peer, wire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         assertTrue(wire.last().get("method").getAsString().equals("game.attach"));
+        assertTrue(wire.last().getAsJsonObject("params").get("language").getAsString().equals("ja_jp"));
         reply(peer, wire, RUN.worldBinding().toJson());
         assertTrue(session.isReady()); assertTrue(wire.last().get("method").getAsString().equals("game.ready"));
         receive(peer, "game.run.bind", RUN.toJson(), 2); assertTrue(wire.last().get("result").equals(RUN.toJson()));
@@ -247,7 +248,7 @@ public final class GameSessionTest {
         assertTrue(game.queue.size() == 1); game.queue.remove().run(); assertTrue(game.displayed == 2);
         receive(peer, "game.message.send", message, 13); int oldFrames = wire.sent.size(); session.close();
         Wire replacementWire = new Wire(); RpcPeer replacementPeer = new RpcPeer(replacementWire); Game replacementGame = new Game();
-        GameSession replacement = new GameSession(replacementPeer, replacementGame, "new-world", PLAYER, List.of(), false);
+        GameSession replacement = new GameSession(replacementPeer, replacementGame, "new-world", PLAYER, "ja_jp", List.of(), false);
         replacement.start(CompletableFuture.completedFuture(replacementPeer), "a".repeat(43));
         reply(replacementPeer, replacementWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         JsonObject newWorld = RUN.worldBinding().toJson(); newWorld.addProperty("worldId", "new-world");
@@ -258,7 +259,7 @@ public final class GameSessionTest {
 
     @Test
     void wrongHandshakeRoleClosesPeer() {
-        Wire badWire = new Wire(); RpcPeer badPeer = new RpcPeer(badWire); GameSession badSession = new GameSession(badPeer, new Game(), WORLD, PLAYER, List.of(), false);
+        Wire badWire = new Wire(); RpcPeer badPeer = new RpcPeer(badWire); GameSession badSession = new GameSession(badPeer, new Game(), WORLD, PLAYER, "ja_jp", List.of(), false);
         badSession.start(CompletableFuture.completedFuture(badPeer), "a".repeat(43)); reply(badPeer, badWire, json("{\"protocolVersion\":1,\"role\":\"agent\"}")); assertTrue(badPeer.isClosed());
     }
 
@@ -266,7 +267,7 @@ public final class GameSessionTest {
     void observationOverloadClosesPeer() {
         ObservedEvent fact = new ObservedEvent("block_broken", "minecraft:overworld", List.of(0d, 1d, 2d), 4, 5, Map.of());
         Wire overloadWire = new Wire(); RpcPeer overloadPeer = new RpcPeer(overloadWire);
-        GameSession overload = new GameSession(overloadPeer, new Game(), WORLD, PLAYER, List.of("block_broken"), false);
+        GameSession overload = new GameSession(overloadPeer, new Game(), WORLD, PLAYER, "ja_jp", List.of("block_broken"), false);
         overload.start(CompletableFuture.completedFuture(overloadPeer), "a".repeat(43));
         reply(overloadPeer, overloadWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         reply(overloadPeer, overloadWire, RUN.worldBinding().toJson()); reply(overloadPeer, overloadWire, json("{\"ready\":true}"));
@@ -277,7 +278,7 @@ public final class GameSessionTest {
     @Test
     void wrongAttachedWorldClosesPeer() {
         Wire wrongWire = new Wire(); RpcPeer wrongPeer = new RpcPeer(wrongWire);
-        GameSession wrong = new GameSession(wrongPeer, new Game(), WORLD, PLAYER, List.of(), false);
+        GameSession wrong = new GameSession(wrongPeer, new Game(), WORLD, PLAYER, "ja_jp", List.of(), false);
         wrong.start(CompletableFuture.completedFuture(wrongPeer), "a".repeat(43)); reply(wrongPeer, wrongWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         JsonObject wrongWorld = RUN.worldBinding().toJson(); wrongWorld.addProperty("worldId", "other");
         reply(wrongPeer, wrongWire, wrongWorld); assertTrue(wrongPeer.isClosed()); assertTrue(!wrong.isReady());
@@ -286,7 +287,7 @@ public final class GameSessionTest {
     @Test
     void invalidPlayerMessageAcknowledgmentClosesPeer() {
         Wire ackWire = new Wire(); RpcPeer ackPeer = new RpcPeer(ackWire);
-        GameSession ackSession = new GameSession(ackPeer, new Game(), WORLD, PLAYER, List.of(), false);
+        GameSession ackSession = new GameSession(ackPeer, new Game(), WORLD, PLAYER, "ja_jp", List.of(), false);
         ackSession.start(CompletableFuture.completedFuture(ackPeer), "a".repeat(43)); reply(ackPeer, ackWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         reply(ackPeer, ackWire, RUN.worldBinding().toJson()); reply(ackPeer, ackWire, json("{\"ready\":true}"));
         CompletionStage<Void> invalidAck = ackSession.playerMessage("hello"); reply(ackPeer, ackWire, json("{\"accepted\":false}"));
@@ -297,7 +298,7 @@ public final class GameSessionTest {
     void pauseTransitionsAreOrderedAndBounded() {
         JsonObject message = RUN.toJson(); message.addProperty("text", "hello");
         Wire orderedWire = new Wire(); RpcPeer orderedPeer = new RpcPeer(orderedWire); Game orderedGame = new Game();
-        GameSession ordered = new GameSession(orderedPeer, orderedGame, WORLD, PLAYER, List.of(), false);
+        GameSession ordered = new GameSession(orderedPeer, orderedGame, WORLD, PLAYER, "ja_jp", List.of(), false);
         ordered.start(CompletableFuture.completedFuture(orderedPeer), "a".repeat(43));
         reply(orderedPeer, orderedWire, json("{\"protocolVersion\":1,\"role\":\"game\"}"));
         reply(orderedPeer, orderedWire, RUN.worldBinding().toJson()); reply(orderedPeer, orderedWire, json("{\"ready\":true}"));

@@ -53,7 +53,7 @@ public final class GameSession implements AutoCloseable {
     private final Object state = new Object();
     private final RpcPeer peer;
     private final GamePort game;
-    private final String worldId, playerId;
+    private final String worldId, playerId, language;
     private final List<String> events;
     private boolean started, closed, ready, paused;
     private WorldBinding world;
@@ -63,9 +63,9 @@ public final class GameSession implements AutoCloseable {
     private int eventPending;
     private final ArrayDeque<JsonObject> statuses = new ArrayDeque<>();
 
-    public GameSession(RpcPeer peer, GamePort game, String worldId, String playerId, List<String> events, boolean paused) {
+    public GameSession(RpcPeer peer, GamePort game, String worldId, String playerId, String language, List<String> events, boolean paused) {
         this.peer = Objects.requireNonNull(peer); this.game = Objects.requireNonNull(game);
-        this.worldId = worldId; this.playerId = playerId; this.events = List.copyOf(events); this.paused = paused;
+        this.worldId = worldId; this.playerId = playerId; this.language = language; this.events = List.copyOf(events); this.paused = paused;
         peer.handle("game.run.bind", params -> {
             RunBinding binding = binding(params, Set.of());
             synchronized (state) {
@@ -123,6 +123,7 @@ public final class GameSession implements AutoCloseable {
                 if (!new JsonPrimitive(1).equals(ack.getAsJsonObject().get("protocolVersion"))
                         || !new JsonPrimitive("game").equals(ack.getAsJsonObject().get("role"))) throw invalid();
                 JsonObject attach = new JsonObject(); attach.addProperty("worldId", worldId); attach.addProperty("playerId", playerId);
+                attach.addProperty("language", language);
                 attach.add("supportedEvents", JSON.toJsonTree(events)); synchronized (state) { attach.addProperty("paused", paused); }
                 return peer.call("game.attach", attach);
             }).thenCompose(ack -> {

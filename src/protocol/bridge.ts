@@ -42,6 +42,7 @@ export const EmptySchema = Type.Object({}, strict);
 export const GameAttachSchema = Type.Object(
   {
     ...WorldScopeSchema.properties,
+    language: Type.String({ minLength: 1, maxLength: 16, pattern: "^[a-zA-Z0-9_-]+$" }),
     supportedEvents: Type.Array(GameEventSchema.properties.event, {
       uniqueItems: true,
       maxItems: 512,

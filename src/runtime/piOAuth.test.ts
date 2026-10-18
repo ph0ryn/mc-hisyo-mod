@@ -25,22 +25,25 @@ afterEach(() => {
 // Only the owned mkdtemp directory is removed after this file's tests finish.
 afterAll(() => rmSync(directory, { recursive: true }));
 
-test("a long-lived session hands off fresh tokens before prompts and fails closed on refresh error", async () => {
+test.each(["ja_jp", "en_us"])("keeps initial language %s", async (language) => {
   const world = { worldId: "w", playerId: "p", worldSessionId: "s" };
   const bridge = Object.assign(new EventEmitter(), {
     isAgentReady: false,
-    currentWorld: { binding: world },
+    currentWorld: { binding: world, language },
     readyWorld: { binding: world, status: { worldState: { ready: true } } },
     beginRun: vi.fn(async () => ({ ...world, runId: "run" })),
     finishRun: vi.fn(),
     invalidateRun: vi.fn(),
   });
-  let privateAuth = "";
+  let privateAuth = "",
+    promptPath = "";
+  const languageInstruction = `Write player-facing messages in the language specified by Minecraft language code "${language}".`;
   const seen: string[] = [];
   const client = Object.assign(new EventEmitter(), {
     initialize: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
     run: vi.fn(async () => {
+      expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
       seen.push(JSON.parse(readFileSync(privateAuth, "utf8")).openai.key);
       return { status: "settled" as const, aborted: false };
     }),
@@ -49,6 +52,9 @@ test("a long-lived session hands off fresh tokens before prompts and fails close
     privateAuth = join(launch.env.PI_CODING_AGENT_DIR!, "auth.json");
     expect(JSON.parse(readFileSync(privateAuth, "utf8")).openai.key).toBe("startup-token");
     expect(launch.env.MC_HISYO_MODEL_API_KEY).toBeUndefined();
+    promptPath = launch.args![launch.args!.indexOf("--system-prompt") + 1]!;
+    expect(readFileSync(promptPath, "utf8")).toContain(languageInstruction);
+    expect(readFileSync(promptPath, "utf8")).not.toContain("CURRENT_GAME_STATE.language");
     expect(
       JSON.parse(readFileSync(join(launch.env.PI_CODING_AGENT_DIR!, "models.json"), "utf8")),
     ).toEqual({ providers: {} });
@@ -68,9 +74,13 @@ test("a long-lived session hands off fresh tokens before prompts and fails close
     oauthAgentDirectory: "/original/agent",
   });
   try {
+    bridge.currentWorld.language = language === "ja_jp" ? "en_us" : "ja_jp";
     for (const token of ["judgment-A", "judgment-B"]) {
       execute.mockResolvedValueOnce({ stdout: token });
-      await expect(session.judge("prompt")).resolves.toEqual({ status: "settled", aborted: false });
+      await expect(session.judge("prompt")).resolves.toEqual({
+        status: "settled",
+        aborted: false,
+      });
     }
     expect(seen).toEqual(["judgment-A", "judgment-B"]);
     execute.mockRejectedValueOnce(new Error("refresh-secret"));

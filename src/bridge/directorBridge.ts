@@ -43,6 +43,7 @@ import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 
 export interface AttachedWorld {
   binding: WorldBinding;
+  language: string;
   supportedEvents: readonly string[];
   paused: boolean;
 }
@@ -337,6 +338,7 @@ export class DirectorBridge extends EventEmitter<{
       });
       this.#world = {
         binding,
+        language: params.language,
         supportedEvents: [...params.supportedEvents],
         paused: params.paused,
       };

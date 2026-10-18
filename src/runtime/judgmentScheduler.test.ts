@@ -44,7 +44,7 @@ class BridgeStub extends EventEmitter {
   });
 
   attach(binding = world, paused = false) {
-    this.readyWorld = { binding, supportedEvents: ["block_broken"], paused };
+    this.readyWorld = { binding, language: "ja_jp", supportedEvents: ["block_broken"], paused };
     this.emit("attach", this.readyWorld);
   }
 

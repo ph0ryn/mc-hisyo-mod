@@ -46,7 +46,7 @@ backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの
 3. 接続先、起動ごとのトークン、プロトコルバージョンを、ユーザー専用の接続情報ファイルへ保存する。
 4. Modが接続情報を読み、CLIへ接続する。
 5. `bridge.hello`でトークン、役割、プロトコルバージョンを確認する。
-6. Modが`game.attach`でworld / player・対応イベント・pausedを送り、新しいsession bindingを受け取る。
+6. Modが`game.attach`でworld / player・言語コード`language`・対応イベント・pausedを送り、新しいsession bindingを受け取る。
 7. Modがbindingと要求handlerを準備してから`game.ready`を送る。attach応答前にrunを開始しない。
 8. CLIが`--pi`またはPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
 9. Pi拡張も認証し、handlerの準備後に`director.ready`を送る。
@@ -55,6 +55,11 @@ backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの
 通常CLIは上記全体を接続する。`--bridge-only`では待受と永続化だけでPi・判断を起動しない。
 Modはローカルsingleplayerのみ対応し、CLIを自動起動しない。
 初版は1つのゲーム接続を扱う。
+
+Modは接続時のMinecraftの言語設定を`game.attach.language`で一度だけ送る。
+言語コードは1〜16文字の英数字・`_`・`-`に限り、省略や不正な値は拒否するため、Mod・CLIを同時に更新する。
+CLIは受け取った`ja_jp`などのコードをsystem promptへ直接埋め込み、その接続中は固定する。
+`game.state.get`のsnapshotには言語を含めず、途中の言語変更には追従しない。再接続時に取得し直す。
 
 `worldId`は保存されたワールドを、`worldSessionId`は今回の接続・入場を識別する。
 再接続・再入場時には新しい`worldSessionId`を割り当てる。
