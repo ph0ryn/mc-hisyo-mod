@@ -12,7 +12,7 @@ export interface HistoryWorkerOptions {
   wallNow?: () => number;
 }
 
-/** A separate active-play cadence; main judgment/hooks never reset this clock. */
+/** A separate elapsed-time cadence while attached, including pauses; judgments never reset it. */
 export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
   readonly #bridge: HistoryWorkerOptions["bridge"];
   readonly #now: () => number;
@@ -31,7 +31,6 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = options.wallNow ?? Date.now;
     this.#bridge.on("attach", this.#attach);
-    this.#bridge.on("status", this.#status);
     this.#bridge.on("detach", this.#detach);
     if (this.#bridge.readyWorld) this.#attach(this.#bridge.readyWorld);
   }
@@ -40,12 +39,7 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
     this.#invalidate();
     this.#world = world;
     this.#clock = new ActivePlayClock();
-    this.#clock.setPlaying(!world.paused, this.#now());
-  };
-  readonly #status = (world: AttachedWorld): void => {
-    if (!this.#world || !sameWorldBinding(world.binding, this.#world.binding)) return;
-    this.#clock.setPlaying(!world.paused, this.#now());
-    this.#world = world;
+    this.#clock.setPlaying(true, this.#now());
   };
   readonly #detach = (binding: WorldBinding): void => {
     if (!this.#world || !sameWorldBinding(binding, this.#world.binding)) return;
@@ -63,7 +57,7 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
     if (this.#closed || this.#failed || !world || !sameWorldBinding(binding, world.binding))
       return false;
     const due = this.#clock.poll(this.#now());
-    if (!due || world.paused || this.#flight || !this.#bridge.isAgentReady) return false;
+    if (!due || this.#flight || !this.#bridge.isAgentReady) return false;
     const scope = { worldId: binding.worldId, playerId: binding.playerId };
     const pending = this.#bridge.history.next(scope);
     if (!pending) return false;
@@ -102,7 +96,6 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
     this.#closed = true;
     this.#invalidate();
     this.#bridge.off("attach", this.#attach);
-    this.#bridge.off("status", this.#status);
     this.#bridge.off("detach", this.#detach);
     return this.#shutdown;
   }

@@ -29,7 +29,7 @@ CLIは開始・poll・入力・hookの理由を判断前に記録して渡す。
 
 ## AI用の定期活動記憶
 
-通常モードでは、プレイ中の累積1分ごとに[独立worker](<../src/runtime/historyWorker.ts>)が未要約の観測を古い順に処理する。
+通常モードでは、ワールド接続中の経過1分ごとに[独立worker](<../src/runtime/historyWorker.ts>)が未要約の観測を古い順に処理する。pause中の時間も数える。
 主判断とは独立して経過時間・取消・single-flightを管理し、Toolや新しいPi sessionは起動しない。人向け履歴UIも追加しない。
 モデルは主判断と同じ`openai/gpt-6-luna`、要約の思考量は`reasoningEffort: low`とする。主判断の`medium`は変えない。
 Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-mode.md)である`serviceTier: priority`で要求する。
@@ -50,8 +50,7 @@ Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-m
   正常な要約の保存とcursorの進行は要約DB内の同一transaction。rawイベントやhookは変更しない。
   入力元はMod由来の観測だけ。プレイヤーのチャット、AIのHUD発言、CLI内部活動、hook設定は別の`activities.sqlite`へ保存し、要約へ混ぜない。
   旧DBからの自動移行・要約コピーは行わない。
-- pause中は定期実行までの経過時間を数えず、新しい要約を開始しない。進行中の要約は完了・保存まで続ける。
-  ゲーム内時刻の取得を止める意味ではない。
+- pause中も同じ周期で新しい要約を開始し、進行中の要約も完了・保存まで続ける。主判断のpause制御とは独立する。
   退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加要約もしない。
   空の差分では呼び出さず、重なった周期を後から連打しない。取消・失敗時はcursorを進めず、失敗は通常のruntime faultとして扱う。
 - 再接続後も同じworld / playerのcursorから継続し、以前のsessionも古い順に読む。

@@ -5,7 +5,7 @@
 - ルートの単一TypeScriptパッケージをVite+で検査・ビルド・テストする。
 - 独立したFabricプロジェクトをJava 21でビルドする。
 - イベント・応答hook・[AI用の定期活動記憶](<context.md#ai用の定期活動記憶>)をSQLiteへ保存し、worldId / playerId単位で再読込する。
-- プレイ中1分ごとに、加工済みの観測を同じモデルのFast / lowで独立要約し、主判断へ自動注入する。主判断はmediumを維持する。
+- ワールド接続中はpauseを含め1分ごとに、加工済みの観測を同じモデルのFast / lowで独立要約し、主判断へ自動注入する。主判断はmediumを維持する。
 - 履歴をイベント種別・時刻・公開されたフィールドで検索し、ページングする。
 - JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
 - 32種類のserver observerと、共有fixtureによる純Javaのsnapshot・DTO検証を実装する。
@@ -180,7 +180,8 @@ world / playerの組をhash化したprivateディレクトリへ会話を保存�
   refresh tokenや他providerの認証は子へ渡さず、いずれのkey / tokenも引数や診断へ出さない。
 - モデル定義はPiの組込catalogを消さない。毎判断で正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
 - scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
-- pause中は新しい判断を開始せず、開始済みの判断・Tool・要約は続ける。明示取消ではbinding無効化後に取消し、実settledまで予約を保つ。
+- pause中は新しい判断を開始せず、開始済みの判断・Toolは続ける。独立要約はpause中も新規開始・完了・保存する。
+  明示取消ではbinding無効化後に取消し、実settledまで予約を保つ。
   detach・agent切断・開始済みか不明な失敗では子を終了する。
   終了を確認できなければleaseと予約を残し、別の所有者へ渡さない。
 

@@ -179,8 +179,8 @@ Pi拡張自身の必須状態取得失敗・切断時のabortとは区別する�
   入力を保持して正常終了した場合だけ`accepted: true`を返す。判断の開始・完了を意味しない。
   gameが未ready、受付未登録・解除後・bridge終了中は`-32003`で拒否する。bridge-onlyでも成功扱いにして捨てない。
   pause中の受付は可能だが、判断実行の可否はruntimeが制御する。拒否されたnotificationは接続を閉じる。
-- pause中は新規runをbindせず、定期実行までの経過時間も数えない。ゲーム内時刻は引き続き取得できる。
-  開始済みのrun・Tool・要約は継続する。
+- pause中は新規runをbindせず、主判断の定期実行までの経過時間も数えない。ゲーム内時刻は引き続き取得できる。
+  開始済みのrun・Toolは継続する。独立要約はpause中も経過時間を数え、新規開始・完了・保存する。
   detach・切断・明示取消でrunを即時無効化し、Modへ`game.run.clear`を通知する。
   clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。
 - 判断はsingle-flight。無効化してもslotを保持し、呼出側が`agent_settled`を確認して`finishRun`するまで次を開始しない。

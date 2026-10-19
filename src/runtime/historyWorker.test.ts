@@ -14,7 +14,7 @@ const source: HistorySource = {
   lastObservedAt: 100,
   input: "observed block_broken ×3",
 };
-function fixture() {
+function fixture(paused = false) {
   let now = 0;
   const pending: {
     signal: AbortSignal;
@@ -22,7 +22,7 @@ function fixture() {
     reject: (error: Error) => void;
   }[] = [];
   const bridge = Object.assign(new EventEmitter(), {
-    readyWorld: { binding, paused: false, supportedEvents: [], language: "ja_jp" } as AttachedWorld,
+    readyWorld: { binding, paused, supportedEvents: [], language: "ja_jp" } as AttachedWorld,
     isAgentReady: true,
     history: {
       next: vi.fn<() => { source: HistorySource; backlog: boolean } | undefined>(() => ({
@@ -63,7 +63,7 @@ function fixture() {
   };
 }
 
-test("one independent active minute reserves one bounded prefix and stores its result", async () => {
+test("one independent elapsed minute reserves one bounded prefix and stores its result", async () => {
   const f = fixture();
   f.at(59_999);
   expect(f.worker.poll(binding)).toBe(false);
@@ -88,16 +88,46 @@ test("one independent active minute reserves one bounded prefix and stores its r
   await f.worker.close();
 });
 
-test("pause excludes time and an empty delta never calls the model", async () => {
-  const f = fixture();
-  f.at(30_000);
-  f.pause(true);
-  f.at(300_000);
-  f.pause(false);
-  f.at(329_999);
-  expect(f.worker.poll(binding)).toBe(false);
+test.each([false, true])(
+  "paused history keeps its cadence across startup and status changes; initiallyPaused=%s",
+  async (initiallyPaused) => {
+    const f = fixture(initiallyPaused);
+    f.at(30_000);
+    f.pause(true);
+    f.at(59_999);
+    expect(f.worker.poll(binding)).toBe(false);
+    f.at(60_000);
+    expect(f.worker.poll(binding)).toBe(true);
+    f.pending[0]!.resolve("first paused summary");
+    await f.settle();
+    f.at(120_000);
+    expect(f.worker.poll(binding)).toBe(true);
+    f.pending[1]!.resolve("second paused summary");
+    await f.settle();
+    f.at(150_000);
+    f.pause(false);
+    f.at(160_000);
+    f.pause(true);
+    f.at(179_999);
+    expect(f.worker.poll(binding)).toBe(false);
+    f.at(180_000);
+    expect(f.worker.poll(binding)).toBe(true);
+    f.pending[2]!.resolve("third paused summary");
+    await f.settle();
+    expect(f.bridge.history.save.mock.calls.map((call) => call[2])).toEqual([
+      "first paused summary",
+      "second paused summary",
+      "third paused summary",
+    ]);
+    expect(f.fault).not.toHaveBeenCalled();
+    await f.worker.close();
+  },
+);
+
+test.each([false, true])("an empty delta never calls the model; paused=%s", async (paused) => {
+  const f = fixture(paused);
   f.bridge.history.next.mockReturnValue(undefined);
-  f.at(330_000);
+  f.at(60_000);
   expect(f.worker.poll(binding)).toBe(false);
   expect(f.bridge.history.next).toHaveBeenCalledOnce();
   expect(f.bridge.summarizeHistory).not.toHaveBeenCalled();

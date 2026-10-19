@@ -159,7 +159,8 @@ export class DirectorBridge extends EventEmitter<{
     signal: AbortSignal,
   ): Promise<string> {
     signal.throwIfAborted();
-    if (this.#requireWorld(binding).paused || !this.#agent?.ready || this.#summarizing)
+    this.#requireWorld(binding);
+    if (!this.#agent?.ready || this.#summarizing)
       throw new Error("History summarizer is not available");
     const agent = this.#agent;
     const request = { ...binding, requestId: randomUUID(), input };

@@ -290,8 +290,20 @@ test("history completion is independent of run admission and rejects cancelled l
   await rejected;
 });
 
+test("history can start while paused without admitting a main judgment", async () => {
+  const h = await fixture();
+  await h.game.client.call("game.status", { ...h.world, paused: true });
+  await expect(h.bridge.beginRun()).rejects.toThrow();
+  await expect(
+    h.bridge.summarizeHistory(h.world, "observed events", new AbortController().signal),
+  ).resolves.toBe("石を採掘した。");
+  expect(h.native).toHaveLength(0);
+  expect(h.game.host.calls).not.toContain("game.run.bind");
+  expect(h.agent.host.calls).not.toContain("director.run.bind");
+});
+
 test.each([false, true])(
-  "real bridge stores in-flight memory across pause; resumed=%s",
+  "real bridge saves memory and starts the next batch across pause; resumed=%s",
   async (resume) => {
     const h = await fixture();
     const attached = h.bridge.readyWorld!;
@@ -325,6 +337,11 @@ test.each([false, true])(
       await drain();
       expect(save).toHaveBeenCalledOnce();
       expect(save.mock.calls[0]![2]).toBe("completed");
+      now = 120_000;
+      expect(worker.poll(h.world)).toBe(true);
+      await drain();
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(h.complete).toHaveBeenCalledTimes(2);
     } finally {
       response.resolve({ stopReason: "stop", content: [{ type: "text", text: "cleanup" }] });
       await worker.close();

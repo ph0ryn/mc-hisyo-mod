@@ -51,8 +51,9 @@ hookを含む判断が`settled`になった時点で、保留pollだけを取り
 時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
 [runtime](<../src/runtime/directorRuntime.ts>)は1,000 msごとにready worldへこの入口を呼び、shutdown時にtimerを最初に止める。
 
-pause中は定期実行までの経過時間を数えず、新しい判断を開始しない。ゲーム内時刻の取得を止める意味ではない。
-開始済みの判断・Tool・独立要約は、同じbindingで完了まで続ける。
+pause中は主判断の定期実行までの経過時間を数えず、新しい判断を開始しない。ゲーム内時刻の取得を止める意味ではない。
+開始済みの判断・Toolは、同じbindingで完了まで続ける。
+[独立要約](<context.md#ai用の定期活動記憶>)は主判断とは別の時計でpause中も経過時間を数え、新規開始・完了・保存する。
 退出・切断・明示停止では実行中のbindingを直ちに無効化し、CLIはPiへabortを要求する。
 `agent_settled`を確認するまでslotを解放せず、停止待ちの間に復帰しても判断を重ねない。
 
