@@ -44,7 +44,7 @@ Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-m
   周辺sampleの`not FOV/lighting/full sight, empty != absence`注記は付けない。
   `e`番号は入力ごとの元行順で1から振り直す。保存ID・session・時刻はメタデータに維持し、session・観測時刻範囲は入力へ書かない。
 - 1回の対象は同じsource sessionの連続prefix、最大500行。system指示と入力は合計12,000 UTF-8 bytes以内。
-  応答は日本語の事実を最大3項目、1,200 bytes以内とする。完全な記録ではなく、詳細はraw履歴を検索する。
+  応答の形式は指定せず、上限は1,200 bytesとする。完全な記録ではなく、詳細はraw履歴を検索する。
 - [保存先](<../src/storage/historySummaries.ts>)はraw履歴の`history.sqlite`とは別の`summaries.sqlite`にある`history_summaries`。
   world / playerごとに元のID範囲・session・時刻・加工入力・要約・モデル・要求tierを保持する。
   正常な要約の保存とcursorの進行は要約DB内の同一transaction。rawイベントやhookは変更しない。
