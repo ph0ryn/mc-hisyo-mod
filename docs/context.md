@@ -58,9 +58,10 @@ Fastは`serviceTier: priority`で要求する。これは要求値であり、�
   sessionが複数ある分や件数・入力上限を超える分は複数の要求に分け、毎回最新分を選び直す。区間外の到着行をまたいで操作を集約しない。
   応答の形式は指定せず、上限は1,200 bytesとする。完全な記録ではなく、詳細はevent logを検索する。
 - [summaryStore](<../src/storage/summaryStore.ts>)はevent logの`eventLog.sqlite`とは別の`summary.sqlite`にある`summaries`へ保存する。
-  world / playerごとに元のID範囲・session・時刻・加工入力・summary・モデル・要求tierを保持する。
+  world / playerごとに元のID範囲・session・時刻・summary・モデル・要求tierを保持する。
+  加工入力`input`は生成要求中だけ保持し、`source_json`を含めDBへ保存しない。既存の`input`付き記録も読み込める。
   新規の`source_json`は`minuteStart`と正確な`eventIds`を対で持ち、到着順と観測時刻が異なっても他の分の観測を要約済みにしない。
-  両fieldを持たない既存記録は従来の`(after, through]`全体を要約済みとして扱い、書き換えない。DB schemaはversion 1のままで、移行は行わない。
+  両fieldを持たない既存記録は従来の`(after, through]`全体を要約済みとして扱う。DB schemaはversion 1のままで、起動時の自動書換え・移行は行わない。
   summary本文と要約済みIDは同じinsertで確定し、重複・重なりを拒否する。event logやhookは変更しない。
   入力元はMod由来の観測だけ。プレイヤー入力、hisyoのHUD発言、hook変更、run要求などのCLI事実は`activityLog.sqlite`へ保存し、summaryへ混ぜない。
 - pause中も選択・生成・完了・保存を続ける。runのpause制御とは独立する。

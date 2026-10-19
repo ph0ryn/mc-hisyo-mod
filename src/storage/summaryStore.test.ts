@@ -182,9 +182,11 @@ test("summary text and coverage commit together; invalid or failed inserts do no
   expect(f.next()).toBeUndefined();
   expect(() => f.save(source)).toThrow(/overlap|stale/i);
   expect(f.raw.prepare("SELECT * FROM events").all()).toEqual(before);
-  expect(
-    JSON.parse(f.db.prepare("SELECT source_json FROM summaries").get()!.source_json as string),
-  ).toEqual(source);
+  const storedSource = JSON.parse(
+    f.db.prepare("SELECT source_json FROM summaries").get()!.source_json as string,
+  );
+  expect(storedSource).not.toHaveProperty("input");
+  expect({ ...storedSource, input: source.input }).toEqual(source);
 });
 
 test("legacy v1 range summaries remain valid coverage without migration or rewriting", () => {
@@ -200,6 +202,8 @@ test("legacy v1 range summaries remain valid coverage without migration or rewri
     input: "legacy raw projection",
   };
   f.save(legacy, "legacy summary");
+  // Reproduce the old payload independently of the current save implementation.
+  f.db.prepare("UPDATE summaries SET source_json = ?").run(JSON.stringify(legacy));
   const before = f.db.prepare("SELECT * FROM summaries").get();
   initializeSummaryDatabase(f.db);
   const next = f.reopen().next(scope, 180_000)!.source;
@@ -209,6 +213,38 @@ test("legacy v1 range summaries remain valid coverage without migration or rewri
   expect(f.db.prepare("PRAGMA user_version").get()!.user_version).toBe(1);
   expect(f.db.prepare("SELECT * FROM summaries WHERE id = 1").get()).toEqual(before);
 });
+
+test.each([true, false])(
+  "stored exact-ID coverage works with legacy input present=%s",
+  (hasInput) => {
+    const f = fixture();
+    f.append(1_000);
+    f.append(61_000);
+    const source = f.next(120_000)!;
+    expect(source.input).toContain("Observed event log");
+    f.save(source, "saved minute");
+    f.db.prepare("UPDATE summaries SET source_json = ?").run(JSON.stringify(source));
+    if (!hasInput) {
+      const cleanup = f.db.prepare(
+        "UPDATE summaries SET source_json = json_remove(source_json, '$.input') WHERE json_type(source_json, '$.input') IS NOT NULL",
+      );
+      expect(cleanup.run().changes).toBe(1);
+      expect(cleanup.run().changes).toBe(0);
+      const metadata = JSON.parse(
+        f.db.prepare("SELECT source_json FROM summaries").get()!.source_json as string,
+      );
+      expect(metadata).not.toHaveProperty("input");
+      expect({ ...metadata, input: source.input }).toEqual(source);
+    }
+    const before = f.db.prepare("SELECT * FROM summaries").all();
+    const reopened = f.reopen();
+    expect(reopened.context(scope)).toContain("saved minute");
+    const next = reopened.next(scope, 120_000)!.source;
+    expect(next.eventIds).toEqual([1]);
+    expect(next.input).toContain("Observed event log");
+    expect(f.db.prepare("SELECT * FROM summaries").all()).toEqual(before);
+  },
+);
 
 test.each([
   ["model", "other-model"],

@@ -11,6 +11,8 @@ import {
 } from "../protocol/summary.js";
 import { summaryTransaction } from "./summaryDatabase.js";
 
+type SummaryMetadata = Omit<SummarySource, "input">;
+
 const minuteMs = 60_000;
 const counter = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const SourceSchema = Type.Object(
@@ -21,19 +23,20 @@ const SourceSchema = Type.Object(
     sourceCount: Type.Integer({ minimum: 1, maximum: 500 }),
     firstObservedAt: counter,
     lastObservedAt: counter,
-    input: Type.String({ minLength: 1, maxLength: summaryInputBytes }),
+    // Read legacy payloads, but never write generated input to new rows.
+    input: Type.Optional(Type.String({ minLength: 1, maxLength: summaryInputBytes })),
     minuteStart: Type.Optional(counter),
     eventIds: Type.Optional(Type.Array(counter, { minItems: 1, maxItems: 500 })),
   },
   { additionalProperties: false },
 );
 
-function validateSource(source: SummarySource): void {
+function validateSource(source: SummaryMetadata & { input?: string }): void {
   if (
     !Check(SourceSchema, source) ||
     source.through <= source.after ||
     source.lastObservedAt < source.firstObservedAt ||
-    Buffer.byteLength(source.input) > summaryInputBytes
+    (source.input !== undefined && Buffer.byteLength(source.input) > summaryInputBytes)
   )
     throw new Error("Invalid summary source");
   const { minuteStart, eventIds } = source;
@@ -55,7 +58,7 @@ function validateSource(source: SummarySource): void {
 function decode(
   row: Record<string, SQLOutputValue>,
   scope: WorldScope,
-): { source: SummarySource; summary: string } {
+): { source: SummaryMetadata; summary: string } {
   if (
     row.world_id !== scope.worldId ||
     row.player_id !== scope.playerId ||
@@ -69,7 +72,7 @@ function decode(
     row.prompt_version !== 1
   )
     throw new Error("Invalid stored summary");
-  const source: SummarySource = JSON.parse(row.source_json);
+  const source: SummaryMetadata & { input?: string } = JSON.parse(row.source_json);
   validateSource(source);
   validateSummaryText(row.summary);
   if (source.after !== row.source_after || source.through !== row.source_through)
@@ -79,7 +82,7 @@ function decode(
 
 /** Exclusive lower bound, inclusive upper bound, in the raw event ID namespace. */
 type CoveredRange = [after: number, through: number];
-function coverage(sources: readonly SummarySource[]): CoveredRange[] {
+function coverage(sources: readonly SummaryMetadata[]): CoveredRange[] {
   const ranges: CoveredRange[] = sources.flatMap((source) =>
     source.eventIds
       ? source.eventIds.map((id): CoveredRange => [id - 1, id])
@@ -178,6 +181,7 @@ export class SummaryStore {
     validateSource(source);
     validateSummaryText(summary);
     if (!Check(counter, createdAt)) throw new Error("Invalid summary creation time");
+    const { input: _input, ...metadata } = source;
     summaryTransaction(this.db, () => {
       const ranges = coverage(this.#stored(scope).map(({ source }) => source));
       const overlap = source.eventIds
@@ -193,7 +197,7 @@ export class SummaryStore {
           scope.playerId,
           source.after,
           source.through,
-          JSON.stringify(source),
+          JSON.stringify(metadata),
           summary,
           createdAt,
         );
