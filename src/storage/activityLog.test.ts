@@ -169,6 +169,64 @@ test("real SQLite keeps source-specific IDs, scopes, filters and captured high-w
   }
 });
 
+test("SQLite persists searchable per-call token facts without migrating existing activities", () => {
+  const f = realLogs();
+  try {
+    f.activities.appendActivity(input);
+    const data = {
+      source: "run",
+      requestId: "run-1",
+      provider: "openai",
+      model: "gpt-6-luna",
+      api: "openai-responses",
+      stopReason: "stop",
+      input: 100,
+      output: 20,
+      cacheRead: 40,
+      cacheWrite: 0,
+      total: 160,
+    };
+    f.activities.appendActivity(activity(binding, "hisyo.token_usage", data, 101));
+    f.activities.appendActivity(
+      activity(
+        binding,
+        "hisyo.token_usage",
+        {
+          ...data,
+          source: "summary",
+          requestId: "summary-1",
+          stopReason: "error",
+          input: null,
+          output: null,
+          cacheRead: null,
+          cacheWrite: null,
+          total: null,
+        },
+        102,
+      ),
+    );
+    const reopenedOwner = new ActivityLog(f.activityDb);
+    const scope = { worldId: binding.worldId, playerId: binding.playerId };
+    expect(reopenedOwner.search(scope, { event: "hisyo.token_usage" }).events).toHaveLength(2);
+    expect(
+      reopenedOwner.search(scope, {
+        event: "hisyo.token_usage",
+        filter: { source: "summary", total: null },
+      }).events[0]!.activity.data,
+    ).toMatchObject({ input: null, total: null, source: "summary" });
+    expect(
+      reopenedOwner.search(scope, { event: "hisyo.player_input" }).events[0]!.activity,
+    ).toEqual(input);
+    const row = f.activityDb
+      .prepare("SELECT activity_json FROM activities WHERE event = ? ORDER BY id")
+      .get("hisyo.token_usage");
+    expect(JSON.parse(row!.activity_json as string).data).toEqual(data);
+    expect(f.activityDb.prepare("PRAGMA user_version").get()?.user_version).toBe(1);
+  } finally {
+    f.close();
+  }
+});
+
 test("real SQLite activity pages preserve escaped payloads and cursor continuity", () => {
   const f = realLogs();
   try {
@@ -315,6 +373,22 @@ test("every current Hisyo activity fits individually at maximum escaped text and
   const text = "\u0000".repeat(16_000);
   const maxBinding = { worldId: id, playerId: id, sessionId: id };
   const samples: [string, Record<string, unknown>][] = [
+    [
+      "token_usage",
+      {
+        source: "run",
+        requestId: id,
+        provider: id,
+        model: "\u0000".repeat(256),
+        api: "openai-responses",
+        stopReason: "stop",
+        input: Number.MAX_SAFE_INTEGER,
+        output: Number.MAX_SAFE_INTEGER,
+        cacheRead: Number.MAX_SAFE_INTEGER,
+        cacheWrite: Number.MAX_SAFE_INTEGER,
+        total: Number.MAX_SAFE_INTEGER,
+      },
+    ],
     ["session_attached", { beforeAttachment: "unknown" }],
     ["status_reported", { paused: false }],
     ["session_detached", { reason: "link_closed", afterLastObservation: "unknown" }],

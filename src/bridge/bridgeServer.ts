@@ -43,6 +43,8 @@ import {
 import { type GameEvent } from "../protocol/gameEvent.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import type { SummaryStore } from "../storage/summaryStore.js";
+import { TokenUsageRequestSchema } from "../protocol/tokenUsage.js";
+import type { SummaryRequest } from "../protocol/summary.js";
 import {
   SummaryRequestSchema,
   SummaryResultSchema,
@@ -84,7 +86,7 @@ export class BridgeServer extends EventEmitter<{
   fault: [error: Error];
 }> {
   readonly summaries: SummaryStore;
-  #summarizing = false;
+  #summaryRequest: SummaryRequest | undefined;
   readonly #options: BridgeOptions;
   readonly #server: ReturnType<typeof createServer>;
   readonly #connections = new Set<Connection>();
@@ -156,12 +158,13 @@ export class BridgeServer extends EventEmitter<{
   async summarize(binding: SessionBinding, input: string, signal: AbortSignal): Promise<string> {
     signal.throwIfAborted();
     this.#requireSession(binding);
-    if (!this.#agent?.ready || this.#summarizing) throw new Error("Summarization is not available");
+    if (!this.#agent?.ready || this.#summaryRequest)
+      throw new Error("Summarization is not available");
     const agent = this.#agent;
     const request = { ...binding, requestId: randomUUID(), input };
     if (!Check(SummaryRequestSchema, request) || Buffer.byteLength(input) > summaryInputBytes)
       throw new Error("Invalid summary request");
-    this.#summarizing = true;
+    this.#summaryRequest = request;
     const cancel = () => {
       try {
         agent.peer.notify("hisyo.summary.cancel", { ...binding, requestId: request.requestId });
@@ -186,7 +189,7 @@ export class BridgeServer extends EventEmitter<{
       return result.summary;
     } finally {
       signal.removeEventListener("abort", cancel);
-      this.#summarizing = false;
+      this.#summaryRequest = undefined;
     }
   }
 
@@ -375,6 +378,26 @@ export class BridgeServer extends EventEmitter<{
       else this.#agent = connection;
       clearTimeout(timer);
       return { protocolVersion, role: params.role };
+    });
+    this.#register(connection, "hisyo.usage.record", "agent", TokenUsageRequestSchema, (params) => {
+      const owned = params.source === "run" ? this.#run?.binding : this.#summaryRequest;
+      const requestId =
+        params.source === "run" ? this.#run?.binding.runId : this.#summaryRequest?.requestId;
+      // Cancellation discards output, not usage. Retain the original scope until its slot settles.
+      if (
+        !connection.ready ||
+        !owned ||
+        !sameSessionBinding(params, owned) ||
+        params.requestId !== requestId
+      )
+        throw new RpcError(-32001, "No matching model request for token usage");
+      const { worldId, playerId, sessionId, ...data } = params;
+      this.#storage(() =>
+        this.#options.activityLog.appendActivity(
+          activity({ worldId, playerId, sessionId }, "hisyo.token_usage", data),
+        ),
+      );
+      return { recorded: true };
     });
     this.#register(connection, "hisyo.summary.get", "agent", RunBindingSchema, (params) => {
       const scope = this.#requireRun(params);

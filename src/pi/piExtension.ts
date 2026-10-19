@@ -17,6 +17,13 @@ import {
 } from "../protocol/bridge.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import { hisyoToolNames, physicalModelApis } from "./piPolicy.js";
+import { TokenUsageTracker } from "./tokenUsage.js";
+import {
+  TokenUsageRequestSchema,
+  TokenUsageResultSchema,
+  type TokenUsageData,
+} from "../protocol/tokenUsage.js";
+import type { SessionBinding } from "../protocol/bridge.js";
 import { sameSessionBinding } from "../protocol/bridge.js";
 import {
   SummaryCancelSchema,
@@ -75,6 +82,7 @@ export default function piExtension(
   let active = false;
   let abortActive: (() => void) | undefined;
   let summaryFlight: { request: SummaryRequest; controller: AbortController } | undefined;
+  let runUsage: TokenUsageTracker | undefined;
 
   function retire(ctx?: ExtensionContext): void {
     // Abort is synchronous; throwing from a Pi context handler alone is not fail-closed.
@@ -105,6 +113,31 @@ export default function piExtension(
     const actual = pi.getActiveTools().toSorted();
     if (JSON.stringify(actual) !== JSON.stringify(hisyoToolNames.toSorted()))
       throw new Error("Hisyo requires exactly its ten game tools");
+  }
+
+  async function recordUsage(
+    captured: SessionBinding,
+    data: Omit<TokenUsageData, "input" | "output" | "cacheRead" | "cacheWrite" | "total">,
+    usage: TokenUsageTracker,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    try {
+      // Do not use requireRun: cancellation invalidates output, not already incurred usage.
+      const report = {
+        worldId: captured.worldId,
+        playerId: captured.playerId,
+        sessionId: captured.sessionId,
+        ...data,
+        ...usage.counts,
+      };
+      if (!Check(TokenUsageRequestSchema, report)) throw new Error("Invalid token usage report");
+      const result = await peer!.call("hisyo.usage.record", report);
+      if (!Check(TokenUsageResultSchema, result))
+        throw new Error("Invalid token usage acknowledgement");
+    } catch {
+      retire(ctx);
+      throw new Error("Token usage recording failed");
+    }
   }
 
   async function request(
@@ -228,25 +261,56 @@ export default function piExtension(
         const flight = { request: params, controller: new AbortController() };
         summaryFlight = flight;
         const { input: _input, ...requestBinding } = params;
+        const usage = new TokenUsageTracker(model.api);
+        let usageRecorded = false;
         try {
-          const response = await ctx.modelRegistry.complete(
-            model,
+          let response: Awaited<ReturnType<typeof ctx.modelRegistry.complete>> | undefined;
+          try {
+            response = await ctx.modelRegistry.complete(
+              model,
+              {
+                systemPrompt: summarySystemPrompt,
+                messages: [{ role: "user", content: params.input, timestamp: Date.now() }],
+              },
+              {
+                // Fast mode's compatible wire name; some ChatGPT endpoints reject "fast".
+                serviceTier: "priority",
+                reasoningEffort: "low",
+                maxTokens: 4096,
+                cacheRetention: "none",
+                signal: flight.controller.signal,
+                onProviderStreamEvent: (event) => {
+                  try {
+                    usage.observe(event);
+                  } catch (error) {
+                    retire(ctx);
+                    throw error;
+                  }
+                },
+              },
+            );
+          } catch {
+            // Completion can throw before reporting counters; keep them unknown, not zero.
+          }
+          await recordUsage(
+            params,
             {
-              systemPrompt: summarySystemPrompt,
-              messages: [{ role: "user", content: params.input, timestamp: Date.now() }],
+              source: "summary",
+              requestId: params.requestId,
+              provider: model.provider,
+              model: response?.responseModel ?? model.id,
+              api: model.api as TokenUsageData["api"],
+              stopReason:
+                response?.stopReason ?? (flight.controller.signal.aborted ? "aborted" : "error"),
             },
-            {
-              // Fast mode's compatible wire name; some ChatGPT endpoints reject "fast".
-              serviceTier: "priority",
-              reasoningEffort: "low",
-              maxTokens: 4096,
-              cacheRetention: "none",
-              signal: flight.controller.signal,
-            },
+            usage,
+            ctx,
           );
+          usageRecorded = true;
           if (flight.controller.signal.aborted || retired)
             return { ...requestBinding, summary: "", cancelled: true };
-          if (response.stopReason !== "stop") throw new Error("Incomplete summary completion");
+          if (!response || response.stopReason !== "stop")
+            throw new Error("Incomplete summary completion");
           const summary = response.content
             .filter((part) => part.type === "text")
             .map((part) => part.text)
@@ -255,6 +319,7 @@ export default function piExtension(
           validateSummaryText(summary);
           return { ...requestBinding, summary, cancelled: false };
         } catch {
+          if (!usageRecorded) throw new RpcError(-32603, "Token usage recording failed");
           if (flight.controller.signal.aborted || retired)
             return { ...requestBinding, summary: "", cancelled: true };
           // Provider errors may contain credentials or input; never put them on the bridge.
@@ -308,6 +373,51 @@ export default function piExtension(
       requireRun();
     } catch (error) {
       stop(ctx, error);
+      throw error;
+    }
+  });
+  pi.on("before_provider_request", (_event, ctx) => {
+    runUsage = new TokenUsageTracker(ctx.model!.api);
+  });
+  pi.on("provider_stream_event", (event, ctx) => {
+    try {
+      requireHost(ctx);
+      if (
+        event.api !== ctx.model!.api ||
+        event.provider !== ctx.model!.provider ||
+        event.model !== ctx.model!.id
+      )
+        throw new Error("Token usage model does not match the active model");
+      runUsage ??= new TokenUsageTracker(event.api);
+      runUsage.observe(event.data);
+    } catch (error) {
+      retire(ctx);
+      throw error;
+    }
+  });
+  pi.on("message_end", async (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    const captured = binding;
+    const usage = runUsage ?? new TokenUsageTracker(ctx.model!.api);
+    runUsage = undefined;
+    try {
+      requireHost(ctx);
+      if (!captured) throw new Error("No model request binding for token usage");
+      await recordUsage(
+        captured,
+        {
+          source: "run",
+          requestId: captured.runId,
+          provider: event.message.provider,
+          model: event.message.responseModel ?? event.message.model,
+          api: event.message.api as TokenUsageData["api"],
+          stopReason: event.message.stopReason,
+        },
+        usage,
+        ctx,
+      );
+    } catch (error) {
+      retire(ctx);
       throw error;
     }
   });

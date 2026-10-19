@@ -217,6 +217,7 @@ Pi拡張自身の必須game state取得失敗・切断時のabortとは区別す
 | `hisyo.summary.create` | CLI → Pi拡張 | world / player / sessionとrequest IDに束縛した独立summary。Toolなし |
 | `hisyo.summary.cancel` | CLI → Pi拡張 | 一致するsummary requestだけを取消す通知。実完了までslotを保持 |
 | `hisyo.summary.get` | Pi拡張 → CLI | 認証済みの現在runに束縛した保存済みsummaryの背景情報 |
+| `hisyo.usage.record` | Pi拡張 → CLI | 保持中のrun / summary要求に束縛したトークン使用量の保存。ACKは`{recorded: true}` |
 
 表のhandler・送信処理は接続済み。最新状態は`game.state.get`、runの理由はrun requestで渡す。
 summaryはrun bindingやTool権限を持たず、event logだけから作成する。pause中の処理と退出・終了時の取消は[summaryの契約](<context.md#summary>)を参照。

@@ -3,7 +3,9 @@ import { EventEmitter } from "node:events";
 import type { Server } from "node:net";
 import { expect, onTestFinished, test, vi } from "vite-plus/test";
 import type { EventLog } from "../storage/eventLog.js";
-import type { ActivityLog } from "../storage/activityLog.js";
+import { ActivityLog } from "../storage/activityLog.js";
+import { DatabaseSync } from "node:sqlite";
+import { initializeActivityDatabase } from "../storage/activityDatabase.js";
 import type { SummaryStore } from "../storage/summaryStore.js";
 import type { Hook, HookStore } from "../storage/hookStore.js";
 import type { GameEvent } from "../protocol/gameEvent.js";
@@ -63,7 +65,7 @@ async function drain() {
   for (let i = 0; i < 30; i++) await tick();
 }
 
-async function fixture(supportedEvents: string[] = []) {
+async function fixture(supportedEvents: string[] = [], persisted?: ActivityLog) {
   vi.useFakeTimers();
   onTestFinished(() => {
     vi.useRealTimers();
@@ -74,7 +76,7 @@ async function fixture(supportedEvents: string[] = []) {
   let storageError: Error | undefined;
   let activityError: Error | undefined;
   let appendsBeforeFailure = 0;
-  const activityDb = {};
+  const activityDb = persisted?.db ?? {};
   const matchedHooks: Hook[] = [];
   const registeredHooks: Hook[] = [];
   const rawSearch = vi.fn(() => ({ events: [], through: 41, hasKnownGaps: true, nextCursor: 3 }));
@@ -106,30 +108,32 @@ async function fixture(supportedEvents: string[] = []) {
       validateFilter: vi.fn(),
     },
   } as unknown as EventLog;
-  const activityLog = {
-    db: activityDb,
-    atomic: <T>(mutate: () => T): T => {
-      const before = rows.length;
-      const hooksBefore = [...registeredHooks];
-      try {
-        return mutate();
-      } catch (error) {
-        rows.splice(before);
-        registeredHooks.splice(0, registeredHooks.length, ...hooksBefore);
-        throw error;
-      }
-    },
-    appendActivity: (value: unknown) => {
-      if (activityError || storageError) throw activityError ?? storageError;
-      rows.push(value);
-      return { id: rows.length, activity: value };
-    },
-    appendActivities: (values: unknown[]) => {
-      if (activityError || storageError) throw activityError ?? storageError;
-      rows.push(...values);
-    },
-    search: activitySearch,
-  } as unknown as ActivityLog;
+  const activityLog =
+    persisted ??
+    ({
+      db: activityDb,
+      atomic: <T>(mutate: () => T): T => {
+        const before = rows.length;
+        const hooksBefore = [...registeredHooks];
+        try {
+          return mutate();
+        } catch (error) {
+          rows.splice(before);
+          registeredHooks.splice(0, registeredHooks.length, ...hooksBefore);
+          throw error;
+        }
+      },
+      appendActivity: (value: unknown) => {
+        if (activityError || storageError) throw activityError ?? storageError;
+        rows.push(value);
+        return { id: rows.length, activity: value };
+      },
+      appendActivities: (values: unknown[]) => {
+        if (activityError || storageError) throw activityError ?? storageError;
+        rows.push(...values);
+      },
+      search: activitySearch,
+    } as unknown as ActivityLog);
   const hooks = {
     db: activityDb,
     catalog: eventLog.catalog,
@@ -266,6 +270,294 @@ async function fixture(supportedEvents: string[] = []) {
     },
   };
 }
+
+const reportedUsage = { input: 100, output: 20, cacheRead: 40, cacheWrite: 0, totalTokens: 160 };
+const storedTokens = { input: 140, output: 20, cacheRead: 40, cacheWrite: null, total: 160 };
+const rawUsageEvent = {
+  usage: {
+    prompt_tokens: 140,
+    completion_tokens: 20,
+    total_tokens: 160,
+    prompt_tokens_details: { cached_tokens: 40 },
+  },
+};
+
+function emitRawUsage(h: Awaited<ReturnType<typeof fixture>>, ctx: ExtensionContext) {
+  return h.emit("provider_stream_event", ctx, {
+    provider: "openai",
+    api: "openai-completions",
+    model: "gpt-6-luna",
+    data: rawUsageEvent,
+  });
+}
+
+function usageRows(rows: unknown[]) {
+  return rows.filter((row) => (row as { event: string }).event === "hisyo.token_usage");
+}
+
+test("extension and authenticated bridge persist independent run/summary counters into real SQLite", async () => {
+  const db = new DatabaseSync(":memory:");
+  initializeActivityDatabase(db);
+  const log = new ActivityLog(db);
+  const h = await fixture([], log);
+  onTestFinished(async () => {
+    await h.bridge.close();
+    db.close();
+  });
+  const run = await h.bridge.beginRun();
+  const { ctx } = h.context();
+  h.emit("agent_start", ctx);
+  await emitRawUsage(h, ctx);
+  h.complete.mockImplementation((_model, _context, options) => {
+    (options as { onProviderStreamEvent: (data: unknown) => void }).onProviderStreamEvent({
+      usage: { prompt_tokens: 9 },
+    });
+    return Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
+  });
+  await h.bridge.summarize(h.world, "events", new AbortController().signal);
+  await h.emit("message_end", ctx, {
+    message: {
+      role: "assistant",
+      provider: "openai",
+      model: "gpt-6-luna",
+      api: "openai-completions",
+      stopReason: "stop",
+    },
+  });
+  // The next response has no raw usage. It must not reuse the preceding call's counts.
+  await h.emit("message_end", ctx, {
+    message: {
+      role: "assistant",
+      provider: "openai",
+      model: "gpt-6-luna",
+      api: "openai-completions",
+      stopReason: "error",
+      usage: reportedUsage,
+    },
+  });
+  const stored = log.search(
+    { worldId: h.world.worldId, playerId: h.world.playerId },
+    { event: "hisyo.token_usage" },
+  ).events;
+  expect(stored.map(({ activity }) => activity.data)).toEqual([
+    expect.objectContaining({ source: "summary", input: 9, output: null, total: null }),
+    expect.objectContaining({ source: "run", requestId: run.runId, ...storedTokens }),
+    expect.objectContaining({
+      source: "run",
+      input: null,
+      output: null,
+      cacheRead: null,
+      cacheWrite: null,
+      total: null,
+    }),
+  ]);
+  expect(stored.every(({ activity }) => activity.sessionId === h.world.sessionId)).toBe(true);
+  h.emit("agent_settled", ctx);
+  h.bridge.finishRun(run);
+});
+
+test("each assistant response records tokens once, including invalidated runs, without prose", async () => {
+  const h = await fixture();
+  const run = await h.bridge.beginRun();
+  const { ctx } = h.context();
+  h.emit("agent_start", ctx);
+  const message = {
+    role: "assistant",
+    provider: "openai",
+    model: "gpt-6-luna",
+    api: "openai-completions",
+    stopReason: "toolUse",
+    usage: reportedUsage,
+    content: [{ type: "text", text: "PRIVATE_PROSE" }],
+    errorMessage: "PRIVATE_ERROR",
+  };
+  await h.emit("message_end", ctx, { message: { role: "user", content: "PRIVATE_INPUT" } });
+  await emitRawUsage(h, ctx);
+  await h.emit("message_end", ctx, { message });
+  h.bridge.invalidateRun("cancelled");
+  await emitRawUsage(h, ctx);
+  await h.emit("message_end", ctx, { message: { ...message, stopReason: "aborted" } });
+  h.emit("agent_end", ctx, { messages: [message] });
+  const records = usageRows(h.rows);
+  expect(records).toHaveLength(2);
+  expect(records[0]).toEqual({
+    ...h.world,
+    origin: "cli",
+    recordedAt: expect.any(Number),
+    event: "hisyo.token_usage",
+    data: {
+      source: "run",
+      requestId: run.runId,
+      provider: "openai",
+      model: "gpt-6-luna",
+      api: "openai-completions",
+      stopReason: "toolUse",
+      ...storedTokens,
+    },
+  });
+  expect(records[1]).toMatchObject({ data: { stopReason: "aborted", ...storedTokens } });
+  expect(JSON.stringify(records)).not.toContain("PRIVATE_");
+});
+
+test.each(["stop", "length", "error", "cancelled", "rejected"])(
+  "summary usage persists even when the result is %s",
+  async (outcome) => {
+    const h = await fixture();
+    const response = deferred<unknown>();
+    h.complete.mockImplementation((_model, _context, options) => {
+      if (outcome !== "rejected")
+        (options as { onProviderStreamEvent: (data: unknown) => void }).onProviderStreamEvent(
+          rawUsageEvent,
+        );
+      return response.promise;
+    });
+    const controller = new AbortController();
+    const pending = h.bridge.summarize(h.world, "PRIVATE_OBSERVATIONS", controller.signal);
+    const settled = pending.catch((error: unknown) => error);
+    if (outcome === "cancelled") controller.abort();
+    if (outcome === "rejected") response.reject(new Error("PRIVATE_CREDENTIAL"));
+    else
+      response.resolve({
+        stopReason: outcome === "cancelled" ? "stop" : outcome,
+        usage: reportedUsage,
+        content: [{ type: "text", text: "completed" }],
+      });
+    if (outcome === "stop") expect(await settled).toBe("completed");
+    else expect(await settled).toBeInstanceOf(Error);
+    const records = usageRows(h.rows);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      ...h.world,
+      event: "hisyo.token_usage",
+      data: {
+        source: "summary",
+        requestId: expect.any(String),
+        provider: "openai",
+        model: "gpt-6-luna",
+        stopReason: outcome === "cancelled" ? "stop" : outcome === "rejected" ? "error" : outcome,
+        ...(outcome === "rejected"
+          ? { input: null, output: null, cacheRead: null, cacheWrite: null, total: null }
+          : storedTokens),
+      },
+    });
+    expect(JSON.stringify(records)).not.toContain("PRIVATE_");
+  },
+);
+
+test("late cancelled summary usage stays with its original session after detach and replacement", async () => {
+  const h = await fixture();
+  const response = deferred<unknown>();
+  h.complete.mockImplementation((_model, _context, options) => {
+    (options as { onProviderStreamEvent: (event: unknown) => void }).onProviderStreamEvent(
+      rawUsageEvent,
+    );
+    return response.promise;
+  });
+  const controller = new AbortController();
+  const pending = h.bridge.summarize(h.world, "events", controller.signal);
+  const failed = expect(pending).rejects.toThrow();
+  controller.abort();
+  await h.game.client.call("game.detach", h.world);
+  const replacement = await h.game.client.call("game.attach", {
+    worldId: "new-world",
+    playerId: "new-player",
+    language: "ja_jp",
+    supportedEvents: [],
+    paused: false,
+  });
+  await h.game.client.call("game.ready", replacement);
+  response.resolve({ stopReason: "aborted", content: [] });
+  await failed;
+  expect(usageRows(h.rows)).toEqual([
+    expect.objectContaining({
+      ...h.world,
+      data: expect.objectContaining({ source: "summary", ...storedTokens }),
+    }),
+  ]);
+});
+
+test.each([false, true])(
+  "summary token storage failure is not hidden by cancellation=%s",
+  async (cancelled) => {
+    const h = await fixture();
+    const faults: Error[] = [];
+    h.bridge.on("fault", (error) => faults.push(error));
+    const response = deferred<unknown>();
+    h.complete.mockImplementation(() => response.promise);
+    const controller = new AbortController();
+    const pending = h.bridge.summarize(h.world, "events", controller.signal);
+    const failed = expect(pending).rejects.toThrow("Token usage recording failed");
+    h.failActivities(new Error("usage storage failed"));
+    if (cancelled) controller.abort();
+    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
+    await failed;
+    expect(faults.map((error) => error.message)).toEqual(["usage storage failed"]);
+    expect(usageRows(h.rows)).toEqual([]);
+  },
+);
+
+test("token reports require the agent role and an exact retained request binding", async () => {
+  const h = await fixture();
+  const run = await h.bridge.beginRun();
+  const report = {
+    ...h.world,
+    source: "run",
+    requestId: run.runId,
+    provider: "openai",
+    model: "gpt-6-luna",
+    api: "openai-completions",
+    stopReason: "stop",
+    ...storedTokens,
+  };
+  await expect(h.game.client.call("hisyo.usage.record", report)).rejects.toMatchObject({
+    code: -32010,
+  });
+  for (const patch of [
+    { sessionId: "other" },
+    { requestId: "other" },
+    { source: "summary" },
+    { input: -1 },
+    { total: 1.5 },
+    { output: Number.MAX_SAFE_INTEGER + 1 },
+    { secret: "PRIVATE_TOKEN" },
+  ])
+    await expect(
+      h.agent.client.call("hisyo.usage.record", { ...report, ...patch }),
+    ).rejects.toBeInstanceOf(Error);
+  expect(usageRows(h.rows)).toEqual([]);
+  h.bridge.invalidateRun("cancelled");
+  await expect(h.agent.client.call("hisyo.usage.record", report)).resolves.toEqual({
+    recorded: true,
+  });
+  h.bridge.finishRun(run);
+  await expect(h.agent.client.call("hisyo.usage.record", report)).rejects.toBeInstanceOf(Error);
+  expect(usageRows(h.rows)).toHaveLength(1);
+});
+
+test("token storage failures are fatal and never acknowledged as saved", async () => {
+  const h = await fixture();
+  await h.bridge.beginRun();
+  const faults: Error[] = [];
+  h.bridge.on("fault", (error) => faults.push(error));
+  h.failActivities(new Error("usage storage failed"));
+  const { ctx, controller } = h.context();
+  h.emit("agent_start", ctx);
+  await expect(
+    h.emit("message_end", ctx, {
+      message: {
+        role: "assistant",
+        provider: "openai",
+        model: "gpt-6-luna",
+        api: "openai-completions",
+        stopReason: "stop",
+        usage: reportedUsage,
+      },
+    }),
+  ).rejects.toThrow();
+  expect(faults.map((error) => error.message)).toEqual(["usage storage failed"]);
+  expect(controller.signal.aborted).toBe(true);
+  expect(usageRows(h.rows)).toEqual([]);
+});
 
 test("summarization is independent of run admission and rejects cancelled late results", async () => {
   const h = await fixture();

@@ -15,6 +15,7 @@ import {
 } from "../protocol/gameEvent.js";
 import type { RunRequest } from "../runtime/runQueue.js";
 import { EventCatalog, EventFilterSchema } from "./eventCatalog.js";
+import { TokenUsageDataSchema } from "../protocol/tokenUsage.js";
 
 const strict = { additionalProperties: false } as const;
 const identifier = GameEventSchema.properties.worldId;
@@ -50,6 +51,12 @@ function definition(
 }
 
 export const activityCatalog = new EventCatalog([
+  definition(
+    "token_usage",
+    "Provider-reported token counters for one run or summary model call, including discarded results. Null means unreported, not zero. Input retains the provider API's cache accounting.",
+    TokenUsageDataSchema.properties,
+    Object.keys(TokenUsageDataSchema.properties),
+  ),
   definition(
     "session_attached",
     "CLI accepted game.ready for this attachment, not a native JOIN or world start. Pre-ready/pre-attachment observations are unknown.",

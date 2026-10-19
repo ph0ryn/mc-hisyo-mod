@@ -39,6 +39,7 @@ class ManualPeer extends EventEmitter<{ close: [Error] }> {
     this.calls.push(method);
     this.requests.push({ method, params });
     if (method === "hisyo.ready") return Promise.resolve({ ready: true });
+    if (method === "hisyo.usage.record") return Promise.resolve({ recorded: true });
     if (method === "hisyo.summary.get") return Promise.resolve(this.summaryReply(params));
     if (method === "game.state.get") {
       const result = deferred();
@@ -164,7 +165,7 @@ test("independent summary requests Fast via priority with low reasoning and no t
     reasoningEffort: "low",
   });
   expect(controller.signal.aborted).toBe(false);
-  expect(h.peer.calls).toEqual(["hisyo.ready"]);
+  expect(h.peer.calls).toEqual(["hisyo.ready", "hisyo.usage.record"]);
 });
 
 test("summary cancellation keeps its slot until completion settles, without cancelling the main run", async () => {

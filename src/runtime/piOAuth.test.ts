@@ -239,6 +239,36 @@ async function pausedSummaryFixture() {
   };
 }
 
+test.each(["shutdown", "detach"])(
+  "%s keeps the Pi connection alive until summary usage can be recorded",
+  async (reason) => {
+    const f = await pausedSummaryFixture();
+    let complete!: (text: string) => void;
+    f.bridge.summarize.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const pending = f.scheduler.summarize(f.world, "observations", new AbortController().signal);
+    const settled = pending.catch((error: unknown) => error);
+    await f.drain();
+    expect(f.bridge.summarize).toHaveBeenCalledOnce();
+    if (reason === "detach") f.detach();
+    const closing = f.close();
+    await f.drain();
+    try {
+      expect(f.client.close).not.toHaveBeenCalled();
+    } finally {
+      // Simulate completion handling (including usage ACK) before the bridge request settles.
+      complete("late summary");
+      await settled;
+      await closing;
+    }
+    expect(f.client.close).toHaveBeenCalledOnce();
+  },
+);
+
 test("independent summarization refreshes expired OAuth during repeated long pauses without main runs", async () => {
   const f = await pausedSummaryFixture();
   expect(f.readAuth().openai.key).toBe("access-1");

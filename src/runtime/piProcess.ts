@@ -487,10 +487,12 @@ class PiProcess extends EventEmitter<{ fault: [error: Error] }> {
     // A rotating OAuth grant must be persisted before its helper exits and files are removed.
     await this.ready.catch(() => {});
     const client = this.#client ?? (await this.#launch?.catch(() => undefined));
+    // close() already aborted summary intake. Keep the authenticated pipe alive until
+    // its completion/usage ACK settles (bounded by the bridge's model-call deadline).
+    await this.#summaryFlight?.catch(() => {});
     // Do not release the scope/bridge lease if child termination could not be confirmed.
     await client?.close();
     await this.#flight?.promise?.catch(() => {});
-    await this.#summaryFlight?.catch(() => {});
     this.#options.bridge.off("runInvalidated", this.#invalidated);
     this.#options.bridge.off("detach", this.#detached);
     this.#options.bridge.off("peerClosed", this.#peerClosed);

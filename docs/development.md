@@ -7,6 +7,7 @@
 - event log、activity logとhook、[summary](<context.md#summary>)を3つのSQLiteへ分けて保存し、world / player単位で再読込する。
 - session接続中はpauseを含め1分ごとに、加工済みのevent logを同じモデルのFast / lowで独立要約し、runへ自動注入する。runはmediumを維持する。
 - event logとactivity logをイベント種別・時刻・公開されたフィールドで検索し、ページングする。
+- run・summaryの応答ごとに[トークン使用量](<tokenUsage.md>)をactivity logへ保存する。APIの未報告カウンターは0ではなく`null`で残す。
 - JSONL / JSON-RPC codecで双方向要求・通知・切断・timeoutを扱う。
 - 32種類のサーバー側観測処理と、共有fixtureによる純Javaのgame state・DTO検証を実装する。
 - 認証付きloopback bridgeで、role・ready・session / run bindingを管理し、古い応答を拒否する。
