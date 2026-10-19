@@ -47,10 +47,10 @@ backpressureでも同じframeを再送しない。stderrは末尾16 KiBまでの
 4. Modが接続情報を読み、CLIへ接続する。
 5. `bridge.hello`でトークン、役割、プロトコルバージョンを確認する。
 6. Modが`game.attach`でworld / player・言語コード`language`・対応イベント・pausedを送り、新しいsession bindingを受け取る。
-7. Modがbindingと要求handlerを準備してから`game.ready`を送る。attach応答前にrunを開始しない。
+7. Modがbindingと要求handlerを準備してから`game.ready`を送る。起動途中のpause変更は保持し、attach時点から変わっていれば先に`game.status`で同期する。attach応答前にrunを開始しない。
 8. CLIが`--pi`またはPATH上のPiを起動する。接続先とトークンは子プロセスの環境変数でPi拡張へ渡す。
 9. Pi拡張も認証し、handlerの準備後に`hisyo.ready`を送る。
-10. 両者がreadyかつunpausedなら、CLIが`game.run.bind`と`hisyo.run.bind`のACKを待ち、runを開始する。
+10. 両者がreadyかつunpausedなら、CLIのschedulerがrun requestをPiへ渡す。認証更新後、`game.run.bind`と`hisyo.run.bind`のACKを待って推論を始める。この準備中のpauseでbindingを拒否しない。
 
 通常CLIは上記全体を接続する。`--bridge-only`では待受とevent log・activity logの保存だけを行い、Pi・run・summaryのモデル呼出しを起動しない。
 Modはローカルsingleplayerのみ対応し、CLIを自動起動しない。
@@ -174,14 +174,17 @@ Pi拡張自身の必須game state取得失敗・切断時のabortとは区別す
   起動ごとの256-bit tokenを呼出側が用意し、bridgeは定時間比較する。
   tokenを知る信頼済みプロセス間の境界であり、token所持者同士の役割偽装を防ぐものではない。
 - attachで新しいsession bindingを発行する。`game.ready`まではruntimeへattach完了を通知せず、runを開始しない。
+  同じbindingの`game.status`はready前も受け付け、状態の更新・記録だけを行う。runtimeへのstatus通知やreadyの付与はしない。
+  起動中のpause変更で切断せず、ready通知には最新の報告状態を使う。
   後から接続するruntimeは`readySession`を参照する。`currentSession`はready前のattach済み状態も含む。
   agentも`hisyo.ready`が必要。両者のbind ACK後、現在のbindingを再確認してからrun開始を返す。
 - チャットはrequestで送り、受付結果を確認する。`handlePlayerMessages`で排他的な同期受付を登録し、
   入力を保持して正常終了した場合だけ`accepted: true`を返す。runの開始・完了を意味しない。
   gameが未ready、受付未登録・解除後・bridge終了中は`-32003`で拒否する。bridge-onlyでも成功扱いにして捨てない。
   pause中の受付は可能だが、run実行の可否はruntimeが制御する。拒否されたnotificationは接続を閉じる。
-- pause中は新規runをbindせず、runの定期実行までの経過時間も数えない。ゲーム内時刻は引き続き取得できる。
-  開始済みのrun・Toolは継続する。summaryはpause中も経過時間を数え、新規開始・完了・保存する。
+- pauseの実行制限はschedulerだけで行い、次のrun requestの送出と定期実行までの計時を止める。
+  bridge・Modはpauseをbinding拒否や切断の理由にしない。送出済みrunの認証更新・binding準備・Tool・完了は継続し、ゲーム内時刻も取得できる。
+  summaryはpause中も経過時間を数え、新規開始・完了・保存する。
   各summary前のOAuth更新は信頼済みPi所有者が行い、隔離子にはaccess tokenだけを渡す。
   detach・切断・明示取消でrunを即時無効化し、Modへ`game.run.clear`を通知する。
   clearは**同じbindingだけ**を消す冪等処理とし、遅いclearが新runを消してはいけない。

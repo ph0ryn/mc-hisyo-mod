@@ -51,8 +51,9 @@ hookを含むrunが`settled`になった時点で、保留pollだけを取り消
 時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
 [hisyoRuntime](<../src/runtime/hisyoRuntime.ts>)は1,000 msごとにready済みsessionへこの入口を呼び、shutdown時にtimerを最初に止める。
 
-pause中はrunの定期実行までの経過時間を数えず、新しいrunを開始しない。ゲーム内時刻の取得を止める意味ではない。
-開始済みのrun・Toolは、同じbindingで完了まで続ける。
+pauseの実行制限はrun schedulerだけが担い、定期実行までの経過時間を数えず、次のrun requestをPiへ渡さない。
+接続・起動・入力受付・ゲーム内時刻の取得を止める意味ではない。
+既にPiへ渡したrunは、認証更新やbinding準備中にpauseされても拒否せず、開始済みのrun・Toolと同じく完了まで続ける。
 [summary](<context.md#summary>)はrunとは別の時計でpause中も経過時間を数え、新規開始・完了・保存する。
 退出・切断・明示停止では実行中のbindingを直ちに無効化し、CLIはPiへabortを要求する。
 `agent_settled`を確認するまでslotを解放せず、停止待ちの間に復帰してもrunを重ねない。

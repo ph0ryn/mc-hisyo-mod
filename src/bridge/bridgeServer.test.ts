@@ -586,7 +586,6 @@ test("summarization is independent of run admission and rejects cancelled late r
 test("summaries can start while paused without admitting a main run", async () => {
   const h = await fixture();
   await h.game.client.call("game.status", { ...h.world, paused: true });
-  await expect(h.bridge.beginRun()).rejects.toThrow();
   await expect(
     h.bridge.summarize(h.world, "observed events", new AbortController().signal),
   ).resolves.toBe("石を採掘した。");
@@ -1103,11 +1102,89 @@ test.each(forwards)(
   },
 );
 
-test("pause still prevents admission of a new run", async () => {
+test("startup pause updates attachment state without making the session ready", async () => {
+  const h = await fixture();
+  await h.game.client.call("game.detach", h.world);
+  const binding = (await h.game.client.call("game.attach", {
+    worldId: "w",
+    playerId: "p",
+    language: "ja_jp",
+    supportedEvents: [],
+    paused: false,
+  })) as SessionBinding;
+  const attached = vi.fn();
+  const status = vi.fn();
+  h.bridge.on("attach", attached);
+  h.bridge.on("status", status);
+  await expect(h.game.client.call("game.status", { ...binding, paused: true })).resolves.toEqual({
+    paused: true,
+  });
+  expect(h.bridge.readySession).toBeUndefined();
+  expect(attached).not.toHaveBeenCalled();
+  expect(status).not.toHaveBeenCalled();
+  await h.game.client.call("game.ready", binding);
+  expect(attached).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ paused: true }));
+  expect(h.game.client.isClosed).toBe(false);
+});
+
+test("pause gates scheduler dispatch without rejecting a run already preparing to bind", async () => {
   const h = await fixture();
   await h.game.client.call("game.status", { ...h.world, paused: true });
-  await expect(h.bridge.beginRun()).rejects.toThrow();
-  expect(h.game.host.calls).not.toContain("game.run.bind");
+  const prepared = deferred<void>();
+  const bindings: RunBinding[] = [];
+  const process = Object.assign(new EventEmitter(), {
+    run: vi.fn(async (_message: string) => {
+      // Authentication/preflight can finish after the game reports pause.
+      await prepared.promise;
+      const binding = await h.bridge.beginRun();
+      bindings.push(binding);
+      h.emit("agent_settled", h.context().ctx);
+      h.bridge.finishRun(binding);
+      return { status: "settled" as const, aborted: false };
+    }),
+    close: vi.fn(async () => {}),
+  });
+  vi.mocked(startPiProcess).mockResolvedValueOnce(process as never);
+  const scheduler = new RunScheduler({
+    bridge: h.bridge,
+    dataDirectory: "/unused",
+    executable: "/unused/pi",
+    bundledExtension: "/unused/extension.mjs",
+    connection: { protocolVersion: 2, host: "127.0.0.1", port: 1, token: "unused", pid: 1 },
+    model: { provider: "openai", id: "gpt-6-luna", apiKey: "unused" },
+  });
+  const fault = vi.fn();
+  scheduler.on("fault", fault);
+  onTestFinished(async () => {
+    prepared.resolve();
+    await scheduler.close();
+  });
+  await drain();
+  await h.game.client.call("game.player_message", { ...h.world, text: "queued while paused" });
+  expect(process.run).not.toHaveBeenCalled();
+  await h.game.client.call("game.status", { ...h.world, paused: false });
+  expect(process.run).toHaveBeenCalledOnce();
+  await h.game.client.call("game.status", { ...h.world, paused: true });
+  await h.game.client.call("game.player_message", { ...h.world, text: "next response" });
+  prepared.resolve();
+  await drain();
+  expect(fault).not.toHaveBeenCalled();
+  expect(bindings).toHaveLength(1);
+  expect(process.close).not.toHaveBeenCalled();
+  expect(h.bridge.readySession!.paused).toBe(true);
+  expect(process.run).toHaveBeenCalledOnce();
+  await h.game.client.call("game.status", { ...h.world, paused: false });
+  await drain();
+  expect(bindings).toHaveLength(2);
+  expect(JSON.parse(process.run.mock.calls[0]![0])).toMatchObject({
+    initial: true,
+    playerMessages: ["queued while paused"],
+  });
+  expect(JSON.parse(process.run.mock.calls[1]![0])).toMatchObject({
+    initial: false,
+    playerMessages: ["next response"],
+  });
+  expect(fault).not.toHaveBeenCalled();
 });
 
 test.each(forwards)(

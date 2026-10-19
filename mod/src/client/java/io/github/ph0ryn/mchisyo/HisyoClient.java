@@ -91,7 +91,6 @@ final class HisyoClient {
     }
     private void requireClient(Attempt a) {
         if (!local(a)) { retire(a); throw GameSession.stale(); }
-        if (client.isPaused() && a.session != null) a.session.pause(true);
     }
     private ServerPlayer requireServer(Attempt a) {
         if (!a.server.isSameThread()) throw new IllegalStateException("Server thread required");
@@ -229,7 +228,7 @@ final class HisyoClient {
     }
     private void submit(String text) {
         Attempt a = active;
-        if (!local(a) || a.session == null || !a.session.isReady() || client.isPaused()) { feedback("hisyo is not ready in this singleplayer world."); return; }
+        if (!local(a) || a.session == null || !a.session.isReady()) { feedback("hisyo is not ready in this singleplayer world."); return; }
         if (text.isBlank() || text.codePointCount(0, text.length()) > 16000) { feedback("Enter a chat message of 1–16000 characters."); return; }
         try {
             requireClient(a);

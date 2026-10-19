@@ -223,18 +223,13 @@ export class BridgeServer extends EventEmitter<{
   }
 
   async beginRun(): Promise<RunBinding> {
+    // The scheduler alone gates dispatch on pause. An admitted run may bind after
+    // asynchronous preparation, even if a newer pause report has since arrived.
     if (this.#run) throw new Error("Previous run has not settled");
     const session = this.#session;
     const game = this.#game;
     const agent = this.#agent;
-    if (
-      this.#closing ||
-      this.#storageFailed ||
-      !session ||
-      session.paused ||
-      !game?.ready ||
-      !agent?.ready
-    )
+    if (this.#closing || this.#storageFailed || !session || !game?.ready || !agent?.ready)
       throw new Error("Game and agent are not ready for run");
     const binding = Object.freeze({ ...session.binding, runId: randomUUID() });
     const run = { binding, valid: true, agentBindingSent: false, wake: () => {} };
@@ -445,7 +440,7 @@ export class BridgeServer extends EventEmitter<{
     });
     this.#register(connection, "game.status", "game", GameStatusSchema, (params) => {
       const session = this.#requireSession(params);
-      if (!connection.ready) throw new RpcError(-32003, "Game is not ready");
+      // Status can race startup readiness; it updates facts, never grants readiness.
       session.paused = params.paused;
       this.#storage(() =>
         this.#options.activityLog.appendActivity(
@@ -454,7 +449,7 @@ export class BridgeServer extends EventEmitter<{
       );
       this.#requireSession(params);
       if (!params.paused) this.#resolveAvailability();
-      this.emit("status", this.currentSession!);
+      if (connection.ready) this.emit("status", this.currentSession!);
       return { paused: params.paused };
     });
     this.#register(connection, "game.events", "game", GameEventsSchema, (params) => {

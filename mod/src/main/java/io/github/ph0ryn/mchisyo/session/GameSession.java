@@ -56,7 +56,7 @@ public final class GameSession implements AutoCloseable {
     private final GamePort game;
     private final String worldId, playerId, language;
     private final List<String> events;
-    private boolean started, closed, ready, paused;
+    private boolean started, closed, ready, paused, reportedPaused;
     private SessionBinding sessionBinding;
     private RunBinding run;
     private Object runIdentity;
@@ -69,6 +69,7 @@ public final class GameSession implements AutoCloseable {
     private boolean eventPending;
     private long lastEventFlush = System.nanoTime();
     private final ArrayDeque<JsonObject> statuses = new ArrayDeque<>();
+    private CompletableFuture<Void> statusPublished = CompletableFuture.completedFuture(null);
 
     public GameSession(RpcPeer peer, GamePort game, String worldId, String playerId, String language, List<String> events, boolean paused) {
         this.peer = Objects.requireNonNull(peer); this.game = Objects.requireNonNull(game);
@@ -77,7 +78,8 @@ public final class GameSession implements AutoCloseable {
             RunBinding binding = binding(params, Set.of());
             synchronized (state) {
                 requireSession(binding.sessionBinding());
-                if (this.paused || (run != null && !run.equals(binding))) throw stale();
+                // Pause only controls scheduler dispatch, never native binding or tools.
+                if (run != null && !run.equals(binding)) throw stale();
                 if (run == null) { run = binding; runIdentity = new Object(); }
             }
             return CompletableFuture.completedFuture(binding.toJson());
@@ -131,7 +133,8 @@ public final class GameSession implements AutoCloseable {
                         || !new JsonPrimitive("game").equals(ack.getAsJsonObject().get("role"))) throw invalid();
                 JsonObject attach = new JsonObject(); attach.addProperty("worldId", worldId); attach.addProperty("playerId", playerId);
                 attach.addProperty("language", language);
-                attach.add("supportedEvents", JSON.toJsonTree(events)); synchronized (state) { attach.addProperty("paused", paused); }
+                attach.add("supportedEvents", JSON.toJsonTree(events));
+                synchronized (state) { reportedPaused = paused; attach.addProperty("paused", paused); }
                 return peer.call("game.attach", attach);
             }).thenCompose(ack -> {
                 requireActive(); SessionBinding attached;
@@ -141,9 +144,11 @@ public final class GameSession implements AutoCloseable {
                 return game.initialize();
             }).thenCompose(ignored -> {
                 SessionBinding binding;
+                // CLI may synchronously bind while handling game.ready: local owner is ready first.
                 synchronized (state) { if (closed) throw stale(); ready = true; binding = sessionBinding; }
-                // CLI may synchronously bind a run while handling game.ready: local owner is ready first.
-                return peer.call("game.ready", binding.toJson());
+                // Synchronize pause changes retained during initialization before admission.
+                // Wait for publication, not the ACK, including a concurrent status drainer.
+                return reportPause().thenCompose(published -> peer.call("game.ready", binding.toJson()));
             }).thenAccept(ack -> { requireActive(); flag(ack, "ready", true); });
         result.whenComplete((ignored, failure) -> { if (failure != null) close(); });
         return result;
@@ -159,7 +164,7 @@ public final class GameSession implements AutoCloseable {
     }
     public CompletionStage<Void> playerMessage(String value) {
         String text = text(new JsonPrimitive(value)); SessionBinding binding;
-        synchronized (state) { if (closed || !ready || paused) throw stale(); binding = sessionBinding; }
+        synchronized (state) { if (closed || !ready) throw stale(); binding = sessionBinding; }
         JsonObject params = binding.toJson(); params.addProperty("text", text);
         CompletionStage<Void> result = request("game.player_message", params).thenAccept(ack -> {
             synchronized (state) { requireSession(binding); } flag(ack, "accepted", true);
@@ -168,23 +173,33 @@ public final class GameSession implements AutoCloseable {
         return result;
     }
     public void pause(boolean value) {
+        synchronized (state) { if (closed) return; paused = value; }
+        reportPause();
+    }
+    private CompletionStage<Void> reportPause() {
         JsonObject params;
+        CompletableFuture<Void> published;
         synchronized (state) {
-            if (closed || paused == value) return;
-            paused = value; // Pause gates new runs, not tools or completion of the admitted run.
-            if (!ready || statuses.size() >= 32) params = null;
+            // Before readiness, retain only the latest state; pause is never a startup failure.
+            if (closed || !ready || reportedPaused == paused) return statusPublished;
+            reportedPaused = paused;
+            if (statuses.size() >= 32) params = null;
             else {
-                params = sessionBinding.toJson(); params.addProperty("paused", value); statuses.addLast(params);
+                params = sessionBinding.toJson(); params.addProperty("paused", paused); statuses.addLast(params);
                 // The head stays queued while its sole drainer calls the peer, outside this lock.
-                if (statuses.size() > 1) return;
+                if (statuses.size() > 1) return statusPublished;
+                statusPublished = new CompletableFuture<>();
             }
+            published = statusPublished;
         }
-        if (params == null) { close(); return; }
+        if (params == null) { close(); return published; }
         do {
             boolean expected = params.get("paused").getAsBoolean();
             request("game.status", params).thenAccept(ack -> { try { flag(ack, "paused", expected); } catch (RuntimeException error) { close(); } });
             synchronized (state) { statuses.pollFirst(); params = closed ? null : statuses.peekFirst(); }
         } while (params != null);
+        published.complete(null);
+        return published;
     }
     public void observation(ObservedEvent event) {
         try {
@@ -230,7 +245,7 @@ public final class GameSession implements AutoCloseable {
         } catch (RuntimeException error) { close(); return CompletableFuture.failedFuture(stale()); }
     }
     private void invalidateRun() { run = null; runIdentity = null; }
-    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); statuses.clear(); observations.clear(); observationBytes = 0; } }
+    private void invalidate() { synchronized (state) { closed = true; ready = false; invalidateRun(); statuses.clear(); statusPublished.completeExceptionally(stale()); observations.clear(); observationBytes = 0; } }
     @Override public void close() { invalidate(); peer.close(); }
     public static RpcError stale() { return new RpcError(-32001, "Inactive or stale execution binding"); }
     private static RpcError invalid() { return new RpcError(-32602, "Invalid method parameters"); }

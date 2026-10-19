@@ -316,24 +316,98 @@ public final class GameSessionTest {
         }
     }
     @Test
-    void pausedSessionRejectsRunBindingsWithoutRevokingExistingRun() {
+    void pauseDoesNotRejectBindingsDispatchedByTheScheduler() {
         Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
         try (GameSession session = readySession(peer, wire, game)) {
             pauseAndAcknowledge(session, peer, wire, true);
-            for (RunBinding binding : List.of(RUN, new RunBinding(WORLD, PLAYER, "session", "other"))) {
-                receive(peer, "game.run.bind", binding.toJson(), 101);
-                assertTrue(wire.last().has("error"), () -> "No run may bind while paused: " + wire.last());
-                assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
-            }
+            receive(peer, "game.run.bind", RUN.toJson(), 101);
+            assertEquals(RUN.toJson(), wire.last().get("result"));
+            receive(peer, "game.run.bind", new RunBinding(WORLD, PLAYER, "session", "other").toJson(), 102);
+            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
             receive(peer, "game.state.get", toolRequest("game.state.get"), 105);
             assertEquals(1, game.queue.size()); game.queue.remove().run(); assertToolResult(wire, "game.state.get", 105);
-            receive(peer, "game.run.clear", RUN.toJson(), 102);
-            receive(peer, "game.run.bind", RUN.toJson(), 103);
-            assertTrue(wire.last().has("error"));
-            assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
-            receive(peer, "game.state.get", toolRequest("game.state.get"), 104);
+            receive(peer, "game.run.clear", RUN.toJson(), 106);
+            receive(peer, "game.state.get", toolRequest("game.state.get"), 107);
             assertEquals(-32001, wire.last().getAsJsonObject("error").get("code").getAsInt());
             assertTrue(game.queue.isEmpty());
+            receive(peer, "game.run.bind", RUN.toJson(), 108);
+            assertEquals(RUN.toJson(), wire.last().get("result"));
+            receive(peer, "game.state.get", toolRequest("game.state.get"), 109);
+            game.queue.remove().run(); assertToolResult(wire, "game.state.get", 109);
+            assertTrue(session.isReady()); assertFalse(peer.isClosed());
+        }
+    }
+    @Test
+    void pausedSessionStillAcceptsPlayerMessages() {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game();
+        try (GameSession session = readySession(peer, wire, game)) {
+            pauseAndAcknowledge(session, peer, wire, true);
+            CompletionStage<Void> message = session.playerMessage("queue until resume");
+            assertEquals("game.player_message", wire.last().get("method").getAsString());
+            reply(peer, wire, json("{\"accepted\":true}")); message.toCompletableFuture().join();
+            assertTrue(session.isReady()); assertFalse(peer.isClosed());
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3, 4})
+    void pauseDuringHandshakeKeepsConnectionAndReportsLatestState(int phase) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game(); game.queuedInitialize = true;
+        try (GameSession session = new GameSession(peer, game, WORLD, PLAYER, "ja_jp", List.of(), false)) {
+            if (phase == 0) session.pause(true);
+            CompletionStage<Void> start = session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+            reply(peer, wire, json("{\"protocolVersion\":2,\"role\":\"game\"}"));
+            assertEquals(phase == 0, wire.last().getAsJsonObject("params").get("paused").getAsBoolean());
+            if (phase == 1) session.pause(true);
+            reply(peer, wire, RUN.sessionBinding().toJson());
+            if (phase == 2) { session.pause(true); session.pause(false); session.pause(true); }
+            if (phase == 4) wire.beforeSchedule = () -> {
+                wire.beforeSchedule = () -> {};
+                session.pause(true); // Client tick races game.ready publication on the RPC thread.
+            };
+            assertFalse(peer.isClosed()); game.queue.remove().run();
+            assertEquals("game.ready", wire.last().get("method").getAsString());
+            JsonElement readyId = wire.last().get("id");
+            if (phase == 3) session.pause(true);
+            if (phase != 0) {
+                JsonObject status = wire.sent.stream().filter(frame -> frame.has("method")
+                        && frame.get("method").getAsString().equals("game.status")).findFirst().orElseThrow();
+                assertTrue(status.getAsJsonObject("params").get("paused").getAsBoolean());
+                if (phase != 3) assertTrue(wire.sent.indexOf(status) < wire.sent.size() - 1, "Report retained pause before game.ready");
+                JsonObject statusAck = json("{\"jsonrpc\":\"2.0\",\"result\":{\"paused\":true}}"); statusAck.add("id", status.get("id"));
+                peer.receive((statusAck + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            JsonObject readyAck = json("{\"jsonrpc\":\"2.0\",\"result\":{\"ready\":true}}"); readyAck.add("id", readyId);
+            peer.receive((readyAck + "\n").getBytes(StandardCharsets.UTF_8)); start.toCompletableFuture().join();
+            assertTrue(session.isReady()); assertFalse(peer.isClosed());
+            pauseAndAcknowledge(session, peer, wire, false);
+        }
+    }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void startupStatusPublicationPrecedesReadyWithoutWaitingForAck(boolean disconnect) {
+        Wire wire = new Wire(); RpcPeer peer = new RpcPeer(wire); Game game = new Game(); game.queuedInitialize = true;
+        try (GameSession session = new GameSession(peer, game, WORLD, PLAYER, "ja_jp", List.of(), false)) {
+            CompletionStage<Void> start = session.start(CompletableFuture.completedFuture(peer), "a".repeat(43));
+            reply(peer, wire, json("{\"protocolVersion\":2,\"role\":\"game\"}")); reply(peer, wire, RUN.sessionBinding().toJson());
+            session.pause(true);
+            wire.beforeSchedule = () -> {
+                wire.beforeSchedule = () -> {};
+                if (disconnect) session.close();
+                else session.pause(false); // A second transition joins the startup status drainer.
+            };
+            game.queue.remove().run();
+            if (disconnect) {
+                assertTrue(start.toCompletableFuture().isCompletedExceptionally()); assertTrue(peer.isClosed());
+                assertFalse(wire.sent.stream().anyMatch(frame -> frame.has("method") && frame.get("method").getAsString().equals("game.ready")));
+            } else {
+                assertEquals(List.of("bridge.hello", "game.attach", "game.status", "game.status", "game.ready"),
+                        wire.sent.stream().map(frame -> frame.get("method").getAsString()).toList());
+                assertTrue(wire.sent.get(2).getAsJsonObject("params").get("paused").getAsBoolean());
+                assertFalse(wire.sent.get(3).getAsJsonObject("params").get("paused").getAsBoolean());
+                // No game.status ACK has arrived; startup must not wait for one.
+                reply(peer, wire, json("{\"ready\":true}")); start.toCompletableFuture().join();
+                assertTrue(session.isReady()); assertFalse(peer.isClosed());
+            }
         }
     }
     @ParameterizedTest

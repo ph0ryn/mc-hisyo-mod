@@ -186,7 +186,7 @@ world / playerの組をhash化したprivateディレクトリへ`conversation.js
   refresh tokenや他providerの認証は子へ渡さず、いずれのkey / tokenも引数や診断へ出さない。
 - モデル定義はPiの組込catalogを消さない。毎runで正確なprovider / ID / 設定したphysical APIとmediumをRPC検査する。
 - scopeの排他leaseとbridgeの所有権を、子の終了確認まで保持する。crash後のleaseをPIDだけで自動回収しない。
-- pause中は新しいrunを開始せず、開始済みのrun・Toolは続ける。summaryはpause中も新規開始・完了・保存する。
+- pauseはschedulerによる次のrun requestの送出だけを止める。接続・起動・入力受付は止めず、送出済みrunの認証更新・binding準備・Tool・完了をpauseで拒否しない。summaryはpause中も新規開始・完了・保存する。
   明示取消ではbinding無効化後に取消し、実settledまで予約を保つ。
   detach・agent切断・開始済みか不明な失敗では子を終了する。
   終了を確認できなければleaseと予約を残し、別の所有者へ渡さない。
