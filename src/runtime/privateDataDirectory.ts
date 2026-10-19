@@ -19,7 +19,7 @@ function optionalStat(path: string): BigIntStats | undefined {
 /** Process-startup helper: tightens umask; never repairs existing permissions. */
 export class PrivateDataDirectory {
   readonly path: string;
-  readonly databasePath: string;
+  readonly eventDatabasePath: string;
   readonly activityDatabasePath: string;
   readonly summaryDatabasePath: string;
   readonly connectionPath: string;
@@ -44,9 +44,9 @@ export class PrivateDataDirectory {
       );
     this.path = realpathSync(requested);
     this.#identity = stat;
-    this.databasePath = join(this.path, "history.sqlite");
-    this.activityDatabasePath = join(this.path, "activities.sqlite");
-    this.summaryDatabasePath = join(this.path, "summaries.sqlite");
+    this.eventDatabasePath = join(this.path, "eventLog.sqlite");
+    this.activityDatabasePath = join(this.path, "activityLog.sqlite");
+    this.summaryDatabasePath = join(this.path, "summary.sqlite");
     this.connectionPath = join(this.path, "connection.json");
     this.assertCurrent();
   }
@@ -66,14 +66,14 @@ export class PrivateDataDirectory {
     this.assertCurrent();
     if (optionalStat(this.connectionPath))
       throw new Error(
-        "connection.json already exists. Stop the owning Director; remove stale discovery manually only after confirming it has stopped.",
+        "connection.json already exists. Stop the owning hisyo process; remove stale discovery manually only after confirming it has stopped.",
       );
   }
 
   assertStorageFiles(): void {
     this.assertCurrent();
     for (const databasePath of [
-      this.databasePath,
+      this.eventDatabasePath,
       this.activityDatabasePath,
       this.summaryDatabasePath,
     ]) {

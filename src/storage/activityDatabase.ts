@@ -17,7 +17,7 @@ export function openActivityDatabase(path: string): DatabaseSync {
   }
 }
 
-/** Independent CLI activity schema. Existing mixed history must be split explicitly. */
+/** Independent CLI activity schema; existing databases are never migrated. */
 export function initializeActivityDatabase(db: ActivityDatabase): void {
   const version = db.prepare("PRAGMA user_version").get()?.user_version;
   if (version !== 0 && version !== 1)
@@ -29,21 +29,18 @@ export function initializeActivityDatabase(db: ActivityDatabase): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`
-      CREATE TABLE events (
+      CREATE TABLE activities (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         world_id TEXT NOT NULL,
         player_id TEXT NOT NULL,
         session_id TEXT NOT NULL,
-        seq INTEGER CHECK(seq IS NULL),
         event TEXT NOT NULL,
-        observed_at INTEGER NOT NULL,
-        observation_json TEXT NOT NULL CHECK(json_valid(observation_json)),
-        gap_from INTEGER CHECK(gap_from IS NULL),
-        gap_to INTEGER CHECK(gap_to IS NULL)
+        recorded_at INTEGER NOT NULL,
+        activity_json TEXT NOT NULL CHECK(json_valid(activity_json))
       ) STRICT;
-      CREATE INDEX events_scope ON events(world_id, player_id, id);
-      CREATE INDEX events_kind ON events(world_id, player_id, event, id);
-      CREATE TABLE response_hooks (
+      CREATE INDEX activities_scope ON activities(world_id, player_id, id);
+      CREATE INDEX activities_kind ON activities(world_id, player_id, event, id);
+      CREATE TABLE hooks (
         id TEXT PRIMARY KEY,
         world_id TEXT NOT NULL,
         player_id TEXT NOT NULL,
@@ -51,7 +48,7 @@ export function initializeActivityDatabase(db: ActivityDatabase): void {
         filter_json TEXT NOT NULL CHECK(json_valid(filter_json)),
         instruction TEXT NOT NULL
       ) STRICT;
-      CREATE INDEX hooks_scope ON response_hooks(world_id, player_id, event);
+      CREATE INDEX hooks_scope ON hooks(world_id, player_id, event);
       PRAGMA user_version = 1;
     `);
     db.exec("COMMIT");

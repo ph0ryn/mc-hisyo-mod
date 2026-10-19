@@ -17,7 +17,7 @@ test("a long per-call model deadline does not change the normal five-second RPC 
   vi.useFakeTimers();
   const { peer, socket } = fixture();
   try {
-    const summary = peer.call("director.history.summarize", {}, 300_000);
+    const summary = peer.call("hisyo.summary.create", {}, 300_000);
     await vi.advanceTimersByTimeAsync(5001);
     expect(peer.isClosed).toBe(false);
     socket.emit(
@@ -43,7 +43,7 @@ test("long completions still expire and close their pending transport", async ()
   vi.useFakeTimers();
   const { peer } = fixture();
   try {
-    const pending = peer.call("director.history.summarize", {}, 300_000);
+    const pending = peer.call("hisyo.summary.create", {}, 300_000);
     const rejected = expect(pending).rejects.toThrow("timed out");
     await vi.advanceTimersByTimeAsync(300_000);
     await rejected;

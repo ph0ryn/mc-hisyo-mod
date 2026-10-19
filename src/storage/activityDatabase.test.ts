@@ -10,26 +10,33 @@ function tables(db: DatabaseSync) {
     .all();
 }
 
-test("real activity SQLite owns only CLI events and hooks at independent version 1", () => {
+test("real activity SQLite owns only activities and hooks at independent version 1", () => {
   const db = new DatabaseSync(":memory:");
   try {
     initializeActivityDatabase(db);
     expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(1);
-    expect(tables(db)).toEqual([{ name: "events" }, { name: "response_hooks" }]);
+    expect(tables(db)).toEqual([{ name: "activities" }, { name: "hooks" }]);
     const insert = db.prepare(
-      "INSERT INTO events(world_id,player_id,session_id,seq,event,observed_at,observation_json,gap_from,gap_to) VALUES ('world','player','session',?,'director.player_input',100,'{}',?,?)",
+      "INSERT INTO activities(world_id,player_id,session_id,event,recorded_at,activity_json) VALUES ('world','player','session','hisyo.player_input',100,?)",
     );
-    insert.run(null, null, null);
-    for (const [seq, from, to] of [
-      [1, null, null],
-      [0, null, null],
-      [-1, null, null],
-      [null, 1, null],
-      [null, null, 1],
-    ] as const)
-      expect(() => insert.run(seq, from, to)).toThrow();
+    insert.run("{}");
+    expect(() => insert.run("invalid JSON")).toThrow();
+    expect(
+      db
+        .prepare("PRAGMA table_info(activities)")
+        .all()
+        .map(({ name }) => name),
+    ).toEqual([
+      "id",
+      "world_id",
+      "player_id",
+      "session_id",
+      "event",
+      "recorded_at",
+      "activity_json",
+    ]);
     initializeActivityDatabase(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM events").get()?.count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM activities").get()?.count).toBe(1);
   } finally {
     db.close();
   }
@@ -56,16 +63,14 @@ test("activity schema rejects unsupported versions without altering data or sche
 test("activity schema initialization rolls back partial DDL and permits an explicit repair retry", () => {
   const db = new DatabaseSync(":memory:");
   try {
-    db.exec(
-      "CREATE TABLE response_hooks (preserved TEXT); INSERT INTO response_hooks VALUES ('original')",
-    );
+    db.exec("CREATE TABLE hooks (preserved TEXT); INSERT INTO hooks VALUES ('original')");
     expect(() => initializeActivityDatabase(db)).toThrow();
     expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(0);
-    expect(tables(db)).toEqual([{ name: "response_hooks" }]);
-    expect(db.prepare("SELECT preserved FROM response_hooks").get()?.preserved).toBe("original");
-    db.exec("DROP TABLE response_hooks");
+    expect(tables(db)).toEqual([{ name: "hooks" }]);
+    expect(db.prepare("SELECT preserved FROM hooks").get()?.preserved).toBe("original");
+    db.exec("DROP TABLE hooks");
     initializeActivityDatabase(db);
-    expect(tables(db)).toEqual([{ name: "events" }, { name: "response_hooks" }]);
+    expect(tables(db)).toEqual([{ name: "activities" }, { name: "hooks" }]);
   } finally {
     db.close();
   }

@@ -1,6 +1,6 @@
 import { expect, test } from "vite-plus/test";
 import { Check } from "typebox/value";
-import { directorToolNames } from "../pi/piPolicy.js";
+import { hisyoToolNames } from "../pi/piPolicy.js";
 import {
   referenceTools,
   validReferenceResult,
@@ -8,7 +8,7 @@ import {
   referenceResultBudget,
 } from "./gameReferences.js";
 
-const binding = { worldId: "world", playerId: "player", worldSessionId: "session", runId: "run" };
+const binding = { worldId: "world", playerId: "player", sessionId: "session", runId: "run" };
 test("exact scoped tools and strict root/directory requests", () => {
   expect(referenceTools.map((tool) => tool.name)).toEqual([
     "list_game_files",
@@ -150,11 +150,11 @@ test("zero-match search pages retain examined cursor and exact metadata", () => 
 });
 
 test("exact ten-tool gate leaves builtin OS tools disabled", () => {
-  expect(directorToolNames).toHaveLength(10);
-  expect(new Set(directorToolNames).size).toBe(10);
-  for (const { name } of referenceTools) expect(directorToolNames).toContain(name);
+  expect(hisyoToolNames).toHaveLength(10);
+  expect(new Set(hisyoToolNames).size).toBe(10);
+  for (const { name } of referenceTools) expect(hisyoToolNames).toContain(name);
   for (const name of ["read", "write", "edit", "bash", "exec"])
-    expect(directorToolNames).not.toContain(name);
+    expect(hisyoToolNames).not.toContain(name);
 });
 test("roots paginate by IDs and report unavailable development roots truthfully", () => {
   const tool = referenceTools[0]!;

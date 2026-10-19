@@ -1,22 +1,22 @@
 import { expect, test } from "vite-plus/test";
-import type { WorldBinding } from "../protocol/bridge.js";
-import { JudgmentQueue } from "../runtime/judgmentQueue.js";
+import type { SessionBinding } from "../protocol/bridge.js";
+import { RunQueue } from "../runtime/runQueue.js";
 import { defaultMaxFrameBytes, encodeJsonLine, JsonLineDecoder } from "../transport/jsonLines.js";
 import {
   createPiJsonLineDecoder,
   encodePiJsonLine,
   maxPiFrameBytes,
-  maxPiJudgmentBytes,
+  maxPiRunBytes,
 } from "./piFraming.js";
 
-const world: WorldBinding = {
+const world: SessionBinding = {
   worldId: "world-a",
   playerId: "player-a",
-  worldSessionId: "session-a",
+  sessionId: "session-a",
 };
 
-function judgment(messages: string[]): string {
-  const queue = new JudgmentQueue(world);
+function run(messages: string[]): string {
+  const queue = new RunQueue(world);
   for (const message of messages) queue.enqueueMessage(world, message);
   return JSON.stringify(queue.take());
 }
@@ -50,7 +50,7 @@ test("reserves 256 bytes beyond doubled batch JSON for verified Pi envelopes", (
   const bytes = envelopes.map((value) => Buffer.byteLength(JSON.stringify(value)));
   expect(bytes).toEqual([61, 117, 115, 134]);
   expect(Math.max(...bytes)).toBeLessThanOrEqual(256);
-  expect(maxPiJudgmentBytes).toBe(defaultMaxFrameBytes);
+  expect(maxPiRunBytes).toBe(defaultMaxFrameBytes);
   expect(maxPiFrameBytes).toBe(2 * defaultMaxFrameBytes + 256);
   // Includes LF; the existing pending-send ceiling is still 4 MiB.
   expect(maxPiFrameBytes + 1).toBeLessThan(4 * 1024 * 1024);
@@ -58,12 +58,12 @@ test("reserves 256 bytes beyond doubled batch JSON for verified Pi envelopes", (
 
 test("carries a full 1 MiB admitted JSON batch through prompt and user echo", () => {
   const messages = [...Array<string>(32).fill('"'.repeat(16_000)), ""];
-  const remaining = defaultMaxFrameBytes - Buffer.byteLength(judgment(messages));
+  const remaining = defaultMaxFrameBytes - Buffer.byteLength(run(messages));
   messages[32] = '"'.repeat(Math.floor(remaining / 2)) + "x".repeat(remaining % 2);
   expect(messages.every((text) => text.length <= 16_000)).toBe(true);
-  const message = judgment(messages);
+  const message = run(messages);
   expect(Buffer.byteLength(message)).toBe(defaultMaxFrameBytes);
-  expect(Buffer.byteLength(message)).toBeLessThanOrEqual(maxPiJudgmentBytes);
+  expect(Buffer.byteLength(message)).toBeLessThanOrEqual(maxPiRunBytes);
   const prompt = { id: String(Number.MAX_VALUE), type: "prompt", message };
   const frame = encodePiJsonLine(prompt);
   expect(frame.length - 1).toBeGreaterThan(defaultMaxFrameBytes);
@@ -73,7 +73,7 @@ test("carries a full 1 MiB admitted JSON batch through prompt and user echo", ()
 });
 
 test("decodes quote-heavy user echoes and a representative aggregated agent_end", () => {
-  const message = judgment(Array<string>(17).fill('"'.repeat(16_000)));
+  const message = run(Array<string>(17).fill('"'.repeat(16_000)));
   const user = userMessage(message);
   const assistant = {
     role: "assistant",
@@ -113,7 +113,7 @@ test("keeps the global and TCP codec at its existing 1 MiB default", () => {
   const prompt = {
     id: "1",
     type: "prompt",
-    message: judgment(Array<string>(17).fill('"'.repeat(16_000))),
+    message: run(Array<string>(17).fill('"'.repeat(16_000))),
   };
   const frame = encodePiJsonLine(prompt);
   expect(defaultMaxFrameBytes).toBe(1024 * 1024);

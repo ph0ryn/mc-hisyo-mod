@@ -5,7 +5,7 @@ import { EventCatalog, matchesFilter, type EventFilter } from "../events/eventCa
 import { gameEventDefinitions, type GameEvent } from "./gameEvent.js";
 
 const fixtures: GameEvent[] = JSON.parse(
-  readFileSync(new URL("./fixtures/observerEvents.json", import.meta.url), "utf8"),
+  readFileSync(new URL("./fixtures/gameEvents.json", import.meta.url), "utf8"),
 );
 const catalog: EventCatalog = new EventCatalog(gameEventDefinitions);
 
@@ -15,7 +15,7 @@ function fixture(name: string): GameEvent {
   return structuredClone(observation);
 }
 
-describe("server observer event contracts", () => {
+describe("Mod event contracts", () => {
   it("publishes actual native menu initialization, natural deltas and post-removal close", () => {
     expect(catalog.get("container_opened").description).toMatch(/initialization/i);
     expect(catalog.get("container_slot_changed").description).toMatch(/coalesced/i);
@@ -34,11 +34,11 @@ describe("server observer event contracts", () => {
   });
 
   it.each(["advancement_criterion_granted", "advancement_completed"])(
-    "validates %s display metadata while retaining legacy history",
+    "requires current %s display metadata",
     (event) => {
       const observation = fixture(event);
       delete observation.data.hasDisplay;
-      expect(() => catalog.validateObservation(observation)).not.toThrow();
+      expect(() => catalog.validateObservation(observation)).toThrow();
       for (const hasDisplay of [true, false]) {
         observation.data.hasDisplay = hasDisplay;
         expect(() => catalog.validateObservation(observation)).not.toThrow();

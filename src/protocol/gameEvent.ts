@@ -109,7 +109,7 @@ export function validateScope(scope: WorldScope): void {
 export const GameEventSchema = Type.Object(
   {
     ...WorldScopeSchema.properties,
-    worldSessionId: identifier,
+    sessionId: identifier,
     seq: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     tick: counter,
     observedAt: counter,
@@ -407,12 +407,12 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
   {
     name: "nearby_sampled",
     description:
-      "Every 20 ticks: conservative unobstructed eye-line samples from loaded blocks in radius4 cube and up to64 entity candidates in radius16 sphere. Not FOV, lighting, nearest order or complete sight; glass/fluids may occlude. Legacy samples without visibility are redacted on history reads; empty arrays do not prove absence.",
+      "Every 20 ticks: conservative unobstructed eye-line samples from loaded blocks in radius4 cube and up to64 entity candidates in radius16 sphere. Not FOV, lighting, nearest order or complete sight; glass/fluids may occlude. Empty arrays do not prove absence.",
     observation: "snapshot_delta",
     dataSchema: Type.Object(
       {
         sampleIntervalTicks,
-        visibility: Type.Optional(Type.Literal("unobstructed")),
+        visibility: Type.Literal("unobstructed"),
         blockRadius: Type.Literal(4),
         blocksComplete: Type.Boolean(),
         blocks: Type.Array(
@@ -525,7 +525,7 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
         advancementId: identifier,
         criterion: identifier,
         afterDone: Type.Boolean(),
-        hasDisplay: Type.Optional(Type.Boolean()),
+        hasDisplay: Type.Boolean(),
       },
       strict,
     ),
@@ -541,7 +541,7 @@ export const gameEventDefinitions: readonly EventDefinition[] = [
         advancementId: identifier,
         criterion: identifier,
         afterDone: Type.Literal(true),
-        hasDisplay: Type.Optional(Type.Boolean()),
+        hasDisplay: Type.Boolean(),
       },
       strict,
     ),

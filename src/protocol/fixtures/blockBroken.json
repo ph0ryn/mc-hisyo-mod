@@ -1,7 +1,7 @@
 {
   "worldId": "be41b40d-4d4c-4a02-a3d7-eb5b57c71eb0",
   "playerId": "f4ebaf24-0b69-4132-9103-18a054c38ee8",
-  "worldSessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
+  "sessionId": "dc36baf0-330f-4c47-bc05-d81fda4db426",
   "seq": 1,
   "tick": 12042,
   "observedAt": 1792130000000,

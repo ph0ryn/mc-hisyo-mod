@@ -5,14 +5,14 @@ import { expect, test } from "vite-plus/test";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
 
 test("all three private SQLite files and sidecars reject unsafe permissions and symlinks", () => {
-  const root = mkdtempSync(join(tmpdir(), "director-private-summary-"));
+  const root = mkdtempSync(join(tmpdir(), "hisyo-private-summary-"));
   const originalUmask = process.umask();
   try {
     const directory = new PrivateDataDirectory(join(root, "data"));
-    expect(directory.summaryDatabasePath).toBe(join(directory.path, "summaries.sqlite"));
-    expect(directory.activityDatabasePath).toBe(join(directory.path, "activities.sqlite"));
+    expect(directory.summaryDatabasePath).toBe(join(directory.path, "summary.sqlite"));
+    expect(directory.activityDatabasePath).toBe(join(directory.path, "activityLog.sqlite"));
     for (const base of [
-      directory.databasePath,
+      directory.eventDatabasePath,
       directory.activityDatabasePath,
       directory.summaryDatabasePath,
     ]) {

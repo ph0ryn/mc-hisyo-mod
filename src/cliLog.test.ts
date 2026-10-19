@@ -34,7 +34,7 @@ test.each([
   ["game.status", { paused: true }, ["Game paused"]],
   ["game.status", { paused: false }, ["Game resumed"]],
   [
-    "judgment.requested",
+    "run.requested",
     {
       initial: true,
       poll: true,
@@ -43,23 +43,23 @@ test.each([
       observations: 2,
     },
     [
-      "Judgment requested",
-      "World start: Yes",
+      "Run requested",
+      "Initial run: Yes",
       "Periodic check: Yes",
       "Player messages: [ 'こんにちは' ]",
-      "Response hooks: [ 'hook-1' ]",
+      "Hooks: [ 'hook-1' ]",
       "Observations: 2",
     ],
   ],
   [
-    "judgment.invalidated",
+    "run.invalidated",
     { reason: "world_detached" },
-    ["Judgment cancellation requested", "Reason: world detached"],
+    ["Run cancellation requested", "Reason: world detached"],
   ],
   ["pi.ready", { provider: "test", model: "native" }, ["Pi ready", "Model: test/native"]],
-  ["pi.prompt_submitted", {}, ["Judgment sent to Pi"]],
-  ["pi.agent_settled", { aborted: false }, ["Judgment finished"]],
-  ["pi.agent_settled", { aborted: true }, ["Judgment cancelled"]],
+  ["pi.prompt_submitted", {}, ["Run sent to Pi"]],
+  ["pi.agent_settled", { aborted: false }, ["Run finished"]],
+  ["pi.agent_settled", { aborted: true }, ["Run cancelled"]],
 ] as const)("%s is described in plain language", (event, details, expected) => {
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   writeCliLog(event, details);
@@ -69,10 +69,10 @@ test.each([
   expect(output).not.toContain("undefined");
 });
 
-test("empty judgment reasons and internal binding fields do not clutter logs", () => {
+test("empty run reasons and internal binding fields do not clutter logs", () => {
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
-  writeCliLog("judgment.requested", {
-    worldSessionId: "session-1",
+  writeCliLog("run.requested", {
+    sessionId: "session-1",
     initial: false,
     poll: false,
     playerMessages: [],
@@ -80,8 +80,8 @@ test("empty judgment reasons and internal binding fields do not clutter logs", (
     observations: 0,
   });
   const output = String(stderr.mock.calls[0]![0]);
-  expect(output).toContain("Judgment requested");
-  expect(output).not.toMatch(/session-1|World start|Periodic check|Player messages|Response hooks/);
+  expect(output).toContain("Run requested");
+  expect(output).not.toMatch(/session-1|Initial run|Periodic check|Player messages|Hooks/);
 });
 
 test.each([

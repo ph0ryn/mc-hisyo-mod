@@ -87,7 +87,7 @@ async function setup(onLog?: (event: string, details?: Record<string, unknown>) 
     model,
     isAgentReady: () => true,
     requestTimeoutMs: 100,
-    judgmentTimeoutMs: 1_000,
+    runTimeoutMs: 1_000,
     shutdownTimeoutMs: 10,
     ...(onLog ? { onLog } : {}),
   });
@@ -99,7 +99,7 @@ async function setup(onLog?: (event: string, details?: Record<string, unknown>) 
   return { child, client };
 }
 
-test("prompt ACK and agent_end cannot release a judgment; agent_settled can", async () => {
+test("prompt ACK and agent_end cannot release a run; agent_settled can", async () => {
   const { child, client } = await setup();
   const run = client.run("first");
   const prompt = await child.next("prompt");
@@ -146,14 +146,14 @@ test.each([false, true])(
     const output = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
     expect(output).toContain("Pi ready");
     expect(output).toContain("Model: test/native");
-    expect(output).toContain("Judgment sent to Pi");
+    expect(output).toContain("Run sent to Pi");
     expect(output).toContain("Tool started: send_message (call-1)");
     expect(output).toContain(isError ? "Arguments: null" : "Arguments: { text: 'こんにちは\\n");
     expect(output).toContain("Duration: 12 ms");
     expect(output).toContain(`Tool ${isError ? "failed" : "completed"}: send_message (call-1)`);
     expect(output).toContain("Result:");
     expect(output).toContain(isError ? "Display failed" : "Displayed");
-    expect(output).toContain("Judgment finished");
+    expect(output).toContain("Run finished");
     expect(output).not.toMatch(/pi\.ready|pi\.prompt_submitted|tool_execution_|pi\.agent_settled/);
     expect(output).not.toContain("PRIVATE_");
     expect(output).not.toContain("\u001b");

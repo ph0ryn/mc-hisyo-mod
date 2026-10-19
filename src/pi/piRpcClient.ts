@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child
 import { EventEmitter } from "node:events";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { createPiJsonLineDecoder, encodePiJsonLine, maxPiJudgmentBytes } from "./piFraming.js";
+import { createPiJsonLineDecoder, encodePiJsonLine, maxPiRunBytes } from "./piFraming.js";
 import { checkNativePiModel, type NativePiModelSelector } from "./nativePiModel.js";
 import { supportedPiVersion } from "./piPolicy.js";
 
@@ -16,11 +16,11 @@ export interface PiLaunchOptions {
   /** Known bundled extension, authenticated and ready on the owning bridge. */
   isAgentReady: () => boolean;
   requestTimeoutMs?: number;
-  judgmentTimeoutMs?: number;
+  runTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   onLog?: (event: string, details?: Record<string, unknown>) => void;
 }
-export type PiJudgment = { status: "not_started" } | { status: "settled"; aborted: boolean };
+export type PiRunResult = { status: "not_started" } | { status: "settled"; aborted: boolean };
 export class PiRunError extends Error {
   constructor(
     message: string,
@@ -78,7 +78,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 type Terminal = { aborted: boolean } | { error: Error };
-interface JudgmentSlot {
+interface RunSlot {
   sent: boolean;
   cancelled: boolean;
   sawSettled: boolean;
@@ -96,11 +96,7 @@ interface Pending {
 
 /** Launch policy (isolated settings/resources/tools) belongs to the trusted session owner. */
 export async function startPiRpcClient(options: PiLaunchOptions): Promise<PiRpcClient> {
-  for (const limit of [
-    options.requestTimeoutMs,
-    options.judgmentTimeoutMs,
-    options.shutdownTimeoutMs,
-  ])
+  for (const limit of [options.requestTimeoutMs, options.runTimeoutMs, options.shutdownTimeoutMs])
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))
       throw new Error("Invalid Pi lifecycle timeout");
   const prefix = options.prefixArgs ?? [];
@@ -139,7 +135,7 @@ class PiRpcClient extends EventEmitter {
   readonly #options: PiLaunchOptions;
   #nextId = 0;
   #modelApi: string | undefined;
-  #run: JudgmentSlot | undefined;
+  #run: RunSlot | undefined;
   #failure: Error | undefined;
   #stopping = false;
   #closed = false;
@@ -181,7 +177,7 @@ class PiRpcClient extends EventEmitter {
     child.on("close", () => {
       this.#closed = true;
       this.#exited.resolve();
-      if (!this.#stopping || this.#run) this.#fail(new Error("Pi exited before judgment settled"));
+      if (!this.#stopping || this.#run) this.#fail(new Error("Pi exited before run settled"));
     });
   }
 
@@ -213,18 +209,17 @@ class PiRpcClient extends EventEmitter {
     }
   }
 
-  run(message: string, signal?: AbortSignal): Promise<PiJudgment> {
+  run(message: string, signal?: AbortSignal): Promise<PiRunResult> {
     if (this.#stopping)
       return Promise.reject(new PiRunError("Pi client is retired", false, this.#failure));
-    if (this.#run)
-      return Promise.reject(new PiRunError("Previous Pi judgment has not settled", false));
+    if (this.#run) return Promise.reject(new PiRunError("Previous Pi run has not settled", false));
     if (
       typeof message !== "string" ||
       !message.length ||
-      Buffer.byteLength(message) > maxPiJudgmentBytes
+      Buffer.byteLength(message) > maxPiRunBytes
     )
-      return Promise.reject(new PiRunError("Invalid Pi judgment message", false));
-    const slot: JudgmentSlot = {
+      return Promise.reject(new PiRunError("Invalid Pi run message", false));
+    const slot: RunSlot = {
       sent: false,
       cancelled: signal?.aborted ?? false,
       sawSettled: false,
@@ -242,7 +237,7 @@ class PiRpcClient extends EventEmitter {
     });
   }
 
-  async #execute(slot: JudgmentSlot, message: string): Promise<PiJudgment> {
+  async #execute(slot: RunSlot, message: string): Promise<PiRunResult> {
     try {
       if (slot.cancelled) return { status: "not_started" };
       await this.#gate(slot);
@@ -252,8 +247,8 @@ class PiRpcClient extends EventEmitter {
         slot.sent = true;
         this.#options.onLog?.("pi.prompt_submitted");
         slot.timer = setTimeout(
-          () => this.#fail(new Error("Pi judgment did not settle")),
-          this.#options.judgmentTimeoutMs ?? 300_000,
+          () => this.#fail(new Error("Pi run did not settle")),
+          this.#options.runTimeoutMs ?? 300_000,
         );
       });
       if (!Check(promptSchema, ack)) throw new Error("Pi prompt was not started exclusively");
@@ -270,11 +265,11 @@ class PiRpcClient extends EventEmitter {
       return { status: "settled", aborted: terminal.aborted };
     } catch (error) {
       this.#fail(error);
-      throw new PiRunError("Pi judgment failed", slot.sent, error);
+      throw new PiRunError("Pi run failed", slot.sent, error);
     }
   }
 
-  async #gate(slot?: JudgmentSlot): Promise<void> {
+  async #gate(slot?: RunSlot): Promise<void> {
     const api = await checkNativePiModel(
       this.#options.model,
       (command) => this.#request(command),
@@ -290,7 +285,7 @@ class PiRpcClient extends EventEmitter {
     if (api !== undefined) this.#modelApi = api;
   }
 
-  #cancel(slot: JudgmentSlot): void {
+  #cancel(slot: RunSlot): void {
     slot.cancelled = true;
     if (slot.sent && !slot.cancellation) {
       slot.cancellation = (async () => {

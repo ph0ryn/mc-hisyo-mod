@@ -21,9 +21,9 @@ test("summary schema has its own version 1 and never creates raw tables", () => 
   const f = port(0);
   initializeSummaryDatabase(f.db);
   const sql = f.sql.join("\n");
-  expect(sql).toContain("CREATE TABLE history_summaries");
+  expect(sql).toContain("CREATE TABLE summaries");
   expect(sql).toContain("PRAGMA user_version = 1");
-  expect(sql).not.toMatch(/CREATE TABLE (events|response_hooks)/);
+  expect(sql).not.toMatch(/CREATE TABLE (events|hooks)/);
   expect(f.sql).toContain("BEGIN IMMEDIATE");
   expect(f.sql.at(-1)).toBe("COMMIT");
   const current = port(1);

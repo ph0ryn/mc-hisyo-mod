@@ -147,7 +147,7 @@ test.each([
   expect(data.calls).toEqual(commands);
 });
 
-test("retains the pinned API at subsequent judgment gates", async () => {
+test("retains the pinned API at subsequent run gates", async () => {
   const first = replies();
   const pinned = await checkNativePiModel(selector, first.query, () => true);
   const second = replies();

@@ -9,7 +9,7 @@ export async function refreshPiOAuth(
   executable: string,
   agentDirectory: string,
   authPath: string,
-  judgmentTimeoutMs: number,
+  runTimeoutMs: number,
   signal: AbortSignal,
 ): Promise<void> {
   try {
@@ -23,7 +23,7 @@ export async function refreshPiOAuth(
         "--provider",
         "openai",
         "--min-expiry",
-        `${judgmentTimeoutMs + 300_000}ms`,
+        `${runTimeoutMs + 300_000}ms`,
       ],
       {
         env: {

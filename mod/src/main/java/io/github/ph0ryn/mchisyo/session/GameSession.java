@@ -3,7 +3,7 @@ package io.github.ph0ryn.mchisyo.session;
 import com.google.gson.*;
 import io.github.ph0ryn.mchisyo.observation.ObservedEvent;
 import io.github.ph0ryn.mchisyo.protocol.RunBinding;
-import io.github.ph0ryn.mchisyo.protocol.WorldBinding;
+import io.github.ph0ryn.mchisyo.protocol.SessionBinding;
 import io.github.ph0ryn.mchisyo.reference.PackagedReferences;
 import io.github.ph0ryn.mchisyo.transport.JsonLineCodec;
 import io.github.ph0ryn.mchisyo.transport.RpcError;
@@ -57,7 +57,7 @@ public final class GameSession implements AutoCloseable {
     private final String worldId, playerId, language;
     private final List<String> events;
     private boolean started, closed, ready, paused;
-    private WorldBinding world;
+    private SessionBinding sessionBinding;
     private RunBinding run;
     private Object runIdentity;
     private long seq;
@@ -76,7 +76,7 @@ public final class GameSession implements AutoCloseable {
         peer.handle("game.run.bind", params -> {
             RunBinding binding = binding(params, Set.of());
             synchronized (state) {
-                requireWorld(binding.worldBinding());
+                requireSession(binding.sessionBinding());
                 if (this.paused || (run != null && !run.equals(binding))) throw stale();
                 if (run == null) { run = binding; runIdentity = new Object(); }
             }
@@ -123,25 +123,25 @@ public final class GameSession implements AutoCloseable {
     }
     public CompletionStage<Void> start(CompletionStage<RpcPeer> tcp, String token) {
         synchronized (state) { if (started || closed) throw stale(); started = true; }
-        JsonObject hello = new JsonObject(); hello.addProperty("protocolVersion", 1); hello.addProperty("role", "game"); hello.addProperty("token", token);
+        JsonObject hello = new JsonObject(); hello.addProperty("protocolVersion", 2); hello.addProperty("role", "game"); hello.addProperty("token", token);
         CompletionStage<Void> result = tcp.thenCompose(ignored -> { requireActive(); return peer.call("bridge.hello", hello); })
             .thenCompose(ack -> {
                 requireActive(); exact(ack, Set.of("protocolVersion", "role"));
-                if (!new JsonPrimitive(1).equals(ack.getAsJsonObject().get("protocolVersion"))
+                if (!new JsonPrimitive(2).equals(ack.getAsJsonObject().get("protocolVersion"))
                         || !new JsonPrimitive("game").equals(ack.getAsJsonObject().get("role"))) throw invalid();
                 JsonObject attach = new JsonObject(); attach.addProperty("worldId", worldId); attach.addProperty("playerId", playerId);
                 attach.addProperty("language", language);
                 attach.add("supportedEvents", JSON.toJsonTree(events)); synchronized (state) { attach.addProperty("paused", paused); }
                 return peer.call("game.attach", attach);
             }).thenCompose(ack -> {
-                requireActive(); WorldBinding attached;
-                try { attached = WorldBinding.fromJson(ack); } catch (IllegalArgumentException error) { throw invalid(); }
+                requireActive(); SessionBinding attached;
+                try { attached = SessionBinding.fromJson(ack); } catch (IllegalArgumentException error) { throw invalid(); }
                 if (!attached.worldId().equals(worldId) || !attached.playerId().equals(playerId)) throw stale();
-                synchronized (state) { if (closed) throw stale(); world = attached; }
+                synchronized (state) { if (closed) throw stale(); sessionBinding = attached; }
                 return game.initialize();
             }).thenCompose(ignored -> {
-                WorldBinding binding;
-                synchronized (state) { if (closed) throw stale(); ready = true; binding = world; }
+                SessionBinding binding;
+                synchronized (state) { if (closed) throw stale(); ready = true; binding = sessionBinding; }
                 // CLI may synchronously bind a run while handling game.ready: local owner is ready first.
                 return peer.call("game.ready", binding.toJson());
             }).thenAccept(ack -> { requireActive(); flag(ack, "ready", true); });
@@ -150,19 +150,19 @@ public final class GameSession implements AutoCloseable {
     }
     public boolean isReady() { synchronized (state) { return ready && !closed; } }
     private void requireActive() { synchronized (state) { if (closed) throw stale(); } }
-    private void requireWorld(WorldBinding binding) { if (closed || !ready || !binding.equals(world)) throw stale(); }
+    private void requireSession(SessionBinding binding) { if (closed || !ready || !binding.equals(sessionBinding)) throw stale(); }
     private Capture capture(RunBinding binding) {
         synchronized (state) {
-            requireWorld(binding.worldBinding()); if (!binding.equals(run)) throw stale();
+            requireSession(binding.sessionBinding()); if (!binding.equals(run)) throw stale();
             return new Capture(runIdentity, binding);
         }
     }
     public CompletionStage<Void> playerMessage(String value) {
-        String text = text(new JsonPrimitive(value)); WorldBinding binding;
-        synchronized (state) { if (closed || !ready || paused) throw stale(); binding = world; }
+        String text = text(new JsonPrimitive(value)); SessionBinding binding;
+        synchronized (state) { if (closed || !ready || paused) throw stale(); binding = sessionBinding; }
         JsonObject params = binding.toJson(); params.addProperty("text", text);
         CompletionStage<Void> result = request("game.player_message", params).thenAccept(ack -> {
-            synchronized (state) { requireWorld(binding); } flag(ack, "accepted", true);
+            synchronized (state) { requireSession(binding); } flag(ack, "accepted", true);
         });
         result.whenComplete((ignored, error) -> { if (error != null) close(); });
         return result;
@@ -174,7 +174,7 @@ public final class GameSession implements AutoCloseable {
             paused = value; // Pause gates new runs, not tools or completion of the admitted run.
             if (!ready || statuses.size() >= 32) params = null;
             else {
-                params = world.toJson(); params.addProperty("paused", value); statuses.addLast(params);
+                params = sessionBinding.toJson(); params.addProperty("paused", value); statuses.addLast(params);
                 // The head stays queued while its sole drainer calls the peer, outside this lock.
                 if (statuses.size() > 1) return;
             }
@@ -191,7 +191,7 @@ public final class GameSession implements AutoCloseable {
             synchronized (state) {
                 if (closed || !ready) return;
                 if (seq >= 9007199254740991L) throw new IllegalStateException("Observation sequence exhausted");
-                JsonObject params = world.toJson(); params.addProperty("seq", ++seq);
+                JsonObject params = sessionBinding.toJson(); params.addProperty("seq", ++seq);
                 params.addProperty("event", event.name()); params.addProperty("dimension", event.dimension());
                 params.add("position", JSON.toJsonTree(event.position())); params.addProperty("tick", event.tick());
                 params.addProperty("observedAt", event.observedAt()); params.add("data", JSON.toJsonTree(event.data()));
@@ -235,7 +235,7 @@ public final class GameSession implements AutoCloseable {
     public static RpcError stale() { return new RpcError(-32001, "Inactive or stale execution binding"); }
     private static RpcError invalid() { return new RpcError(-32602, "Invalid method parameters"); }
     private static RunBinding binding(JsonElement params, Set<String> extra) {
-        Set<String> keys = new HashSet<>(Set.of("worldId", "playerId", "worldSessionId", "runId")); keys.addAll(extra); exact(params, keys);
+        Set<String> keys = new HashSet<>(Set.of("worldId", "playerId", "sessionId", "runId")); keys.addAll(extra); exact(params, keys);
         JsonObject copy = params.getAsJsonObject().deepCopy(); extra.forEach(copy::remove);
         try { return RunBinding.fromJson(copy); } catch (IllegalArgumentException error) { throw invalid(); }
     }

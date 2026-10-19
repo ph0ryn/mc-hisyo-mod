@@ -1,5 +1,5 @@
 import { parseArgs } from "node:util";
-import { DirectorConfigError, validEnvName } from "./runtime/directorConfig.js";
+import { HisyoConfigError, validEnvName } from "./runtime/hisyoConfig.js";
 
 export interface CliOptions {
   help: boolean;
@@ -12,13 +12,13 @@ export interface CliOptions {
   apiKeyEnv?: string;
 }
 
-export const usage = `Usage: ai-director [--bridge-only] [--data-dir PATH] [--help]
+export const usage = `Usage: hisyo [--bridge-only] [--data-dir PATH] [--help]
 
-Minecraft AI Director
+Minecraft hisyo
 
 Options:
   --help              Show usage without touching state or starting Pi.
-  --bridge-only       Start the authenticated bridge without Pi or judgments.
+  --bridge-only       Start the authenticated bridge without Pi or runs.
   --data-dir PATH     Private state directory (default: ~/.mc-hisyo).
                       Its parent must exist; existing directories must be owned 0700.
   --pi PATH           Pi executable (default: pi on PATH).
@@ -35,7 +35,7 @@ Stop with Ctrl-C or SIGTERM. Stale connection.json requires manual recovery afte
 `;
 
 const optionMessages = {
-  arguments: "Invalid arguments. Check ai-director --help.",
+  arguments: "Invalid arguments. Check hisyo --help.",
   bridgeOnly: "Pi options cannot be combined with --bridge-only.",
   pair: "Specify both --provider and --model, or neither.",
   environment: "Use a valid environment variable name for --api-key-env.",
@@ -94,6 +94,6 @@ export function parseOptions(args: string[]): CliOptions {
 /** Never expose arbitrary exceptions, child diagnostics, or nested cleanup errors. */
 export function cliErrorMessage(error: unknown): string {
   if (error instanceof CliOptionsError) return optionMessages[error.code];
-  if (error instanceof DirectorConfigError) return error.diagnostic;
-  return "Director operation failed.";
+  if (error instanceof HisyoConfigError) return error.diagnostic;
+  return "Hisyo operation failed.";
 }

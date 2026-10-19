@@ -9,7 +9,7 @@ import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import io.github.ph0ryn.mchisyo.protocol.JsonRpc;
 import io.github.ph0ryn.mchisyo.protocol.RunBinding;
-import io.github.ph0ryn.mchisyo.protocol.WorldBinding;
+import io.github.ph0ryn.mchisyo.protocol.SessionBinding;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -129,27 +129,38 @@ public final class TransportTest {
     }
 
     @Test
+    void bindingsRejectPreviousSessionField() {
+        JsonElement binding = JsonParser.parseString("{\"worldId\":\"world\",\"playerId\":\"player\",\"worldSessionId\":\"session\"}");
+        assertThrows(IllegalArgumentException.class, () -> SessionBinding.fromJson(binding));
+        binding.getAsJsonObject().addProperty("runId", "run");
+        assertThrows(IllegalArgumentException.class, () -> RunBinding.fromJson(binding));
+    }
+
+    @Test
     void bindings() {
-        WorldBinding world = new WorldBinding("world", "player", "session");
+        SessionBinding session = new SessionBinding("world", "player", "session");
         RunBinding run = new RunBinding("world", "player", "session", "run");
-        assertEquals(world, run.worldBinding(), "run world seam");
-        assertEquals(world, WorldBinding.fromJson(world.toJson()), "world exact wire roundtrip");
+        assertEquals(session, run.sessionBinding(), "run session seam");
+        assertEquals(session, SessionBinding.fromJson(session.toJson()), "session exact wire roundtrip");
+        assertEquals("session", session.sessionId());
+        assertEquals("session", run.sessionId());
+        assertEquals(JsonParser.parseString("{\"worldId\":\"world\",\"playerId\":\"player\",\"sessionId\":\"session\"}"), session.toJson(), "flat session wire shape");
         assertEquals(run, RunBinding.fromJson(run.toJson()), "run exact wire roundtrip");
-        assertEquals(JsonParser.parseString("{\"worldId\":\"world\",\"playerId\":\"player\",\"worldSessionId\":\"session\",\"runId\":\"run\"}"), run.toJson(), "flat run wire shape");
+        assertEquals(JsonParser.parseString("{\"worldId\":\"world\",\"playerId\":\"player\",\"sessionId\":\"session\",\"runId\":\"run\"}"), run.toJson(), "flat run wire shape");
         assertFalse(run.equals(new RunBinding("world", "player", "session", "other")), "run equality exact");
-        assertFalse(world.equals(new WorldBinding("world", "player", "other")), "session equality exact");
-        assertEquals("😀".repeat(128), new WorldBinding("😀".repeat(128), "p", "s").worldId(), "identifier code points not UTF16 units");
+        assertFalse(session.equals(new SessionBinding("world", "player", "other")), "session equality exact");
+        assertEquals("😀".repeat(128), new SessionBinding("😀".repeat(128), "p", "s").worldId(), "identifier code points not UTF16 units");
         for (String value : Arrays.asList(null, "", "x".repeat(129), "😀".repeat(129))) {
-            assertThrows(IllegalArgumentException.class, () -> new WorldBinding(value, "p", "s"), "invalid world identifier");
+            assertThrows(IllegalArgumentException.class, () -> new SessionBinding(value, "p", "s"), "invalid world identifier");
             assertThrows(IllegalArgumentException.class, () -> new RunBinding("w", "p", "s", value), "invalid run identifier");
         }
-        for (String invalid : List.of("null", "[]", "{}", "{\"worldId\":1,\"playerId\":\"p\",\"worldSessionId\":\"s\"}",
-                "{\"worldId\":\"w\",\"playerId\":null,\"worldSessionId\":\"s\"}",
-                "{\"worldId\":\"w\",\"playerId\":\"p\",\"worldSessionId\":\"s\",\"unknown\":true}")) {
-            assertThrows(IllegalArgumentException.class, () -> WorldBinding.fromJson(JsonParser.parseString(invalid)), "strict binding shape");
+        for (String invalid : List.of("null", "[]", "{}", "{\"worldId\":1,\"playerId\":\"p\",\"sessionId\":\"s\"}",
+                "{\"worldId\":\"w\",\"playerId\":null,\"sessionId\":\"s\"}",
+                "{\"worldId\":\"w\",\"playerId\":\"p\",\"sessionId\":\"s\",\"unknown\":true}")) {
+            assertThrows(IllegalArgumentException.class, () -> SessionBinding.fromJson(JsonParser.parseString(invalid)), "strict binding shape");
         }
-        assertThrows(IllegalArgumentException.class, () -> WorldBinding.fromJson(run.toJson()), "world does not accept run extra key");
-        assertThrows(IllegalArgumentException.class, () -> RunBinding.fromJson(world.toJson()), "run requires run ID");
+        assertThrows(IllegalArgumentException.class, () -> SessionBinding.fromJson(run.toJson()), "session does not accept run extra key");
+        assertThrows(IllegalArgumentException.class, () -> RunBinding.fromJson(session.toJson()), "run requires run ID");
     }
 
 }

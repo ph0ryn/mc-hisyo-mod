@@ -55,14 +55,14 @@ test.each(
     throw new Error("unexpected success");
   } catch (error) {
     expect(cliErrorMessage(error)).not.toContain("SECRET_SENTINEL");
-    expect(cliErrorMessage(error)).not.toBe("Director operation failed.");
+    expect(cliErrorMessage(error)).not.toBe("Hisyo operation failed.");
   }
 });
 
 test("operational errors, causes and aggregate members are never printed", () => {
   const secret = new Error("SECRET_SENTINEL", { cause: "SECRET_SENTINEL" });
-  expect(cliErrorMessage(secret)).toBe("Director operation failed.");
+  expect(cliErrorMessage(secret)).toBe("Hisyo operation failed.");
   expect(cliErrorMessage(new AggregateError([secret], "SECRET_SENTINEL"))).toBe(
-    "Director operation failed.",
+    "Hisyo operation failed.",
   );
 });

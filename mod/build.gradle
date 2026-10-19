@@ -54,9 +54,9 @@ dependencies {
 
 tasks.named('test', Test) {
     useJUnitPlatform()
-    def fixtures = rootProject.file('../src/protocol/fixtures/observerEvents.json')
+    def fixtures = rootProject.file('../src/protocol/fixtures/gameEvents.json')
     inputs.file fixtures
-    systemProperty 'observerFixtures', fixtures.absolutePath
+    systemProperty 'eventFixtures', fixtures.absolutePath
 }
 
 processResources {

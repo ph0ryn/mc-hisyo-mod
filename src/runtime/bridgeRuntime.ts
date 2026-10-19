@@ -1,15 +1,15 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { DirectorBridge } from "../bridge/directorBridge.js";
+import { BridgeServer } from "../bridge/bridgeServer.js";
 import { EventCatalog } from "../events/eventCatalog.js";
-import { EventLog } from "../events/eventLog.js";
-import { ActivityLog } from "../events/activityLog.js";
-import { ResponseHooks } from "../hooks/responseHooks.js";
+import { EventLog } from "../storage/eventLog.js";
+import { ActivityLog } from "../storage/activityLog.js";
+import { HookStore } from "../storage/hookStore.js";
 import { protocolVersion } from "../protocol/bridge.js";
 import { gameEventDefinitions } from "../protocol/gameEvent.js";
-import { openDatabase } from "../storage/database.js";
+import { openEventDatabase } from "../storage/eventDatabase.js";
 import { openActivityDatabase } from "../storage/activityDatabase.js";
-import { HistorySummaries } from "../storage/historySummaries.js";
+import { SummaryStore } from "../storage/summaryStore.js";
 import { openSummaryDatabase } from "../storage/summaryDatabase.js";
 import { ConnectionFile, type ConnectionInfo } from "./connectionFile.js";
 import { PrivateDataDirectory } from "./privateDataDirectory.js";
@@ -20,7 +20,7 @@ interface RuntimeOptions {
   onFault: (error: Error) => void;
 }
 export interface BridgeRuntime {
-  bridge: DirectorBridge;
+  bridge: BridgeServer;
   connection: ConnectionInfo;
   close: () => Promise<void>;
 }
@@ -32,7 +32,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
   let db: DatabaseSync | undefined;
   let activityDb: DatabaseSync | undefined;
   let summaryDb: DatabaseSync | undefined;
-  let bridge: DirectorBridge | undefined;
+  let bridge: BridgeServer | undefined;
   let shutdown: Promise<void> | undefined;
   const close = (): Promise<void> => {
     return (shutdown ??= (async () => {
@@ -54,24 +54,24 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
       } catch (error) {
         errors.push(error);
       }
-      if (errors.length) throw new AggregateError(errors, "Could not shut down Director");
+      if (errors.length) throw new AggregateError(errors, "Could not shut down hisyo");
     })());
   };
   try {
     directory.assertStorageFiles();
-    db = openDatabase(directory.databasePath);
+    db = openEventDatabase(directory.eventDatabasePath);
     activityDb = openActivityDatabase(directory.activityDatabasePath);
     summaryDb = openSummaryDatabase(directory.summaryDatabasePath);
     directory.assertStorageFiles();
     const catalog = new EventCatalog(gameEventDefinitions);
     const eventLog = new EventLog(db, catalog);
     const token = randomBytes(32).toString("base64url");
-    bridge = new DirectorBridge({
+    bridge = new BridgeServer({
       token,
       eventLog,
       activityLog: new ActivityLog(activityDb),
-      history: new HistorySummaries(eventLog, summaryDb),
-      hooks: new ResponseHooks(activityDb, catalog),
+      summaries: new SummaryStore(eventLog, summaryDb),
+      hooks: new HookStore(activityDb, catalog),
     });
     bridge.on("fault", options.onFault);
     const address = await bridge.listen();
@@ -84,7 +84,7 @@ export async function startBridgeRuntime(options: RuntimeOptions): Promise<Bridg
     try {
       await close();
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Director startup and cleanup failed");
+      throw new AggregateError([error, cleanupError], "Hisyo startup and cleanup failed");
     }
     throw error;
   }

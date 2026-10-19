@@ -1,9 +1,9 @@
 import { Type, type Static } from "typebox";
 import { EventFilterSchema } from "../events/eventCatalog.js";
 import { GameEventSchema, WorldScopeSchema } from "./gameEvent.js";
-import { GameSnapshotSchema } from "./gameSnapshot.js";
+import { GameStateSchema } from "./gameState.js";
 
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 const identifier = GameEventSchema.properties.worldId;
 const counter = GameEventSchema.properties.tick;
 const strict = { additionalProperties: false } as const;
@@ -18,18 +18,18 @@ export const HelloSchema = Type.Object(
 );
 export type BridgeRole = Static<typeof HelloSchema>["role"];
 
-export const WorldBindingSchema = Type.Object(
+export const SessionBindingSchema = Type.Object(
   {
     ...WorldScopeSchema.properties,
-    worldSessionId: identifier,
+    sessionId: identifier,
   },
   strict,
 );
-export type WorldBinding = Readonly<Static<typeof WorldBindingSchema>>;
+export type SessionBinding = Readonly<Static<typeof SessionBindingSchema>>;
 
 export const RunBindingSchema = Type.Object(
   {
-    ...WorldBindingSchema.properties,
+    ...SessionBindingSchema.properties,
     runId: identifier,
   },
   strict,
@@ -53,7 +53,7 @@ export const GameAttachSchema = Type.Object(
 );
 export const GameStatusSchema = Type.Object(
   {
-    ...WorldBindingSchema.properties,
+    ...SessionBindingSchema.properties,
     paused: Type.Boolean(),
   },
   strict,
@@ -64,7 +64,7 @@ export const GameEventsSchema = Type.Object(
 );
 export const PlayerMessageSchema = Type.Object(
   {
-    ...WorldBindingSchema.properties,
+    ...SessionBindingSchema.properties,
     text: Type.String({ minLength: 1, maxLength: 16_000 }),
   },
   strict,
@@ -133,7 +133,7 @@ export const GameStateRequestSchema = Type.Object(
 export const GameStateResultSchema = Type.Object(
   {
     ...RunBindingSchema.properties,
-    state: GameSnapshotSchema,
+    state: GameStateSchema,
   },
   strict,
 );
@@ -152,12 +152,10 @@ export const SendMessageResultSchema = Type.Object(
   strict,
 );
 
-export function sameWorldBinding(a: WorldBinding, b: WorldBinding): boolean {
-  return (
-    a.worldId === b.worldId && a.playerId === b.playerId && a.worldSessionId === b.worldSessionId
-  );
+export function sameSessionBinding(a: SessionBinding, b: SessionBinding): boolean {
+  return a.worldId === b.worldId && a.playerId === b.playerId && a.sessionId === b.sessionId;
 }
 
 export function sameRunBinding(a: RunBinding, b: RunBinding): boolean {
-  return sameWorldBinding(a, b) && a.runId === b.runId;
+  return sameSessionBinding(a, b) && a.runId === b.runId;
 }

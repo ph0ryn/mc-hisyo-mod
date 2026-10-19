@@ -43,7 +43,7 @@ const stateSchema = Type.Object({
 /**
  * Check decoded RPC values without owning a process or importing Pi's catalog.
  * checkpoint throws on lost authorization/deadline, or returns false on cancellation.
- * The owner pins the returned API and supplies it again for every judgment.
+ * The owner pins the returned API and supplies it again for every run.
  */
 export async function checkNativePiModel(
   selector: NativePiModelSelector,

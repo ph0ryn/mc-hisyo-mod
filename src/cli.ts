@@ -26,11 +26,11 @@ async function main(): Promise<void> {
   let runtime: BridgeRuntime | undefined;
   const errors: unknown[] = [];
   try {
-    const { startDirectorRuntime } = await import("./runtime/directorRuntime.js");
-    runtime = await startDirectorRuntime({
+    const { startHisyoRuntime } = await import("./runtime/hisyoRuntime.js");
+    runtime = await startHisyoRuntime({
       options,
       homeDirectory: homedir(),
-      bundledExtension: fileURLToPath(new URL("./directorBridge.mjs", import.meta.url)),
+      bundledExtension: fileURLToPath(new URL("./piExtension.mjs", import.meta.url)),
       signal: stop.signal,
       onFault,
       onLog: writeCliLog,
@@ -47,10 +47,10 @@ async function main(): Promise<void> {
     runtime!.bridge.on("status", (world) =>
       writeCliLog("game.status", { ...world.binding, paused: world.paused }),
     );
-    runtime!.bridge.on("judgmentRequested", (batch) =>
-      writeCliLog("judgment.requested", {
+    runtime!.bridge.on("runRequested", (batch) =>
+      writeCliLog("run.requested", {
         ...batch.binding,
-        initial: batch.worldStart,
+        initial: batch.initial,
         poll: batch.poll,
         playerMessages: batch.playerMessages,
         hooks: batch.hooks.map((hook) => hook.id),
@@ -58,7 +58,7 @@ async function main(): Promise<void> {
       }),
     );
     runtime!.bridge.on("runInvalidated", (binding, reason) =>
-      writeCliLog("judgment.invalidated", { ...binding, reason }),
+      writeCliLog("run.invalidated", { ...binding, reason }),
     );
     process.stdout.write(
       `Bridge ready at 127.0.0.1:${runtime!.connection.port}${options.bridgeOnly ? " (bridge-only)" : ""}.\n`,
@@ -80,12 +80,12 @@ async function main(): Promise<void> {
   }
   if (fatalError && !errors.includes(fatalError)) errors.unshift(fatalError);
   if (errors.length === 1) throw errors[0];
-  if (errors.length) throw new AggregateError(errors, "Director execution and cleanup failed");
+  if (errors.length) throw new AggregateError(errors, "Hisyo execution and cleanup failed");
 }
 
 try {
   await main();
 } catch (error) {
-  process.stderr.write(`${cliErrorMessage(error)}\nRun ai-director --help for usage.\n`);
+  process.stderr.write(`${cliErrorMessage(error)}\nRun hisyo --help for usage.\n`);
   process.exitCode = 1;
 }

@@ -3,7 +3,7 @@
   "id": "mc_hisyo",
   "version": "${version}",
   "name": "MC Hisyo",
-  "description": "Fabric client interface for the AI Director.",
+  "description": "Fabric client interface for hisyo.",
   "environment": "client",
   "entrypoints": {
     "client": [

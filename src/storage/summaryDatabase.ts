@@ -17,7 +17,7 @@ export function openSummaryDatabase(path: string): DatabaseSync {
   }
 }
 
-/** Summary writes never acquire the raw event/hook transaction. */
+/** Summary writes never acquire event log or activity log transactions. */
 export function summaryTransaction<T>(db: SummaryDatabase, mutate: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -34,7 +34,7 @@ export function summaryTransaction<T>(db: SummaryDatabase, mutate: () => T): T {
   }
 }
 
-/** Derived memory has an independent schema/version and connection lifecycle. */
+/** Summaries have an independent schema/version and connection lifecycle. */
 export function initializeSummaryDatabase(db: SummaryDatabase): void {
   const version = db.prepare("PRAGMA user_version").get()?.user_version;
   if (version !== 0 && version !== 1)
@@ -45,7 +45,7 @@ export function initializeSummaryDatabase(db: SummaryDatabase): void {
   if (version === 0)
     summaryTransaction(db, () => {
       db.exec(`
-      CREATE TABLE history_summaries (
+      CREATE TABLE summaries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         world_id TEXT NOT NULL,
         player_id TEXT NOT NULL,
@@ -59,7 +59,7 @@ export function initializeSummaryDatabase(db: SummaryDatabase): void {
         prompt_version INTEGER NOT NULL,
         UNIQUE(world_id, player_id, source_after)
       ) STRICT;
-      CREATE INDEX history_summaries_scope ON history_summaries(world_id, player_id, id);
+      CREATE INDEX summaries_scope ON summaries(world_id, player_id, id);
       PRAGMA user_version = 1;
     `);
     });

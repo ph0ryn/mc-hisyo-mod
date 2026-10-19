@@ -30,24 +30,23 @@ function describeLog(
       return ["Game disconnected", { World: details.worldId, Player: details.playerId }];
     case "game.status":
       return [details.paused ? "Game paused" : "Game resumed", {}];
-    case "judgment.requested":
+    case "run.requested":
       return [
-        "Judgment requested",
+        "Run requested",
         {
-          "World start": details.initial ? "Yes" : undefined,
+          "Initial run": details.initial ? "Yes" : undefined,
           "Periodic check": details.poll ? "Yes" : undefined,
           "Player messages":
             Array.isArray(details.playerMessages) && details.playerMessages.length
               ? details.playerMessages
               : undefined,
-          "Response hooks":
-            Array.isArray(details.hooks) && details.hooks.length ? details.hooks : undefined,
+          Hooks: Array.isArray(details.hooks) && details.hooks.length ? details.hooks : undefined,
           Observations: details.observations,
         },
       ];
-    case "judgment.invalidated":
+    case "run.invalidated":
       return [
-        "Judgment cancellation requested",
+        "Run cancellation requested",
         {
           Reason:
             typeof details.reason === "string"
@@ -58,9 +57,9 @@ function describeLog(
     case "pi.ready":
       return [`Pi ready (Model: ${preview(details.provider)}/${preview(details.model)})`, {}];
     case "pi.prompt_submitted":
-      return ["Judgment sent to Pi", {}];
+      return ["Run sent to Pi", {}];
     case "pi.agent_settled":
-      return [details.aborted ? "Judgment cancelled" : "Judgment finished", {}];
+      return [details.aborted ? "Run cancelled" : "Run finished", {}];
     case "tool_execution_start":
     case "tool_execution_end":
     case "tool_execution_error": {
