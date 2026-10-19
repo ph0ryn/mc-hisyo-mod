@@ -171,7 +171,7 @@ test("roots paginate by IDs and report unavailable development roots truthfully"
   expect(validReferenceResult(tool, result(true, null))).toBe(true);
   expect(validReferenceResult(tool, result(true, "nonarchive_root"))).toBe(false);
 });
-test("tool-result display escaping and duplicate details count toward the budget", () => {
+test("SDK tool-result budgets count text escaping without obsolete duplicate details", () => {
   const reference = {
     kind: "directory",
     root: "minecraft:0",
@@ -180,5 +180,18 @@ test("tool-result display escaping and duplicate details count toward the budget
     nextCursor: null,
   };
   expect(referenceResultBudget({ ...binding, reference })).toBe(true);
-  expect(validReferenceResult(referenceTools[0]!, { ...binding, reference })).toBe(false);
+  expect(
+    referenceResultBudget({ content: [{ type: "text", text: JSON.stringify(reference) }] }),
+  ).toBe(true);
+  expect(validReferenceResult(referenceTools[0]!, { ...binding, reference })).toBe(true);
+
+  const escaped = {
+    ...reference,
+    entries: Array.from({ length: 128 }, (_, i) => ({ name: '"'.repeat(1_020) + i, kind: "file" })),
+  };
+  expect(referenceResultBudget({ ...binding, reference: escaped })).toBe(true);
+  expect(
+    referenceResultBudget({ content: [{ type: "text", text: JSON.stringify(escaped) }] }),
+  ).toBe(false);
+  expect(validReferenceResult(referenceTools[0]!, { ...binding, reference: escaped })).toBe(false);
 });

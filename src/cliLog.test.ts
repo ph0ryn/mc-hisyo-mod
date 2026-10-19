@@ -92,12 +92,10 @@ test("empty run reasons and internal binding fields do not clutter logs", () => 
 });
 
 test.each([
+  [{ displayed: true }, "Result: { displayed: true }"],
   [
-    {
-      content: [{ type: "text", text: '{"displayed":true}' }],
-      details: { displayed: true },
-    },
-    "Result: { displayed: true }",
+    { status: "read", details: { complete: true } },
+    "Result: { status: 'read', details: { complete: true } }",
   ],
   [[], "Result: []"],
   [null, "Result: null"],
@@ -110,7 +108,7 @@ test.each([
   });
   const output = String(stderr.mock.calls[0]![0]);
   expect(output).toContain(expected);
-  expect(output).not.toMatch(/content:|details:|Duration:/);
+  expect(output).not.toMatch(/content:|Duration:/);
 });
 
 test("terminal controls in headings are escaped too", () => {

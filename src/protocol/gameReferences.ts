@@ -163,7 +163,6 @@ export function validReferenceResult(
   if (
     !referenceResultBudget({
       content: [{ type: "text", text: JSON.stringify(reference) }],
-      details: reference,
     })
   )
     return false;

@@ -75,8 +75,7 @@ function describeLog(
         {
           Arguments: event === "tool_execution_start" ? details.args : undefined,
           Duration: typeof details.durationMs === "number" ? `${details.durationMs} ms` : undefined,
-          Result:
-            result && typeof result === "object" && "details" in result ? result.details : result,
+          Result: result,
         },
       ];
     }
