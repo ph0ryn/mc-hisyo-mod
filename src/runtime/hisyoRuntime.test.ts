@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { createModels, type Model } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, type Model } from "@earendil-works/pi-ai";
 import { expect, test, vi } from "vite-plus/test";
 import type { BridgeServer } from "../bridge/bridgeServer.js";
 import { parseOptions } from "../cliOptions.js";
@@ -301,14 +301,47 @@ test.each(["scheduler", "summaryScheduler", "timer", "aborted"])(
   },
 );
 
-test("summaryScheduler model calls route through the trusted current-session owner", async () => {
+test("summary reaches the shared provider without a main agent or conversation", async () => {
   const f = fixture();
+  const provider = fauxProvider({
+    api: "openai-responses",
+    provider: "openai",
+    models: [{ id: "gpt-6-luna" }],
+  });
+  f.modelAccess.models.setProvider(provider.provider);
+  const begin = vi.fn();
+  const recordUsage = vi.fn();
+  const finish = vi.fn();
+  Object.assign(f.base.bridge, {
+    beginModelRequest: begin,
+    recordUsage,
+    finishModelRequest: finish,
+  });
+  provider.setResponses([
+    (context) => {
+      expect(context.messages).toEqual([
+        { role: "user", content: "observations", timestamp: expect.any(Number) },
+      ]);
+      return fauxAssistantMessage("木を集めた。");
+    },
+  ]);
   const runtime = (await startHisyoRuntime(f.options, f.ports))!;
-  const summaryScheduler = vi.mocked(f.ports.createSummaryScheduler).mock.calls[0]![0];
-  const signal = new AbortController().signal;
-  await expect(summaryScheduler.summarize(world, "observations", signal)).resolves.toBe("summary");
-  expect(f.scheduler.summarize).toHaveBeenCalledExactlyOnceWith(world, "observations", signal);
-  await runtime.close();
+  try {
+    // The main scheduler port has no agent or conversation to delegate to.
+    const summaryScheduler = vi.mocked(f.ports.createSummaryScheduler).mock.calls[0]![0];
+    await expect(
+      summaryScheduler.summarize(world, "observations", new AbortController().signal),
+    ).resolves.toBe("木を集めた。");
+    expect(provider.state.callCount).toBe(1);
+    expect(f.scheduler.poll).not.toHaveBeenCalled();
+    expect(begin).toHaveBeenCalledExactlyOnceWith(world, "summary", expect.any(String));
+    expect(recordUsage).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ ...world, source: "summary", stopReason: "stop" }),
+    );
+    expect(finish).toHaveBeenCalledExactlyOnceWith(world, "summary", begin.mock.calls[0]![2]);
+  } finally {
+    await runtime.close();
+  }
 });
 
 test("trusted credential-source configuration is captured before bridge acquisition", async () => {
