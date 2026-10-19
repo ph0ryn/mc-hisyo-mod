@@ -12,6 +12,9 @@ function fixture(args = ["--api-key-env", "KEY"]) {
   let readyWorld: { binding: WorldBinding } | undefined;
   const scheduler = Object.assign(new EventEmitter<{ fault: [error: Error] }>(), {
     poll: vi.fn((_binding: WorldBinding) => false),
+    summarizeHistory: vi.fn(
+      async (_binding: WorldBinding, _input: string, _signal: AbortSignal) => "memory",
+    ),
     close: vi.fn(async () => {
       order.push("scheduler");
     }),
@@ -263,6 +266,20 @@ test.each(["scheduler", "history", "timer", "aborted"])(
     expect(f.scheduler.close).toHaveBeenCalledTimes(stage === "scheduler" ? 0 : 1);
   },
 );
+
+test("history model calls route through the trusted current-session owner", async () => {
+  const f = fixture();
+  const runtime = (await startDirectorRuntime(f.options, f.ports))!;
+  const history = vi.mocked(f.ports.createHistoryWorker).mock.calls[0]![0];
+  const signal = new AbortController().signal;
+  await expect(history.summarizeHistory(world, "observations", signal)).resolves.toBe("memory");
+  expect(f.scheduler.summarizeHistory).toHaveBeenCalledExactlyOnceWith(
+    world,
+    "observations",
+    signal,
+  );
+  await runtime.close();
+});
 
 test("trusted config and bundled path are captured before resource acquisition", async () => {
   const f = fixture();

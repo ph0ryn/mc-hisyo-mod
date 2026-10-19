@@ -323,6 +323,7 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
   #launch: ReturnType<typeof startPiRpcClient> | undefined;
   #client: Awaited<ReturnType<typeof startPiRpcClient>> | undefined;
   #flight: { controller: AbortController; promise: Promise<PiJudgment> | undefined } | undefined;
+  #historyFlight: Promise<string> | undefined;
   #retired = false;
   #shutdown: Promise<void> | undefined;
 
@@ -343,14 +344,17 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     return this.#client?.diagnostics ?? "";
   }
 
-  async #refreshAuth(signal: AbortSignal): Promise<void> {
+  async #refreshAuth(
+    signal: AbortSignal,
+    timeoutMs = this.#options.judgmentTimeoutMs ?? 300_000,
+  ): Promise<void> {
     const options = this.#options;
     if (options.oauthAgentDirectory)
       await refreshPiOAuth(
         options.executable,
         options.oauthAgentDirectory,
         this.#files.authPath,
-        options.judgmentTimeoutMs ?? 300_000,
+        timeoutMs,
         signal,
       );
   }
@@ -378,6 +382,28 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     signal.throwIfAborted();
     if (this.#retired || !options.bridge.isAgentReady)
       throw new Error("Pi readiness lost during startup");
+  }
+
+  /** Refresh access-only credentials independently of paused main judgments. */
+  summarizeHistory(input: string, signal: AbortSignal): Promise<string> {
+    if (this.#retired || this.#historyFlight)
+      return Promise.reject(new Error("History session is not available"));
+    const combined = AbortSignal.any([signal, this.#stop.signal]);
+    const promise = this.#summarizeHistory(input, combined).finally(() => {
+      this.#historyFlight = undefined;
+    });
+    this.#historyFlight = promise;
+    return promise;
+  }
+
+  async #summarizeHistory(input: string, signal: AbortSignal): Promise<string> {
+    signal.throwIfAborted();
+    const world = this.#options.bridge.currentWorld;
+    if (!world || !sameWorldBinding(world.binding, this.#options.world))
+      throw new Error("Pi world binding changed");
+    await this.#refreshAuth(signal, 300_000);
+    signal.throwIfAborted();
+    return this.#options.bridge.summarizeHistory(this.#options.world, input, signal);
   }
 
   judge(message: string, signal?: AbortSignal): Promise<PiJudgment> {
@@ -465,6 +491,7 @@ class PiSession extends EventEmitter<{ fault: [error: Error] }> {
     // Do not release the scope/bridge lease if child termination could not be confirmed.
     await client?.close();
     await this.#flight?.promise?.catch(() => {});
+    await this.#historyFlight?.catch(() => {});
     this.#options.bridge.off("runInvalidated", this.#invalidated);
     this.#options.bridge.off("detach", this.#detached);
     this.#options.bridge.off("peerClosed", this.#peerClosed);

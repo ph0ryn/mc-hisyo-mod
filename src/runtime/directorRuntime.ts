@@ -11,7 +11,7 @@ export interface DirectorRuntimePorts extends Omit<ConfigInput, "homeDirectory">
   startBridge: typeof startBridgeRuntime;
   createScheduler: (
     options: JudgmentSchedulerOptions,
-  ) => Pick<JudgmentScheduler, "poll" | "close"> &
+  ) => Pick<JudgmentScheduler, "poll" | "close" | "summarizeHistory"> &
     Pick<EventEmitter<{ fault: [error: Error] }>, "on" | "off">;
   createHistoryWorker: (
     options: HistoryWorkerOptions,
@@ -111,7 +111,10 @@ export async function startDirectorRuntime(
         ...(onLog ? { onLog } : {}),
       });
       scheduler.on("fault", onFault);
-      history = ports.createHistoryWorker({ bridge: base.bridge });
+      history = ports.createHistoryWorker({
+        bridge: base.bridge,
+        summarizeHistory: (...args) => scheduler!.summarizeHistory(...args),
+      });
       history.on("fault", onFault);
       signal.throwIfAborted();
       cancelTimer = ports.everySecond(() => {

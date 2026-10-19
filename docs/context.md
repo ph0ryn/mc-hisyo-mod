@@ -51,6 +51,7 @@ Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-m
   入力元はMod由来の観測だけ。プレイヤーのチャット、AIのHUD発言、CLI内部活動、hook設定は別の`activities.sqlite`へ保存し、要約へ混ぜない。
   旧DBからの自動移行・要約コピーは行わない。
 - pause中も同じ周期で新しい要約を開始し、進行中の要約も完了・保存まで続ける。主判断のpause制御とは独立する。
+  ChatGPT OAuth利用時は主判断とは別に、各要約の前に信頼済みPi所有者が認証を更新し、隔離子にはaccess tokenだけを渡す。
   退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加要約もしない。
   空の差分では呼び出さず、重なった周期を後から連打しない。取消・失敗時はcursorを進めず、失敗は通常のruntime faultとして扱う。
 - 再接続後も同じworld / playerのcursorから継続し、以前のsessionも古い順に読む。

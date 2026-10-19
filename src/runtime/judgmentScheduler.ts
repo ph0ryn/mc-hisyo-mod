@@ -161,6 +161,23 @@ export class JudgmentScheduler extends EventEmitter<{ fault: [error: Error] }> {
     }
   }
 
+  /** Independent history work uses the current Pi owner, never main-run admission. */
+  async summarizeHistory(
+    binding: WorldBinding,
+    input: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    signal.throwIfAborted();
+    const world = this.#world;
+    if (!world || !this.#current(world) || !sameWorldBinding(world.binding, binding))
+      throw new Error("History session is not available");
+    await world.startup;
+    signal.throwIfAborted();
+    if (!this.#current(world) || !world.session)
+      throw new Error("History session is not available");
+    return world.session.summarizeHistory(input, signal);
+  }
+
   readonly #message = (binding: WorldBinding, text: string): undefined => {
     if (this.#failure) throw new RpcError(-32004, this.#failure.message);
     const world = this.#world;

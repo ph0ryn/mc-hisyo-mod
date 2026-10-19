@@ -11,11 +11,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, expect, test, vi } from "vite-plus/test";
+import { afterAll, afterEach, expect, onTestFinished, test, vi } from "vite-plus/test";
 import type { DirectorBridge } from "../bridge/directorBridge.js";
 import { startPiRpcClient } from "../pi/piRpcClient.js";
 import { refreshPiOAuth } from "./piOAuth.js";
 import { startPiSession } from "./piSession.js";
+import { JudgmentScheduler } from "./judgmentScheduler.js";
+import { HistoryWorker } from "./historyWorker.js";
 
 const execute = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({
@@ -121,6 +123,224 @@ test("refreshes private OAuth credentials for each judgment", async () => {
   }
   expect(client.close).toHaveBeenCalledOnce();
   expect(() => readFileSync(privateAuth)).toThrow();
+});
+
+async function pausedHistoryFixture() {
+  let now = 0;
+  let privateAuth = "";
+  let tokenNumber = 0;
+  const expiry = new Map<string, number>();
+  const world = { worldId: "paused-world", playerId: "player", worldSessionId: "session" };
+  const attached = { binding: world, language: "ja_jp", paused: true, supportedEvents: [] };
+  const save = vi.fn();
+  const bridge = Object.assign(new EventEmitter(), {
+    currentWorld: attached as DirectorBridge["currentWorld"],
+    readyWorld: attached as DirectorBridge["readyWorld"],
+    isAgentReady: false,
+    handlePlayerMessages: vi.fn(() => () => {}),
+    beginRun: vi.fn(),
+    finishRun: vi.fn(),
+    invalidateRun: vi.fn(),
+    history: {
+      next: vi.fn(() => ({
+        source: {
+          after: save.mock.calls.length,
+          through: save.mock.calls.length + 1,
+          sourceSessionId: "older-session",
+          sourceCount: 1,
+          firstObservedAt: 1,
+          lastObservedAt: 1,
+          input: "observed block_broken",
+        },
+        backlog: true,
+      })),
+      save,
+    },
+    summarizeHistory: vi.fn(async () => {
+      const credentials = JSON.parse(readFileSync(privateAuth, "utf8"));
+      expect(credentials.openai.type).toBe("api_key");
+      if ((expiry.get(credentials.openai.key) ?? 0) <= now)
+        throw new Error("Expired copied access token");
+      return "paused memory";
+    }),
+  });
+  execute.mockImplementation(async () => {
+    const token = `access-${++tokenNumber}`;
+    expiry.set(token, now + 600_000);
+    return { stdout: token };
+  });
+  const client = Object.assign(new EventEmitter(), {
+    initialize: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+    run: vi.fn(),
+  });
+  vi.mocked(startPiRpcClient).mockImplementationOnce(async (launch) => {
+    privateAuth = join(launch.env.PI_CODING_AGENT_DIR!, "auth.json");
+    bridge.isAgentReady = true;
+    bridge.emit("agentReady");
+    return client as unknown as Awaited<ReturnType<typeof startPiRpcClient>>;
+  });
+  const scheduler = new JudgmentScheduler({
+    dataDirectory: mkdtempSync(join(directory, "paused-state-")),
+    bridge: bridge as unknown as DirectorBridge,
+    connection: { protocolVersion: 1, host: "127.0.0.1", port: 1, token: "unused", pid: 1 },
+    executable: "/trusted/pi",
+    bundledExtension: "/trusted/extension.mjs",
+    model: { provider: "openai", id: "gpt-6-luna", apiKey: "unused" },
+    oauthAgentDirectory: "/original/agent",
+    monotonicNow: () => now,
+  });
+  const worker = new HistoryWorker({
+    bridge: bridge as unknown as DirectorBridge,
+    summarizeHistory: (...args) => scheduler.summarizeHistory(...args),
+    now: () => now,
+  });
+  const fault = vi.fn();
+  scheduler.on("fault", fault);
+  worker.on("fault", fault);
+  const close = async () => {
+    await Promise.all([worker.close(), scheduler.close()]);
+  };
+  const releases: (() => void)[] = [];
+  onTestFinished(async () => {
+    for (const release of releases) release();
+    await close();
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return {
+    bridge,
+    world,
+    worker,
+    scheduler,
+    client,
+    detach: () => {
+      bridge.currentWorld = undefined;
+      bridge.readyWorld = undefined;
+      bridge.emit("detach", world);
+    },
+    save,
+    fault,
+    close,
+    holdRefresh: () => {
+      let persist!: (value: { stdout: string }) => void;
+      const pending = new Promise<{ stdout: string }>((resolve) => {
+        persist = resolve;
+      });
+      execute.mockReturnValueOnce(pending);
+      releases.push(() => persist({ stdout: "unused-token" }));
+      return persist;
+    },
+    at: (time: number) => {
+      now = time;
+    },
+    readAuth: () => JSON.parse(readFileSync(privateAuth, "utf8")),
+    poll: () => worker.poll(world),
+    drain: () => new Promise<void>((resolve) => setImmediate(resolve)),
+  };
+}
+
+test("independent history refreshes expired OAuth during repeated long pauses without main runs", async () => {
+  const f = await pausedHistoryFixture();
+  expect(f.readAuth().openai.key).toBe("access-1");
+  for (const hour of [1, 2]) {
+    f.at(hour * 3_600_000);
+    expect(f.poll()).toBe(true);
+    await f.drain();
+    expect(f.save).toHaveBeenCalledTimes(hour);
+    expect(f.readAuth().openai.key).toBe(`access-${hour + 1}`);
+  }
+  expect(execute).toHaveBeenCalledTimes(3);
+  expect(f.bridge.summarizeHistory).toHaveBeenCalledTimes(2);
+  expect(f.bridge.beginRun).not.toHaveBeenCalled();
+  expect(f.client.run).not.toHaveBeenCalled();
+  expect(f.fault).not.toHaveBeenCalled();
+});
+
+test("paused history auth failure faults once without dispatch, cursor advancement or fallback", async () => {
+  const f = await pausedHistoryFixture();
+  execute.mockRejectedValueOnce(new Error("private-refresh-secret"));
+  f.at(3_600_000);
+  expect(f.poll()).toBe(true);
+  await f.drain();
+  expect(f.fault).toHaveBeenCalledExactlyOnceWith(
+    new Error("Unable to refresh ChatGPT authentication through Pi."),
+  );
+  expect(f.bridge.summarizeHistory).not.toHaveBeenCalled();
+  expect(f.save).not.toHaveBeenCalled();
+  expect(f.bridge.beginRun).not.toHaveBeenCalled();
+  f.at(7_200_000);
+  expect(f.poll()).toBe(false);
+  expect(execute).toHaveBeenCalledTimes(2);
+});
+
+test.each(["shutdown", "detach"])(
+  "%s during history auth waits for native grant persistence and never dispatches a cancelled batch",
+  async (reason) => {
+    const f = await pausedHistoryFixture();
+    const persist = f.holdRefresh();
+    f.at(3_600_000);
+    expect(f.poll()).toBe(true);
+    await f.drain();
+    expect(execute).toHaveBeenCalledTimes(2);
+    if (reason === "detach") f.detach();
+    let closed = false;
+    const closing = f.close().then(() => {
+      closed = true;
+    });
+    await f.drain();
+    expect(closed).toBe(false);
+    expect(f.readAuth().openai.key).toBe("access-1");
+    persist({ stdout: "unused-token" });
+    await closing;
+    expect(() => f.readAuth()).toThrow();
+    expect(f.bridge.summarizeHistory).not.toHaveBeenCalled();
+    expect(f.save).not.toHaveBeenCalled();
+    expect(f.fault).not.toHaveBeenCalled();
+  },
+);
+
+test("history cancellation and overlap cannot bypass refresh or retire the paused owner", async () => {
+  const f = await pausedHistoryFixture();
+  const stop = new AbortController();
+  const persist = f.holdRefresh();
+  const pending = f.scheduler.summarizeHistory(f.world, "observations", stop.signal);
+  const rejected = expect(pending).rejects.toThrow(
+    "Unable to refresh ChatGPT authentication through Pi.",
+  );
+  await f.drain();
+  await expect(
+    f.scheduler.summarizeHistory(f.world, "overlap", new AbortController().signal),
+  ).rejects.toThrow("History session is not available");
+  expect(execute).toHaveBeenCalledTimes(2);
+  stop.abort();
+  persist({ stdout: "unused-token" });
+  await rejected;
+  expect(f.readAuth().openai.key).toBe("access-1");
+  expect(f.bridge.summarizeHistory).not.toHaveBeenCalled();
+  f.at(3_600_000);
+  expect(f.poll()).toBe(true);
+  await f.drain();
+  expect(f.save).toHaveBeenCalledOnce();
+  expect(f.bridge.beginRun).not.toHaveBeenCalled();
+  expect(f.client.close).not.toHaveBeenCalled();
+  expect(f.fault).not.toHaveBeenCalled();
+});
+
+test("stale world history and pre-aborted requests never touch the original credential store", async () => {
+  const f = await pausedHistoryFixture();
+  await expect(
+    f.scheduler.summarizeHistory(
+      { ...f.world, worldSessionId: "stale" },
+      "observations",
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow("History session is not available");
+  await expect(
+    f.scheduler.summarizeHistory(f.world, "observations", AbortSignal.abort()),
+  ).rejects.toThrow();
+  expect(execute).toHaveBeenCalledOnce();
+  expect(f.bridge.summarizeHistory).not.toHaveBeenCalled();
+  expect(f.save).not.toHaveBeenCalled();
 });
 
 const refresh = (signal = new AbortController().signal) =>

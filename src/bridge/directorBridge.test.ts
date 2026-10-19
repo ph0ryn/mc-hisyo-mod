@@ -323,7 +323,11 @@ test.each([false, true])(
     const response = deferred<unknown>();
     h.complete.mockImplementation(() => response.promise);
     let now = 0;
-    const worker = new HistoryWorker({ bridge: h.bridge, now: () => now });
+    const worker = new HistoryWorker({
+      bridge: h.bridge,
+      summarizeHistory: (...args) => h.bridge.summarizeHistory(...args),
+      now: () => now,
+    });
     try {
       now = 60_000;
       expect(worker.poll(h.world)).toBe(true);

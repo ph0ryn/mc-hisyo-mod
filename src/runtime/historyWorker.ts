@@ -4,10 +4,9 @@ import { sameWorldBinding, type WorldBinding } from "../protocol/bridge.js";
 import { ActivePlayClock } from "./activePlayClock.js";
 
 export interface HistoryWorkerOptions {
-  bridge: Pick<
-    DirectorBridge,
-    "on" | "off" | "readyWorld" | "isAgentReady" | "history" | "summarizeHistory"
-  >;
+  bridge: Pick<DirectorBridge, "on" | "off" | "readyWorld" | "isAgentReady" | "history">;
+  /** The trusted Pi owner refreshes credentials without acquiring a main run. */
+  summarizeHistory: DirectorBridge["summarizeHistory"];
   now?: () => number;
   wallNow?: () => number;
 }
@@ -15,6 +14,7 @@ export interface HistoryWorkerOptions {
 /** A separate elapsed-time cadence while attached, including pauses; judgments never reset it. */
 export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
   readonly #bridge: HistoryWorkerOptions["bridge"];
+  readonly #summarizeHistory: HistoryWorkerOptions["summarizeHistory"];
   readonly #now: () => number;
   readonly #wallNow: () => number;
   #clock = new ActivePlayClock();
@@ -28,6 +28,7 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
   constructor(options: HistoryWorkerOptions) {
     super();
     this.#bridge = options.bridge;
+    this.#summarizeHistory = options.summarizeHistory;
     this.#now = options.now ?? (() => performance.now());
     this.#wallNow = options.wallNow ?? Date.now;
     this.#bridge.on("attach", this.#attach);
@@ -66,11 +67,7 @@ export class HistoryWorker extends EventEmitter<{ fault: [error: Error] }> {
     const controller = new AbortController();
     const promise = (async () => {
       try {
-        const summary = await this.#bridge.summarizeHistory(
-          binding,
-          source.input,
-          controller.signal,
-        );
+        const summary = await this.#summarizeHistory(binding, source.input, controller.signal);
         if (this.#closed || epoch !== this.#epoch || controller.signal.aborted) return;
         this.#bridge.history.save(scope, source, summary, this.#wallNow());
       } catch (error) {

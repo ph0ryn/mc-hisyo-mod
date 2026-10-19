@@ -38,6 +38,7 @@ function fixture(paused = false) {
   });
   const worker = new HistoryWorker({
     bridge: bridge as unknown as HistoryWorkerOptions["bridge"],
+    summarizeHistory: bridge.summarizeHistory,
     now: () => now,
     wallNow: () => 200,
   });
