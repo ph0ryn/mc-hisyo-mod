@@ -10,6 +10,7 @@ Modはローカルsingleplayerとの接続口で、CLIを自動起動しない�
 - mainは`openai/gpt-6-luna` / `medium`。summaryは同じモデルのToolなし / `priority` / `low`。
 - world / player別のDurable SQLiteにconversation、task、受付済み入力とdispatchを保存する。
 - Mod観測、CLI事実・hook、summaryはそれぞれ独立したdomain SQLiteで管理する。
+- summaryは終了済みUnix分の最新を優先し、保存後は即再選択して過去分を新しい順に埋める。main contextは保存順ではなく元観測時刻で選ぶ。
 - 10 game Toolだけを公開し、各モデル要求前に最新game stateとsummaryを取得する。
 - pauseは新しいmain runとそのpoll時計だけを制限する。入力受付と独立summaryは続ける。
 - [トークン使用量](<tokenUsage.md>)は生のprovider counterを保存し、未報告値を`null`にする。
@@ -28,7 +29,7 @@ storage境界ではSIGKILLした子processのcommitとdead-owner lock回収を�
 | [modelAccess tests](<../src/runtime/modelAccess.test.ts>) / [credential tests](<../src/runtime/piCredentialStore.test.ts>) | fake認証とfake fetchでPATH非依存、固定catalog、lock下のrotation、取消中の保存、秘密の非露出、fallback拒否 |
 | [scheduler tests](<../src/runtime/runScheduler.test.ts>) / [composition tests](<../src/runtime/hisyoRuntime.test.ts>) | 公開依存portと実Durableのdocumentを使い、single-flight、pause、受付、終了順序を確認 |
 | [summary API tests](<../src/runtime/generateSummary.test.ts>) / [summary runtime tests](<../src/runtime/summaryRuntime.test.ts>) | Tool・履歴なしの単発要求、Durable起動待ちからの独立、切断・終了後の遅いusage記録、共有認証ownerの終了順序 |
-| [summary scheduler tests](<../src/runtime/summaryScheduler.test.ts>) / [storage tests](<../src/storage/>) | 周期、取消、cursor、ページング、保存transaction、観測とCLI事実の分離 |
+| [summary scheduler tests](<../src/runtime/summaryScheduler.test.ts>) / [summary storage tests](<../src/storage/summaryStore.test.ts>) | 終了済み1分の最新優先・逆時系列の連続処理、取消、正確な要約済みID、legacy範囲の保持、ページング・分割、観測時刻順のcontext、保存transaction |
 | [Java tests](<../mod/src/test/java/>) | Minecraft runtimeを起動せず、共有fixture、DTO、snapshot差分、schema / referenceの契約を確認 |
 
 終了・再open試験は実際のSQLite保存を確認するが、stubの解決順を実native処理の完了と同一視しない。
@@ -194,7 +195,8 @@ Toolの開始・終了とruntimeの状態を示すが、assistant本文をその
   `false`も切断中・session前後・producer捕捉限界の完全性を保証しない。
 - hook一覧はID辞書順、既定・最大8件。snapshotではない。[Tool契約](<tools.md>)を参照。
 - domain DBはそれぞれschema version 1。未対応versionを変換・削除・修復せず拒否する。
-- hook変更と活動記録は同じactivity transaction。summary保存とcursor更新も同じsummary transaction。
+  summaryの新規`source_json`は`minuteStart`・`eventIds`を対で持ち、既存の連続範囲記録は書き換えず保持する。schema移行は行わない。
+- hook変更と活動記録は同じactivity transaction。summary本文と要約済みIDも同じsummary insertで確定する。
   観測batchはevent DBで先に確定し、hook照合・監査はactivity DBで後から確定する。DBを跨ぐatomicityはない。
 - live hookの照合・監査に失敗すれば観測が保存済みでもACKせずfaultにする。
   run inboxへの容量超過は別のscheduler faultで、保存済み観測とその`stored` ACKを取り消さない。

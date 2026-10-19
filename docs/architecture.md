@@ -31,7 +31,7 @@ flowchart LR
 | [RunScheduler](<../src/runtime/runScheduler.ts>) | pauseによる新規runの制限、単一実行、ゲーム接続の寿命、入力受付 |
 | [RunInbox](<../src/runtime/runInbox.ts>) | 集約済みの保留理由とdispatch予約をconversation内のdocumentへ保存 |
 | [DurableAgent](<../src/runtime/durableAgent.ts>) | mainのHarness、conversation、10 Tool、毎要求のcontext、モデル呼出し、取消とclose |
-| [SummaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) | summaryの周期・single-flight・取消・保存と、履歴・Tool・session保存を持たない単発API要求 |
+| [SummaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) | 最新の終了済み1分を優先する連続処理、single-flight・取消・保存と、履歴・Tool・session保存を持たない単発API要求 |
 | [trackModelRequest](<../src/runtime/trackModelRequest.ts>) | runとsummaryで共有するusage計測・記録と、provider完了までの要求所有権 |
 | [BridgeServer](<../src/bridge/bridgeServer.ts>) | game TCP認証、session / run binding、Toolの実処理、domain記録と結果検証 |
 | [modelAccess](<../src/runtime/modelAccess.ts>) | native OpenAI providerと固定モデル、選択した認証源だけを使うModels |
@@ -45,7 +45,7 @@ SDKのregistryへ登録するのは専用promptと[10 game Tool](<tools.md>)だ�
 
 モデルはnative catalogの`openai/gpt-6-luna`、主処理は`medium`固定とする。
 独立summaryは同じモデルへToolなし、`reasoningEffort: low`、`serviceTier: priority`で要求する。
-主処理とsummaryのsingle-flight・時計・取消は別であり、summaryはpause中も進める。
+主処理とsummaryはsingle-flight・取消を別に管理する。summaryは終了済みUnix分を最新優先で連続処理し、pause中も進める。
 モデルやtierの自動fallbackは行わない。
 
 ## 永続化の分担
@@ -58,7 +58,7 @@ CLIはゲーム未接続でも待機できるが、主処理のモデル要求�
 | --- | --- |
 | Modの観測 | `eventLog.sqlite`。 [EventLog](<../src/storage/eventLog.ts>) |
 | CLI事実とhook | `activityLog.sqlite`。 [ActivityLog](<../src/storage/activityLog.ts>) / [HookStore](<../src/storage/hookStore.ts>) |
-| 観測のsummaryとcursor | `summary.sqlite`。 [SummaryStore](<../src/storage/summaryStore.ts>) |
+| 観測のsummaryと要約済みID | `summary.sqlite`。 [SummaryStore](<../src/storage/summaryStore.ts>) |
 | conversation、実行task、run inbox | `durable/<scope hash>/conversation.sqlite`。 [durableStorage](<../src/runtime/durableStorage.ts>)とHarness |
 
 scope hashは`JSON.stringify([worldId, playerId])`のSHA-256。
@@ -67,6 +67,7 @@ DurableのSQLiteは新しい保存形式・場所であり、既存のPi convers
 [events](<../src/events/>)はイベントの意味・schema・summary入力加工を、[storage](<../src/storage/>)はdomain SQL永続化を持つ。
 Durableのtask保存をevent logやactivity logの代用にせず、domain記録のためにSDK内部tableへ直接SQLを書かない。
 summaryはevent logだけから派生し、conversationの短縮やactivity logの要約ではない。
+新しい1分batchの`source_json`は`minuteStart`と正確な`eventIds`を対で保持する。既存の`(after, through]`範囲記録はそのまま有効とし、DB schema version 1も変更・移行しない。
 
 ## durabilityが保証する範囲
 

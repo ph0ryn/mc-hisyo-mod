@@ -33,9 +33,11 @@ CLIはrun requestの理由を実行依頼前にactivity logへ記録するが、
 
 ## summary
 
-通常モードでは、session接続中の経過1分ごとに[summaryScheduler](<../src/runtime/summaryScheduler.ts>)が未要約のevent logを古い順に処理する。pause中の時間も数える。
+通常モードでは、[summaryScheduler](<../src/runtime/summaryScheduler.ts>)がevent logをUnix時刻の分境界で区切り、終了済みの1分間`[start, start + 60_000)`を対象にする。
+未要約の観測がある最も新しい分を優先し、保存直後に現在時刻で選び直す。最新分が済んでいれば、過去の未要約分を新しい順に遡る。
+生成中に新しい分が確定しても中断せず、完了・保存後の選択で優先する。同時実行は1本だけである。
 CLIと同じプロセス内のschedulerであり、別worker threadや別CLIプロセスではない。
-runとは独立して時計・取消・single-flightを管理し、[generateSummary](<../src/runtime/generateSummary.ts>)から共有のModelsへ単発のAPI要求を行う。
+runとは独立して取消・single-flightを管理し、[generateSummary](<../src/runtime/generateSummary.ts>)から共有のModelsへ単発のAPI要求を行う。
 DurableAgentやRunSchedulerを経由せず、mainの起動完了・conversation・Durable保存領域に依存しない。
 渡すcontextは固定の要約指示と今回の対象ログだけで、Tool・会話履歴・前回のsummaryを含めない。
 summary用の会話sessionは作成・保存・復元せず、prompt cacheも`cacheRetention: none`とする。
@@ -52,22 +54,27 @@ Fastは`serviceTier: priority`で要求する。これは要求値であり、�
   `container_opened`のdataは`menuType`だけを残し、イベント共通の`@`位置注記は維持する。
   周辺sampleの`not FOV/lighting/full sight, empty != absence`注記は付けない。
   `e`番号は入力ごとの元行順で1から振り直す。保存ID・session・時刻はメタデータに維持し、session・観測時刻範囲は入力へ書かない。
-- 1回の対象は同じsource sessionの連続prefix、最大500行。system指示と入力は合計12,000 UTF-8 bytes以内。
+- 1回の対象は同じ1分間・source sessionの未要約観測を到着順に最大500行。system指示と入力は合計12,000 UTF-8 bytes以内。
+  sessionが複数ある分や件数・入力上限を超える分は複数の要求に分け、毎回最新分を選び直す。区間外の到着行をまたいで操作を集約しない。
   応答の形式は指定せず、上限は1,200 bytesとする。完全な記録ではなく、詳細はevent logを検索する。
 - [summaryStore](<../src/storage/summaryStore.ts>)はevent logの`eventLog.sqlite`とは別の`summary.sqlite`にある`summaries`へ保存する。
   world / playerごとに元のID範囲・session・時刻・加工入力・summary・モデル・要求tierを保持する。
-  正常なsummaryの保存とcursorの進行はsummary DB内の同一transaction。event logやhookは変更しない。
+  新規の`source_json`は`minuteStart`と正確な`eventIds`を対で持ち、到着順と観測時刻が異なっても他の分の観測を要約済みにしない。
+  両fieldを持たない既存記録は従来の`(after, through]`全体を要約済みとして扱い、書き換えない。DB schemaはversion 1のままで、移行は行わない。
+  summary本文と要約済みIDは同じinsertで確定し、重複・重なりを拒否する。event logやhookは変更しない。
   入力元はMod由来の観測だけ。プレイヤー入力、hisyoのHUD発言、hook変更、run要求などのCLI事実は`activityLog.sqlite`へ保存し、summaryへ混ぜない。
-- pause中も同じ周期で新しいsummaryを開始し、進行中のsummaryも完了・保存まで続ける。runのpause制御とは独立する。
+- pause中も選択・生成・完了・保存を続ける。runのpause制御とは独立する。
+  仕事がなければ待機し、runtimeの1秒ごとのpollで再確認する。空・要約済み・終了前の分はAPIへ送らない。
   ChatGPT OAuth利用時は各要求のSDK認証解決が元の共有storeで必要なrefreshを行う。認証のためにmain runのslotを取らない。
   退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加summaryもしない。
-  空の差分では呼び出さず、重なった周期を後から連打しない。取消・失敗時はcursorを進めず、失敗は通常のruntime faultとして扱う。
-- 再接続後も同じworld / playerのcursorから継続し、以前のsessionも古い順に読む。
-  件数・入力上限を超える量が続けば遅れるため、最新game stateと同一視しない。
+  取消・失敗時は要約済み範囲を増やさず、失敗は通常のruntime faultとして扱う。遅いusageの帰属と完了待ちは維持する。
+- 再接続後も同じworld / playerの要約済み範囲を使い、以前のsessionを含む未要約分を最新優先で選び直す。
+  生成中の完了待ちや入力の分割で遅れることがあるため、最新game stateと同一視しない。
 
-run内では毎回、最新4件・最大6,000 bytesの保存済みsummaryを取得し、game stateと同じ一時的な背景情報へ入れる。
+run内では毎回、元観測時刻が新しい4件・最大6,000 bytesの保存済みsummaryを古いものから並べ、game stateと同じ一時的な背景情報へ入れる。
+保存順では選ばず、後から作った過去分が最新分を押し出すことはない。
 以前のsessionを含み得る不確かな過去情報であり、新しい発言要求や指示ではない。現在の状態は最新game stateを優先する。
-未要約の新しい観測や、表示範囲外の古いsummaryがあればその旨を添える。summary自体を次のsummary入力へ再帰的に混ぜない。
+未要約の観測や表示範囲外の古いsummaryがあればその旨を添える。summary自体を次のsummary入力へ再帰的に混ぜない。
 
 ## Toolで参照するevent log
 

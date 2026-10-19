@@ -48,13 +48,21 @@ hookを含むrunが`settled`になれば保留pollだけを消し、その時点
 無言・明示取消を含むが`not_started`ではresetしない。保留チャット・hookは消さない。
 時計そのものは永続化せず、host再起動後も以前の経過秒を復元するわけではない。
 
+## 独立summaryの処理順
+
+[SummaryScheduler](<../src/runtime/summaryScheduler.ts>)はactive-play時計を使わず、Unix時刻で終了した1分間`[start, start + 60_000)`だけを対象にする。
+未要約観測のある最新分を優先し、各保存直後に現在時刻で選び直す。次の分が溜まるまでは、過去の未要約分を新しい順に遡る。
+同時実行は1本で、生成中の分を新しい分のために中断しない。空・要約済み・まだ終了していない分はAPIへ送らない。
+仕事がなくなれば待機し、runtimeの1秒ごとのpollで再確認する。1分ごとに1要求へ制限せず、保存後の続行にtimerを待たない。
+入力上限・source sessionで同じ分を分割する場合と要約済みIDの管理は、[summaryの契約](<context.md#summary>)を参照。
+
 ## pauseと取消
 
 pauseは**次のmain runのdispatch**とpoll時計だけを止める。
 接続・Durable storageの起動・入力受付・game state取得は止めない。
 既にdispatchしたrunは、native bind準備中にpauseされても、その理由だけでは取消さない。
 進行中のモデル・Tool・完了を待ち、解除後もslotを重ねない。
-[独立summary](<context.md#summary>)はpause中も経過時間を数え、新規開始・完了・保存を続ける。
+[独立summary](<context.md#summary>)はpause中も最新の終了済み1分を優先し、過去分の処理・完了・保存を続ける。
 
 明示的な退出・切断・取消は、先にrun bindingをfenceし、SDKへabortを要求する。
 abort signalを出しただけでsettledとみなさず、SDKと進行中native処理が終了するまで所有権を保つ。

@@ -50,12 +50,14 @@ hisyoの主処理を一回動かすまとまりを **run** と呼ぶ。
 ### summarize
 
 event logからsummaryを作る処理は **summarize**。
-summary schedulerは同じCLI process内で周期・single-flight・取消を管理する部品で、別workerではない。
+summary schedulerは同じCLI process内で処理順・single-flight・取消を管理する部品で、別workerではない。
+Unix時刻の終了済み1分間を単位に、未要約観測のある最新分から処理する。保存後に再選択し、手隙では過去へ新しい順に遡る。
+summaryの「最新」は保存順ではなく元観測の時刻を指す。
 summary inputの準備は決定的な選択・整形であり、モデル生成そのものではない。
 
 summarizeはDurableAgentを経由せず、mainの起動・conversation・保存領域に依存しない単発API要求とする。
 固定指示と対象ログだけをModelsへ渡し、Tool・会話履歴・summary用sessionは持たない。
-pause中も周期・進行中処理を続け、退出・終了時は結果を無効にして取消す。
+新しい分のために生成中の分を中断せず、pause中も選択・処理を続ける。退出・終了時は結果を無効にして取消す。
 認証はmainと同じSDK ownerとcredential storeを使う。
 
 ## 範囲と寿命
@@ -86,7 +88,7 @@ TypeScriptのfileはcamelCase、型・classはPascalCase、関数・変数はcam
 | Durable conversation・Tool・context | [durableAgent](<../src/runtime/durableAgent.ts>) |
 | scope別SQLiteと所有者lock | [durableStorage](<../src/runtime/durableStorage.ts>) |
 | 入力集約・永続admission・実行制御 | [runQueue](<../src/runtime/runQueue.ts>) / [runInbox](<../src/runtime/runInbox.ts>) / [runScheduler](<../src/runtime/runScheduler.ts>) |
-| summary周期・単発生成・保存・入力加工 | [summaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) / [summaryStore](<../src/storage/summaryStore.ts>) / [summaryInput](<../src/events/summaryInput.ts>) |
+| summary処理順・単発生成・保存・入力加工 | [summaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) / [summaryStore](<../src/storage/summaryStore.ts>) / [summaryInput](<../src/events/summaryInput.ts>) |
 | run / summary共通のusage記録 | [trackModelRequest](<../src/runtime/trackModelRequest.ts>) |
 | event / activity検索 | [logSearch](<../src/storage/logSearch.ts>) |
 | CLI事実の定義 | [activity](<../src/events/activity.ts>) |
