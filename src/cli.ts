@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { once } from "node:events";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { cliErrorMessage, parseOptions, usage } from "./cliOptions.js";
 import { writeCliLog } from "./cliLog.js";
 import type { BridgeRuntime } from "./runtime/bridgeRuntime.js";
@@ -30,7 +29,6 @@ async function main(): Promise<void> {
     runtime = await startHisyoRuntime({
       options,
       homeDirectory: homedir(),
-      bundledExtension: fileURLToPath(new URL("./piExtension.mjs", import.meta.url)),
       signal: stop.signal,
       onFault,
       onLog: writeCliLog,

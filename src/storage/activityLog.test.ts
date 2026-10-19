@@ -1,14 +1,6 @@
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
-import { EventEmitter } from "node:events";
-import { expect, test, vi } from "vite-plus/test";
-import type { BridgeServer } from "../bridge/bridgeServer.js";
-import { maxPiFrameBytes } from "../pi/piFraming.js";
-import { defaultMaxFrameBytes } from "../transport/jsonLines.js";
-import { RunScheduler } from "../runtime/runScheduler.js";
+import { expect, test } from "vite-plus/test";
 import type { RunRequest } from "../runtime/runQueue.js";
-import { startPiProcess } from "../runtime/piProcess.js";
-
-vi.mock("../runtime/piProcess.js", () => ({ startPiProcess: vi.fn() }));
 import {
   activity,
   displayedActivity,
@@ -459,7 +451,7 @@ test("byte-bounded escaped-text pages resume without loss or duplication", () =>
   expect(seen).toEqual(Array.from({ length: 24 }, (_, i) => i + 1));
 });
 
-test("quote-heavy activity log pages fit TCP and native Pi tool results across cursors", () => {
+test("quote-heavy in-process activity tool pages obey their own byte budget across cursors", () => {
   const quoted = { ...input, data: { text: '"'.repeat(16_000) } };
   const rows = Array.from({ length: 32 }, (_, i) => row(i + 1, quoted));
   const seen: number[] = [];
@@ -469,19 +461,7 @@ test("quote-heavy activity log pages fit TCP and native Pi tool results across c
     const page = f.log.search({ worldId: "world", playerId: "player" }, { after, through: 32 });
     expect(page.through).toBe(32);
     expect(page.events.every((entry) => entry.activity.data.text === quoted.data.text)).toBe(true);
-    expect(
-      Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: "9007199254740991", result: page })),
-    ).toBeLessThan(defaultMaxFrameBytes);
-    // Existing extension result and installed Pi's native tool_execution_end emitter.
-    const toolEnd = {
-      type: "tool_execution_end",
-      toolCallId: "activity log-call",
-      toolName: "search_events",
-      result: { content: [{ type: "text", text: JSON.stringify(page) }], details: page },
-      isError: false,
-      durationMs: 1,
-    };
-    expect(Buffer.byteLength(JSON.stringify(toolEnd))).toBeLessThanOrEqual(maxPiFrameBytes);
+    expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(eventPageBytes);
     seen.push(...page.events.map((entry) => entry.id));
     if (page.nextCursor === undefined) break;
     expect(page.nextCursor).toBeGreaterThan(after);
@@ -585,52 +565,6 @@ test("only valid bound displayed:true ACKs become exact HUD facts", () => {
     data: { runId: "old-run", text: request.text },
   });
   expect(() => validateActivity({ ...input, position: [0, 0, 0] })).toThrow();
-});
-
-test("actual scheduler stores request reasons before run and stops on storage failure", async () => {
-  for (const failRunAt of [0, 1]) {
-    const f = log(port([], failRunAt));
-    const order: string[] = [];
-    const bridge = Object.assign(new EventEmitter(), {
-      readySession: { binding, supportedEvents: ["block_broken"], paused: false },
-      handlePlayerMessages: () => () => {},
-    });
-    bridge.on("runRequested", (batch: RunRequest) => {
-      f.log.appendActivities(runRequestActivities(batch, 100, "request"));
-      order.push("activity log");
-    });
-    const session = Object.assign(new EventEmitter(), {
-      run: vi.fn(async () => {
-        order.push("run");
-        return { status: "settled" };
-      }),
-      close: vi.fn(async () => {}),
-    });
-    vi.mocked(startPiProcess).mockResolvedValue(
-      session as unknown as Awaited<ReturnType<typeof startPiProcess>>,
-    );
-    const scheduler = new RunScheduler({
-      bridge: bridge as unknown as BridgeServer,
-      dataDirectory: "/unused",
-      monotonicNow: () => 0,
-      executable: "never-launched",
-      bundledExtension: "/unused/piExtension.mjs",
-      connection: { protocolVersion: 2, host: "127.0.0.1", port: 1, token: "unused", pid: 1 },
-      model: { provider: "test-provider", id: "test-model", apiKey: "unused" },
-    });
-    const faults: Error[] = [];
-    scheduler.on("fault", (error) => faults.push(error));
-    try {
-      // Drain finite promise continuations, with no timers or elapsed-time assertion.
-      for (let i = 0; i < 20; i++) await Promise.resolve();
-      expect(order).toEqual(failRunAt ? [] : ["activity log", "run"]);
-      expect(faults).toHaveLength(failRunAt ? 1 : 0);
-      expect(f.transactions).toEqual(["BEGIN IMMEDIATE", failRunAt ? "ROLLBACK" : "COMMIT"]);
-      expect(JSON.parse(f.calls[0]!.args[5] as string).event).toBe("hisyo.run_requested_initial");
-    } finally {
-      await scheduler.close();
-    }
-  }
 });
 
 test("lifecycle activity log preserves initial false reports and FIFO facts without native event fiction", () => {

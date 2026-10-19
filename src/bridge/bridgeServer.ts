@@ -16,7 +16,6 @@ import {
 import type { RunRequest } from "../runtime/runQueue.js";
 import type { Hook, HookStore } from "../storage/hookStore.js";
 import {
-  EmptySchema,
   EventSearchRequestSchema,
   GameAttachSchema,
   GameEventsSchema,
@@ -40,17 +39,11 @@ import {
   type RunBinding,
   type SessionBinding,
 } from "../protocol/bridge.js";
+import { hisyoTools } from "../protocol/hisyoTools.js";
 import { type GameEvent } from "../protocol/gameEvent.js";
 import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import type { SummaryStore } from "../storage/summaryStore.js";
-import { TokenUsageRequestSchema } from "../protocol/tokenUsage.js";
-import type { SummaryRequest } from "../protocol/summary.js";
-import {
-  SummaryRequestSchema,
-  SummaryResultSchema,
-  summaryInputBytes,
-  validateSummaryText,
-} from "../protocol/summary.js";
+import { TokenUsageRequestSchema, type TokenUsageData } from "../protocol/tokenUsage.js";
 
 export interface AttachedSession {
   binding: SessionBinding;
@@ -58,7 +51,13 @@ export interface AttachedSession {
   supportedEvents: readonly string[];
   paused: boolean;
 }
-type PlayerMessageHandler = (binding: SessionBinding, text: string) => undefined;
+type PlayerMessageHandler = (binding: SessionBinding, text: string) => Promise<void> | void;
+type ObservationHandler = (stored: StoredEvent, hooks: Hook[]) => Promise<void> | void;
+type ModelRequestSource = TokenUsageData["source"];
+interface ModelRequest {
+  binding: SessionBinding;
+  requestId: string;
+}
 interface Connection {
   peer: RpcPeer;
   role: BridgeRole | undefined;
@@ -73,12 +72,11 @@ interface BridgeOptions {
   helloTimeoutMs?: number;
 }
 
-/** Owns authorization and binding, never model scheduling or Minecraft objects. */
+/** Trusted in-process host API and authenticated game wire. Never schedules or runs models. */
 export class BridgeServer extends EventEmitter<{
   attach: [session: AttachedSession];
   detach: [binding: SessionBinding];
   status: [session: AttachedSession];
-  agentReady: [];
   runInvalidated: [binding: RunBinding, reason: string];
   observation: [stored: StoredEvent, hooks: Hook[]];
   runRequested: [batch: RunRequest];
@@ -86,19 +84,17 @@ export class BridgeServer extends EventEmitter<{
   fault: [error: Error];
 }> {
   readonly summaries: SummaryStore;
-  #summaryRequest: SummaryRequest | undefined;
   readonly #options: BridgeOptions;
   readonly #server: ReturnType<typeof createServer>;
   readonly #connections = new Set<Connection>();
+  readonly #modelRequests = new Map<ModelRequestSource, ModelRequest>();
   #game: Connection | undefined;
   #availability: { game: Connection; promise: Promise<void>; resolve: () => void } | undefined;
-  #agent: Connection | undefined;
   #session: AttachedSession | undefined;
   #playerMessageIntake: { accept: PlayerMessageHandler } | undefined;
-  // Invalidated runs still occupy the single-flight slot until the owner observes settled.
-  #run:
-    | { binding: RunBinding; valid: boolean; agentBindingSent: boolean; wake: () => void }
-    | undefined;
+  #observationIntake: { accept: ObservationHandler } | undefined;
+  // Invalidated runs retain the single-flight slot until their owner observes settlement.
+  #run: { binding: RunBinding; valid: boolean; wake: () => void } | undefined;
   #closing = false;
   #storageFailed = false;
   #starting: Promise<unknown[]> | undefined;
@@ -150,50 +146,191 @@ export class BridgeServer extends EventEmitter<{
       : undefined;
   }
 
-  get isAgentReady(): boolean {
-    return this.#agent?.ready === true;
+  /** Scope usage independently from result validity, retaining ownership through cancellation. */
+  beginModelRequest(binding: SessionBinding, source: ModelRequestSource, requestId: string): void {
+    this.#requireSession(binding);
+    if (!this.#game?.ready || !Check(TokenUsageRequestSchema.properties.requestId, requestId))
+      throw new RpcError(-32001, "No ready session for model request");
+    if (source !== "run" && source !== "summary") throw new Error("Invalid model request source");
+    if (this.#modelRequests.has(source)) throw new Error("Previous model request has not settled");
+    if (source === "run") {
+      const run = this.#run;
+      if (!run || requestId !== run.binding.runId || !sameSessionBinding(binding, run.binding))
+        throw new RpcError(-32001, "No matching run for model request");
+      this.#requireRun(run.binding);
+    }
+    const { worldId, playerId, sessionId } = binding;
+    this.#modelRequests.set(source, { binding: { worldId, playerId, sessionId }, requestId });
   }
 
-  /** Independent, session-bound completion. No main run or tool ownership is acquired. */
-  async summarize(binding: SessionBinding, input: string, signal: AbortSignal): Promise<string> {
-    signal.throwIfAborted();
-    this.#requireSession(binding);
-    if (!this.#agent?.ready || this.#summaryRequest)
-      throw new Error("Summarization is not available");
-    const agent = this.#agent;
-    const request = { ...binding, requestId: randomUUID(), input };
-    if (!Check(SummaryRequestSchema, request) || Buffer.byteLength(input) > summaryInputBytes)
-      throw new Error("Invalid summary request");
-    this.#summaryRequest = request;
-    const cancel = () => {
-      try {
-        agent.peer.notify("hisyo.summary.cancel", { ...binding, requestId: request.requestId });
-      } catch {
-        agent.peer.close(new Error("Summary cancellation transport failed"));
+  finishModelRequest(
+    binding: SessionBinding,
+    source: ModelRequestSource,
+    requestId: string,
+  ): boolean {
+    const request = this.#modelRequests.get(source);
+    if (
+      !request ||
+      request.requestId !== requestId ||
+      !sameSessionBinding(request.binding, binding)
+    )
+      return false;
+    return this.#modelRequests.delete(source);
+  }
+
+  recordUsage(params: unknown): { recorded: true } {
+    if (!Check(TokenUsageRequestSchema, params)) throw new RpcError(-32602, "Invalid token usage");
+    const request = this.#modelRequests.get(params.source);
+    // Detached/cancelled output is discarded; its metering still belongs to the original scope.
+    if (
+      this.#closing ||
+      this.#storageFailed ||
+      !request ||
+      !sameSessionBinding(request.binding, params) ||
+      request.requestId !== params.requestId
+    )
+      throw new RpcError(-32001, "No matching model request for token usage");
+    const { worldId, playerId, sessionId, ...data } = params;
+    this.#storage(() =>
+      this.#options.activityLog.appendActivity(
+        activity({ worldId, playerId, sessionId }, "hisyo.token_usage", data),
+      ),
+    );
+    return { recorded: true };
+  }
+
+  summaryContext(binding: RunBinding): string {
+    this.#parameters(RunBindingSchema, binding);
+    const scope = this.#requireRun(binding);
+    return this.#storage(() => this.summaries.context(scope));
+  }
+
+  async getGameState(
+    binding: RunBinding,
+    signal?: AbortSignal,
+  ): Promise<Static<typeof GameStateResultSchema>["state"]> {
+    const result = await this.executeTool(binding, "get_game_state", { query: {} }, signal);
+    return (result as Static<typeof GameStateResultSchema>).state;
+  }
+
+  /** Only the ten canonical game tools cross this trusted boundary; no agent TCP role exists. */
+  async executeTool(
+    binding: RunBinding,
+    name: string,
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    signal?.throwIfAborted();
+    this.#parameters(RunBindingSchema, binding);
+    this.#requireRun(binding);
+    const tool = hisyoTools.find((candidate) => candidate.name === name);
+    if (!tool || !Check(tool.args, args))
+      throw new RpcError(-32602, "Invalid game tool or arguments");
+    const input = args as Record<string, unknown>;
+    const params = { ...binding, ...input };
+    switch (tool.method) {
+      case "game.state.get":
+        return this.#forward(
+          tool.method,
+          this.#parameters(GameStateRequestSchema, params),
+          GameStateResultSchema,
+          signal,
+        );
+      case "game.message.send": {
+        const request = this.#parameters(SendMessageSchema, params);
+        if (!request.text.trim()) throw new RpcError(-32602, "AI message is blank");
+        return this.#forward(tool.method, request, SendMessageResultSchema, signal);
       }
-    };
-    signal.addEventListener("abort", cancel, { once: true });
-    try {
-      // The normal transport deadline is only 5s. Keep it for tools, not model completions.
-      const result = await agent.peer.call("hisyo.summary.create", request, 300_000);
-      if (
-        !Check(SummaryResultSchema, result) ||
-        !sameSessionBinding(result, binding) ||
-        result.requestId !== request.requestId
-      )
-        throw new Error("Invalid summary result or binding");
-      signal.throwIfAborted();
-      this.#requireSession(binding);
-      if (agent !== this.#agent || result.cancelled) throw new Error("Summary became stale");
-      validateSummaryText(result.summary);
-      return result.summary;
-    } finally {
-      signal.removeEventListener("abort", cancel);
-      this.#summaryRequest = undefined;
+      case "hisyo.hooks.add": {
+        const request = this.#parameters(HookAddSchema, params);
+        const scope = this.#requireRun(request);
+        this.#requireEvent(request.event);
+        const { event, filter, instruction } = request;
+        if (!instruction.trim()) throw new RpcError(-32602, "Hook instruction is blank");
+        this.#options.hooks.catalog.validateFilter(event, filter ?? {});
+        const hookInput =
+          filter === undefined ? { event, instruction } : { event, filter, instruction };
+        return this.#storage(() =>
+          this.#options.activityLog.atomic(() => {
+            const hook = this.#options.hooks.add(scope, hookInput);
+            this.#options.activityLog.appendActivity(
+              activity(request, "hisyo.hook_added", {
+                runId: request.runId,
+                hookId: hook.id,
+                event: hook.event,
+                filter: hook.filter,
+                instruction: hook.instruction,
+              }),
+            );
+            return hook;
+          }),
+        );
+      }
+      case "hisyo.hooks.remove": {
+        const request = this.#parameters(HookRemoveSchema, params);
+        const scope = this.#requireRun(request);
+        return this.#storage(() =>
+          this.#options.activityLog.atomic(() => {
+            const removed = this.#options.hooks.remove(scope, request.id);
+            if (removed)
+              this.#options.activityLog.appendActivity(
+                activity(request, "hisyo.hook_removed", {
+                  runId: request.runId,
+                  hookId: request.id,
+                }),
+              );
+            return { removed };
+          }),
+        );
+      }
+      case "hisyo.hooks.list": {
+        const request = this.#parameters(HookListRequestSchema, { ...binding, query: input });
+        const scope = this.#requireRun(request);
+        return this.#storage(() => this.#options.hooks.list(scope, request.query));
+      }
+      case "hisyo.events.search": {
+        const request = this.#parameters(EventSearchRequestSchema, params);
+        const scope = this.#requireRun(request);
+        const { event, filter } = request.query;
+        if (filter !== undefined && event === undefined)
+          throw new RpcError(-32602, "A filter requires an event");
+        if (event !== undefined)
+          (isActivity(event) ? activityCatalog : this.#options.eventLog.catalog).validateFilter(
+            event,
+            filter ?? {},
+          );
+        const log =
+          event !== undefined && isActivity(event)
+            ? this.#options.activityLog
+            : this.#options.eventLog;
+        return this.#storage(() => log.search(scope, request.query));
+      }
+      case "hisyo.events.list":
+        return {
+          events: [
+            ...this.#options.eventLog.catalog
+              .list()
+              .filter((definition) => this.#session!.supportedEvents.includes(definition.name))
+              .map((definition) => ({ ...definition, origin: "game", hookable: true })),
+            ...activityCatalog
+              .list()
+              .map((definition) => ({ ...definition, origin: "cli", hookable: false })),
+          ],
+        };
+      default: {
+        const reference = referenceTools.find((candidate) => candidate.method === tool.method);
+        if (!reference) throw new Error("Unknown game tool implementation");
+        return this.#forward(
+          reference.method,
+          this.#parameters(reference.request, params),
+          reference.result,
+          signal,
+        );
+      }
     }
   }
 
-  /** Retain input synchronously before returning, or throw RpcError to refuse it. */
+  /** Completion means the owner has retained the input, not merely scheduled a later write. */
   handlePlayerMessages(accept: PlayerMessageHandler): () => void {
     if (this.#closing) throw new Error("Bridge closed");
     if (this.#playerMessageIntake) throw new Error("Player-message intake already registered");
@@ -201,6 +338,17 @@ export class BridgeServer extends EventEmitter<{
     this.#playerMessageIntake = intake;
     return () => {
       if (this.#playerMessageIntake === intake) this.#playerMessageIntake = undefined;
+    };
+  }
+
+  /** Persisted observations enter the scheduler once; the observation event is diagnostic only. */
+  handleObservations(accept: ObservationHandler): () => void {
+    if (this.#closing) throw new Error("Bridge closed");
+    if (this.#observationIntake) throw new Error("Observation intake already registered");
+    const intake = { accept };
+    this.#observationIntake = intake;
+    return () => {
+      if (this.#observationIntake === intake) this.#observationIntake = undefined;
     };
   }
 
@@ -212,7 +360,7 @@ export class BridgeServer extends EventEmitter<{
     this.#closing = true;
     this.#resolveAvailability();
     this.#playerMessageIntake = undefined;
-    // listen() retains its own startup error; disposal must wait for either outcome.
+    this.#observationIntake = undefined;
     if (this.#starting) await Promise.allSettled([this.#starting]);
     for (const connection of this.#connections)
       connection.peer.close(new Error("Bridge shutting down"));
@@ -223,20 +371,17 @@ export class BridgeServer extends EventEmitter<{
   }
 
   async beginRun(): Promise<RunBinding> {
-    // The scheduler alone gates dispatch on pause. An admitted run may bind after
-    // asynchronous preparation, even if a newer pause report has since arrived.
+    // Scheduler alone gates pause admission; previously admitted preparation may finish paused.
     if (this.#run) throw new Error("Previous run has not settled");
     const session = this.#session;
     const game = this.#game;
-    const agent = this.#agent;
-    if (this.#closing || this.#storageFailed || !session || !game?.ready || !agent?.ready)
-      throw new Error("Game and agent are not ready for run");
+    if (this.#closing || this.#storageFailed || !session || !game?.ready)
+      throw new Error("Game is not ready for run");
     const binding = Object.freeze({ ...session.binding, runId: randomUUID() });
-    const run = { binding, valid: true, agentBindingSent: false, wake: () => {} };
+    const run = { binding, valid: true, wake: () => {} };
     this.#run = run;
     try {
-      // Keep intake/clock factual while reserving the existing slot, but do not bind natively
-      // until this game's authoritative status resolves its withdrawn-run uncertainty.
+      // A native withdrawal creates uncertainty, not a fabricated pause fact.
       if (this.#availability?.game === game) {
         const available = this.#availability.promise;
         await new Promise<void>((resolve) => {
@@ -245,16 +390,13 @@ export class BridgeServer extends EventEmitter<{
         });
       }
       this.#requireRun(binding);
-      await this.#bind(game.peer, "game.run.bind", binding);
-      this.#requireRun(binding);
-      run.agentBindingSent = true;
-      await this.#bind(agent.peer, "hisyo.run.bind", binding);
+      await this.#bind(game.peer, binding);
       this.#requireRun(binding);
       return binding;
     } catch (error) {
       if (this.#run === run) {
         this.invalidateRun("binding_failed");
-        this.#run = undefined; // No prompt was sent, so there is no run to await.
+        this.#run = undefined; // No model work was admitted for this failed binding.
       }
       throw error;
     }
@@ -264,6 +406,7 @@ export class BridgeServer extends EventEmitter<{
     const run = this.#run;
     if (!run || !sameRunBinding(run.binding, binding)) return false;
     if (run.valid) this.#clearGameRun(binding);
+    this.finishModelRequest(binding, "run", binding.runId);
     this.#run = undefined;
     return true;
   }
@@ -273,16 +416,8 @@ export class BridgeServer extends EventEmitter<{
     if (!run?.valid) return;
     run.valid = false;
     run.wake();
-    // Same authenticated pipe as state replies: cancellation precedes any late stale error.
-    const peer = this.#agent?.peer;
-    if (run.agentBindingSent && peer && !peer.isClosed) {
-      try {
-        peer.notify("hisyo.run.invalidate", run.binding);
-      } catch (error) {
-        peer.close(error instanceof Error ? error : new Error(String(error)));
-      }
-    }
     this.#clearGameRun(run.binding);
+    // Synchronous event delivery fences the host before a pending native stale rejection returns.
     this.emit("runInvalidated", run.binding, reason);
   }
 
@@ -296,8 +431,8 @@ export class BridgeServer extends EventEmitter<{
     }
   }
 
-  async #bind(peer: RpcPeer, method: string, binding: RunBinding): Promise<void> {
-    const result = await peer.call(method, binding);
+  async #bind(peer: RpcPeer, binding: RunBinding): Promise<void> {
+    const result = await peer.call("game.run.bind", binding);
     if (!Check(RunBindingSchema, result) || !sameRunBinding(result, binding)) {
       const error = new Error("Invalid run binding acknowledgment");
       peer.close(error);
@@ -327,7 +462,7 @@ export class BridgeServer extends EventEmitter<{
     )
       throw new RpcError(staleRunErrorCode, "Hisyo run invalidated", run.binding);
     const session = this.#requireSession(binding);
-    if (!this.#run?.valid || !sameRunBinding(this.#run.binding, binding))
+    if (!run?.valid || !sameRunBinding(run.binding, binding))
       throw new RpcError(-32001, "Inactive or stale execution binding");
     return { worldId: session.binding.worldId, playerId: session.binding.playerId };
   }
@@ -351,10 +486,6 @@ export class BridgeServer extends EventEmitter<{
         this.#detach(this.#closing ? "bridge_shutdown" : "link_closed");
         this.#game = undefined;
       }
-      if (this.#agent === connection) {
-        this.#agent = undefined;
-        this.invalidateRun("agent_disconnected");
-      }
       this.emit("peerClosed", connection.role, reason);
     });
     peer.handle("bridge.hello", (params) => {
@@ -366,45 +497,13 @@ export class BridgeServer extends EventEmitter<{
         peer.close(new Error("Bridge authentication failed"));
         throw new RpcError(-32010, "Authentication failed");
       }
-      if (params.role === "game" ? this.#game : this.#agent)
-        throw new RpcError(-32002, "Bridge role already connected");
+      if (this.#game) throw new RpcError(-32002, "Bridge role already connected");
       connection.role = params.role;
-      if (params.role === "game") this.#game = connection;
-      else this.#agent = connection;
+      this.#game = connection;
       clearTimeout(timer);
       return { protocolVersion, role: params.role };
     });
-    this.#register(connection, "hisyo.usage.record", "agent", TokenUsageRequestSchema, (params) => {
-      const owned = params.source === "run" ? this.#run?.binding : this.#summaryRequest;
-      const requestId =
-        params.source === "run" ? this.#run?.binding.runId : this.#summaryRequest?.requestId;
-      // Cancellation discards output, not usage. Retain the original scope until its slot settles.
-      if (
-        !connection.ready ||
-        !owned ||
-        !sameSessionBinding(params, owned) ||
-        params.requestId !== requestId
-      )
-        throw new RpcError(-32001, "No matching model request for token usage");
-      const { worldId, playerId, sessionId, ...data } = params;
-      this.#storage(() =>
-        this.#options.activityLog.appendActivity(
-          activity({ worldId, playerId, sessionId }, "hisyo.token_usage", data),
-        ),
-      );
-      return { recorded: true };
-    });
-    this.#register(connection, "hisyo.summary.get", "agent", RunBindingSchema, (params) => {
-      const scope = this.#requireRun(params);
-      return { ...params, text: this.#storage(() => this.summaries.context(scope)) };
-    });
-    this.#register(connection, "hisyo.ready", "agent", EmptySchema, () => {
-      if (connection.ready) throw new RpcError(-32002, "Agent already ready");
-      connection.ready = true;
-      this.emit("agentReady");
-      return { ready: true };
-    });
-    this.#register(connection, "game.attach", "game", GameAttachSchema, (params) => {
+    this.#register(connection, "game.attach", GameAttachSchema, (params) => {
       if (this.#session) throw new RpcError(-32002, "Detach the current session before attaching");
       for (const name of params.supportedEvents) this.#requireEvent(name);
       const binding = Object.freeze({
@@ -421,7 +520,7 @@ export class BridgeServer extends EventEmitter<{
       connection.ready = false;
       return binding;
     });
-    this.#register(connection, "game.ready", "game", SessionBindingSchema, (params) => {
+    this.#register(connection, "game.ready", SessionBindingSchema, (params) => {
       this.#requireSession(params);
       if (connection.ready) throw new RpcError(-32002, "Game already ready");
       this.#storage(() =>
@@ -433,14 +532,13 @@ export class BridgeServer extends EventEmitter<{
       this.emit("attach", this.currentSession!);
       return { ready: true };
     });
-    this.#register(connection, "game.detach", "game", SessionBindingSchema, (params) => {
+    this.#register(connection, "game.detach", SessionBindingSchema, (params) => {
       this.#requireSession(params);
       this.#detach();
       return { detached: true };
     });
-    this.#register(connection, "game.status", "game", GameStatusSchema, (params) => {
+    this.#register(connection, "game.status", GameStatusSchema, (params) => {
       const session = this.#requireSession(params);
-      // Status can race startup readiness; it updates facts, never grants readiness.
       session.paused = params.paused;
       this.#storage(() =>
         this.#options.activityLog.appendActivity(
@@ -452,110 +550,28 @@ export class BridgeServer extends EventEmitter<{
       if (connection.ready) this.emit("status", this.currentSession!);
       return { paused: params.paused };
     });
-    this.#register(connection, "game.events", "game", GameEventsSchema, (params) => {
-      this.#storeEvents(params.events);
+    this.#register(connection, "game.events", GameEventsSchema, async (params) => {
+      const results = this.#storeEvents(params.events);
+      const intake = this.#observationIntake;
+      for (const { stored, hooks } of results) {
+        await intake?.accept(stored, hooks);
+        this.emit("observation", stored, hooks);
+      }
       return { stored: params.events.length };
     });
-    this.#register(connection, "game.player_message", "game", PlayerMessageSchema, (params) => {
+    this.#register(connection, "game.player_message", PlayerMessageSchema, async (params) => {
       const session = this.#requireSession(params);
       if (!params.text.trim()) throw new RpcError(-32602, "Player message is blank");
-      if (this.#closing || !connection.ready || !this.#playerMessageIntake)
+      const intake = this.#playerMessageIntake;
+      if (this.#closing || !connection.ready || !intake)
         throw new RpcError(-32003, "Hisyo is not accepting player messages");
       this.#storage(() =>
         this.#options.activityLog.appendActivity(
           activity(session.binding, "hisyo.player_input", { text: params.text }),
         ),
       );
-      this.#playerMessageIntake.accept(session.binding, params.text);
+      await intake.accept(session.binding, params.text);
       return { accepted: true };
-    });
-    this.#register(connection, "hisyo.hooks.add", "agent", HookAddSchema, (params) => {
-      const scope = this.#requireRun(params);
-      this.#requireEvent(params.event);
-      const { event, filter, instruction } = params;
-      if (!instruction.trim()) throw new RpcError(-32602, "Hook instruction is blank");
-      this.#options.hooks.catalog.validateFilter(event, filter ?? {});
-      const input = filter === undefined ? { event, instruction } : { event, filter, instruction };
-      return this.#storage(() =>
-        this.#options.activityLog.atomic(() => {
-          const hook = this.#options.hooks.add(scope, input);
-          this.#options.activityLog.appendActivity(
-            activity(params, "hisyo.hook_added", {
-              runId: params.runId,
-              hookId: hook.id,
-              event: hook.event,
-              filter: hook.filter,
-              instruction: hook.instruction,
-            }),
-          );
-          return hook;
-        }),
-      );
-    });
-    this.#register(connection, "hisyo.hooks.remove", "agent", HookRemoveSchema, (params) => {
-      const scope = this.#requireRun(params);
-      return this.#storage(() =>
-        this.#options.activityLog.atomic(() => {
-          const removed = this.#options.hooks.remove(scope, params.id);
-          if (removed)
-            this.#options.activityLog.appendActivity(
-              activity(params, "hisyo.hook_removed", { runId: params.runId, hookId: params.id }),
-            );
-          return { removed };
-        }),
-      );
-    });
-    this.#register(connection, "hisyo.hooks.list", "agent", HookListRequestSchema, (params) => {
-      const scope = this.#requireRun(params);
-      return this.#storage(() => this.#options.hooks.list(scope, params.query));
-    });
-    this.#register(
-      connection,
-      "hisyo.events.search",
-      "agent",
-      EventSearchRequestSchema,
-      (params) => {
-        const scope = this.#requireRun(params);
-        const { event, filter } = params.query;
-        if (filter !== undefined && event === undefined)
-          throw new RpcError(-32602, "A filter requires an event");
-        if (event !== undefined)
-          (isActivity(event) ? activityCatalog : this.#options.eventLog.catalog).validateFilter(
-            event,
-            filter ?? {},
-          );
-        const log =
-          event !== undefined && isActivity(event)
-            ? this.#options.activityLog
-            : this.#options.eventLog;
-        return this.#storage(() => log.search(scope, params.query));
-      },
-    );
-    this.#register(connection, "hisyo.events.list", "agent", RunBindingSchema, (params) => {
-      this.#requireRun(params);
-      return {
-        events: [
-          ...this.#options.eventLog.catalog
-            .list()
-            .filter((definition) => this.#session!.supportedEvents.includes(definition.name))
-            .map((definition) => ({ ...definition, origin: "game", hookable: true })),
-          ...activityCatalog
-            .list()
-            .map((definition) => ({ ...definition, origin: "cli", hookable: false })),
-        ],
-      };
-    });
-    for (const reference of referenceTools) {
-      this.#register(connection, reference.method, "agent", reference.request, (params) =>
-        this.#forward(reference.method, params, reference.result),
-      );
-    }
-    this.#register(connection, "game.state.get", "agent", GameStateRequestSchema, (params) =>
-      this.#forward("game.state.get", params, GameStateResultSchema),
-    );
-    this.#register(connection, "game.message.send", "agent", SendMessageSchema, (params) => {
-      if (!params.text.trim()) throw new RpcError(-32602, "AI message is blank");
-      return this.#forward("game.message.send", params, SendMessageResultSchema);
     });
   }
 
@@ -565,12 +581,11 @@ export class BridgeServer extends EventEmitter<{
       if (!session.supportedEvents.includes(event.event))
         throw new RpcError(-32602, "Unadvertised event");
     }
-    const results = this.#storage(() => {
+    return this.#storage(() => {
       const storedEvents = this.#options.eventLog.atomic(() =>
         events.map((event) => this.#options.eventLog.append(event)),
       );
-      // Independent databases: raw observations stay durable if later activity work fails.
-      // Neither delivery nor the game ACK happens until both local transactions succeed.
+      // Independent databases: raw observations remain durable if later activity/admission fails.
       return this.#options.activityLog.atomic(() =>
         storedEvents.map((stored) => {
           const hooks = this.#options.hooks.match(stored.observation);
@@ -585,29 +600,30 @@ export class BridgeServer extends EventEmitter<{
         }),
       );
     });
-    for (const { stored, hooks } of results) this.emit("observation", stored, hooks);
-    return results;
+  }
+
+  #parameters<T extends TSchema>(schema: T, params: unknown): Static<T> {
+    if (!Check(schema, params)) throw new RpcError(-32602, "Invalid method parameters");
+    return params;
   }
 
   #register<T extends TSchema>(
     connection: Connection,
     method: string,
-    role: BridgeRole,
     schema: T,
     handler: (params: Static<T>) => unknown,
   ): void {
     connection.peer.handle(method, (params) => {
-      if (connection.role !== role)
+      if (connection.role !== "game")
         throw new RpcError(-32010, "Unauthenticated or forbidden bridge role");
       if (
         this.#closing ||
         this.#storageFailed ||
         connection.peer.isClosed ||
-        (role === "game" ? this.#game : this.#agent) !== connection
+        this.#game !== connection
       )
         throw new RpcError(-32003, "Bridge connection is inactive");
-      if (!Check(schema, params)) throw new RpcError(-32602, "Invalid method parameters");
-      return handler(params);
+      return handler(this.#parameters(schema, params));
     });
   }
 
@@ -678,18 +694,21 @@ export class BridgeServer extends EventEmitter<{
     method: string,
     params: RunBinding & Record<string, unknown>,
     schema: TSchema,
+    signal?: AbortSignal,
   ): Promise<unknown> {
-    this.#requireRun(params);
+    signal?.throwIfAborted();
+    const { worldId, playerId, sessionId, runId } = params;
+    const binding = { worldId, playerId, sessionId, runId };
+    this.#requireRun(binding);
     // Capture literal request data before awaiting; never retarget a delayed display fact.
     const captured = structuredClone(params);
     const game = this.#game!;
-    const agent = this.#agent!;
     const run = this.#run!;
     let result: unknown;
     try {
       result = await game.peer.call(method, captured);
     } catch (error) {
-      // Only this authenticated native producer's owned capture is withdrawal evidence.
+      // Only this authenticated native producer's current owned capture proves withdrawal.
       if (
         error instanceof RpcError &&
         error.code === -32001 &&
@@ -697,10 +716,8 @@ export class BridgeServer extends EventEmitter<{
         !this.#closing &&
         !this.#storageFailed &&
         this.#game === game &&
-        this.#agent === agent &&
         this.#run === run &&
         !game.peer.isClosed &&
-        !agent.peer.isClosed &&
         sameRunBinding(run.binding, captured)
       ) {
         this.#requireSession(captured);
@@ -712,7 +729,7 @@ export class BridgeServer extends EventEmitter<{
           this.#availability = { game, promise, resolve };
           this.invalidateRun("native_run_withdrawn");
         }
-        this.#requireRun(captured);
+        this.#requireRun(binding);
       }
       throw error;
     }
@@ -727,7 +744,8 @@ export class BridgeServer extends EventEmitter<{
       this.#storage(() =>
         this.#options.activityLog.appendActivity(displayedActivity(captured, result)),
       );
-    this.#requireRun(captured);
+    this.#requireRun(binding);
+    signal?.throwIfAborted();
     return result;
   }
 }

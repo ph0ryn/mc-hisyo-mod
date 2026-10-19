@@ -54,11 +54,11 @@ function describeLog(
               : details.reason,
         },
       ];
-    case "pi.ready":
-      return [`Pi ready (Model: ${preview(details.provider)}/${preview(details.model)})`, {}];
-    case "pi.prompt_submitted":
-      return ["Run sent to Pi", {}];
-    case "pi.agent_settled":
+    case "durable.ready":
+      return [`Durable ready (Model: ${preview(details.provider)}/${preview(details.model)})`, {}];
+    case "durable.run_submitted":
+      return ["Run accepted", {}];
+    case "durable.run_settled":
       return [details.aborted ? "Run cancelled" : "Run finished", {}];
     case "tool_execution_start":
     case "tool_execution_end":
@@ -71,7 +71,7 @@ function describeLog(
             ? "failed"
             : "completed";
       return [
-        `Tool ${status}: ${preview(details.toolName)} (${preview(details.toolCallId)})`,
+        `Tool ${status}: ${preview(details.toolName)}${typeof details.toolCallId === "string" ? ` (${preview(details.toolCallId)})` : ""}`,
         {
           Arguments: event === "tool_execution_start" ? details.args : undefined,
           Duration: typeof details.durationMs === "number" ? `${details.durationMs} ms` : undefined,
@@ -85,7 +85,7 @@ function describeLog(
   }
 }
 
-/** Human-readable diagnostics only; never forward raw Pi stderr or RPC envelopes. */
+/** Human-readable diagnostics only; model output and credentials never flow through this logger. */
 export function writeCliLog(event: string, details: Record<string, unknown> = {}): void {
   const [title, fields] = describeLog(event, details);
   const lines = Object.entries(fields)

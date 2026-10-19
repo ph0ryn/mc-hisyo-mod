@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createModels, type Model } from "@earendil-works/pi-ai";
 import { expect, test, vi } from "vite-plus/test";
 import type { BridgeServer } from "../bridge/bridgeServer.js";
 import { parseOptions } from "../cliOptions.js";
@@ -8,6 +9,27 @@ import { startHisyoRuntime, type HisyoRuntimePorts } from "./hisyoRuntime.js";
 const world: SessionBinding = { worldId: "w", playerId: "p", sessionId: "s" };
 function fixture(args = ["--api-key-env", "KEY"]) {
   const order: string[] = [];
+  const model: Model<"openai-responses"> = {
+    provider: "openai",
+    id: "gpt-6-luna",
+    name: "fake",
+    api: "openai-responses",
+    baseUrl: "https://fake.invalid",
+    reasoning: true,
+    input: ["text"],
+    contextWindow: 100_000,
+    maxTokens: 4096,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+  const modelAccess = {
+    model,
+    models: createModels({
+      authContext: { env: async () => undefined, fileExists: async () => false },
+    }),
+    close: vi.fn(async () => {
+      order.push("modelAccess");
+    }),
+  };
   let sample!: () => void;
   let readySession: { binding: SessionBinding } | undefined;
   const scheduler = Object.assign(new EventEmitter<{ fault: [error: Error] }>(), {
@@ -44,11 +66,14 @@ function fixture(args = ["--api-key-env", "KEY"]) {
     }),
   };
   const ports: HisyoRuntimePorts = {
-    readText: vi.fn(() => {
-      order.push("config");
-      throw Object.assign(new Error("absent"), { code: "ENOENT" });
+    readEnv: vi.fn((name) => {
+      if (name === "PI_CODING_AGENT_DIR") order.push("config");
+      return name === "KEY" ? "SECRET_SENTINEL" : undefined;
     }),
-    readEnv: vi.fn((name) => (name === "KEY" ? "SECRET_SENTINEL" : undefined)),
+    createModelAccess: vi.fn(async () => {
+      order.push("createModelAccess");
+      return modelAccess;
+    }),
     startBridge: vi.fn(async () => {
       order.push("bridge");
       return base;
@@ -73,7 +98,6 @@ function fixture(args = ["--api-key-env", "KEY"]) {
   const options = {
     options: parseOptions(args),
     homeDirectory: "/home/unit",
-    bundledExtension: "/trusted/piExtension.mjs",
     signal: stop.signal,
     onFault,
   };
@@ -81,6 +105,7 @@ function fixture(args = ["--api-key-env", "KEY"]) {
     order,
     scheduler,
     summaryScheduler,
+    modelAccess,
     base,
     ports,
     stop,
@@ -94,11 +119,11 @@ function fixture(args = ["--api-key-env", "KEY"]) {
 }
 
 test.each(["--help", "--bridge-only"])(
-  "help/bridge-only never read config or create Pi scheduler: %s",
+  "help/bridge-only never resolve SDK credentials or create a scheduler: %s",
   async (flag) => {
     const f = fixture([flag]);
     const runtime = await startHisyoRuntime(f.options, f.ports);
-    expect(f.ports.readText).not.toHaveBeenCalled();
+    expect(f.ports.createModelAccess).not.toHaveBeenCalled();
     expect(f.ports.readEnv).not.toHaveBeenCalled();
     expect(f.ports.createScheduler).not.toHaveBeenCalled();
     expect(f.ports.createSummaryScheduler).not.toHaveBeenCalled();
@@ -110,7 +135,7 @@ test.each(["--help", "--bridge-only"])(
 
 test("config fails before acquiring any resource", async () => {
   const f = fixture();
-  f.ports.readEnv = () => undefined;
+  f.ports.readEnv = () => " ";
   await expect(startHisyoRuntime(f.options, f.ports)).rejects.toThrow();
   expect(f.ports.startBridge).not.toHaveBeenCalled();
 });
@@ -132,23 +157,16 @@ test("CLI diagnostics reach the scheduler without logging credentials or connect
   }
 });
 
-test("default launch forwards the OAuth source without its refresh grant", async () => {
+test("default launch resolves the Pi credential source only at the SDK model-access boundary", async () => {
   const f = fixture([]);
-  f.ports.readText = (path) =>
-    path.endsWith("auth.json")
-      ? JSON.stringify({
-          openai: { type: "oauth", access: "access-token", refresh: "refresh-secret", expires: 1 },
-        })
-      : "{}";
   const runtime = (await startHisyoRuntime(f.options, f.ports))!;
-  expect(f.ports.createScheduler).toHaveBeenCalledWith(
-    expect.objectContaining({
-      model: { provider: "openai", id: "gpt-6-luna", apiKey: "access-token" },
-      oauthAgentDirectory: "/home/unit/.pi/agent",
-    }),
+  expect(f.ports.createModelAccess).toHaveBeenCalledWith(
+    expect.objectContaining({ agentDirectory: "/home/unit/.pi/agent" }),
+    expect.objectContaining({ readEnv: f.ports.readEnv }),
   );
-  expect(JSON.stringify(vi.mocked(f.ports.createScheduler).mock.calls)).not.toContain(
-    "refresh-secret",
+  expect(vi.mocked(f.ports.createModelAccess).mock.calls[0]![0]).not.toHaveProperty("apiKeyEnv");
+  expect(f.ports.createScheduler).toHaveBeenCalledWith(
+    expect.objectContaining({ modelAccess: f.modelAccess }),
   );
   await runtime.close();
 });
@@ -156,13 +174,17 @@ test("default launch forwards the OAuth source without its refresh grant", async
 test("normal composition snapshots config before bridge, polls only current binding, routes faults", async () => {
   const f = fixture();
   const runtime = (await startHisyoRuntime(f.options, f.ports))!;
-  expect(f.order).toEqual(["config", "bridge", "createScheduler", "createSummaryScheduler"]);
+  expect(f.order).toEqual([
+    "config",
+    "createModelAccess",
+    "bridge",
+    "createScheduler",
+    "createSummaryScheduler",
+  ]);
   expect(f.ports.createScheduler).toHaveBeenCalledWith(
     expect.objectContaining({
       bridge: f.base.bridge,
-      executable: "pi",
-      bundledExtension: "/trusted/piExtension.mjs",
-      model: { provider: "openai", id: "gpt-6-luna", apiKey: "SECRET_SENTINEL" },
+      modelAccess: f.modelAccess,
     }),
   );
   f.sample();
@@ -180,7 +202,13 @@ test("normal composition snapshots config before bridge, polls only current bind
   await runtime.close();
   f.sample();
   expect(f.scheduler.poll).toHaveBeenCalledTimes(2);
-  expect(f.order.slice(-4)).toEqual(["timer", "summaryScheduler", "scheduler", "base"]);
+  expect(f.order.slice(-5)).toEqual([
+    "timer",
+    "summaryScheduler",
+    "scheduler",
+    "modelAccess",
+    "base",
+  ]);
 });
 
 test("shutdown is published before reentry and waits for scheduler termination before base", async () => {
@@ -205,7 +233,13 @@ test("shutdown is published before reentry and waits for scheduler termination b
   expect(f.scheduler.poll).not.toHaveBeenCalled();
   release();
   await closing;
-  expect(f.order.slice(-4)).toEqual(["timer", "summaryScheduler", "scheduler", "base"]);
+  expect(f.order.slice(-5)).toEqual([
+    "timer",
+    "summaryScheduler",
+    "scheduler",
+    "modelAccess",
+    "base",
+  ]);
 });
 
 test("summaryScheduler faults are routed and shutdown awaits its pending completion before closing SQLite", async () => {
@@ -277,23 +311,28 @@ test("summaryScheduler model calls route through the trusted current-session own
   await runtime.close();
 });
 
-test("trusted config and bundled path are captured before resource acquisition", async () => {
+test("trusted credential-source configuration is captured before bridge acquisition", async () => {
   const f = fixture();
   f.ports.startBridge = vi.fn(async () => {
-    f.options.options.provider = "changed";
-    f.options.options.executable = "changed";
-    f.options.bundledExtension = "/changed.mjs";
-    f.ports.readEnv = () => "changed";
+    f.options.options.agentDirectory = "/changed";
+    f.options.options.apiKeyEnv = "CHANGED";
     return f.base;
   });
   const runtime = (await startHisyoRuntime(f.options, f.ports))!;
-  expect(f.ports.createScheduler).toHaveBeenCalledWith(
-    expect.objectContaining({
-      executable: "pi",
-      bundledExtension: "/trusted/piExtension.mjs",
-      model: { provider: "openai", id: "gpt-6-luna", apiKey: "SECRET_SENTINEL" },
-    }),
+  expect(f.ports.createModelAccess).toHaveBeenCalledWith(
+    expect.objectContaining({ agentDirectory: "/home/unit/.pi/agent", apiKeyEnv: "KEY" }),
+    expect.objectContaining({ readEnv: f.ports.readEnv }),
   );
+  const schedulerOptions = vi.mocked(f.ports.createScheduler).mock.calls[0]![0];
+  expect(schedulerOptions.modelAccess).toBe(f.modelAccess);
+  for (const obsolete of [
+    "executable",
+    "connection",
+    "bundledExtension",
+    "oauthAgentDirectory",
+    "apiKey",
+  ])
+    expect(schedulerOptions).not.toHaveProperty(obsolete);
   await runtime.close();
 });
 
@@ -341,4 +380,79 @@ test("startup and cleanup failures are both retained", async () => {
   await expect(startHisyoRuntime(f.options, f.ports)).rejects.toMatchObject({
     errors: [primary, expect.objectContaining({ errors: [cleanup] })],
   });
+});
+
+test("SDK credential failure stops startup before acquiring the game bridge", async () => {
+  const f = fixture();
+  const failure = new Error("credential unavailable");
+  vi.mocked(f.ports.createModelAccess).mockRejectedValueOnce(failure);
+  await expect(startHisyoRuntime(f.options, f.ports)).rejects.toBe(failure);
+  expect(f.ports.startBridge).not.toHaveBeenCalled();
+  expect(f.ports.createScheduler).not.toHaveBeenCalled();
+  expect(f.modelAccess.close).not.toHaveBeenCalled();
+});
+
+test("cancellation during SDK model-access startup closes the late owner without opening the bridge", async () => {
+  const f = fixture();
+  let release!: (access: typeof f.modelAccess) => void;
+  vi.mocked(f.ports.createModelAccess).mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  const starting = startHisyoRuntime(f.options, f.ports);
+  const rejected = expect(starting).rejects.toMatchObject({ name: "AbortError" });
+  f.stop.abort();
+  release(f.modelAccess);
+  await rejected;
+  expect(f.modelAccess.close).toHaveBeenCalledOnce();
+  expect(f.ports.startBridge).not.toHaveBeenCalled();
+  expect(f.ports.createScheduler).not.toHaveBeenCalled();
+});
+
+test("bridge startup failure releases SDK model access even without a scheduler", async () => {
+  const f = fixture();
+  const failure = new Error("bridge failed");
+  vi.mocked(f.ports.startBridge).mockRejectedValueOnce(failure);
+  await expect(startHisyoRuntime(f.options, f.ports)).rejects.toBe(failure);
+  expect(f.modelAccess.close).toHaveBeenCalledOnce();
+  expect(f.ports.createScheduler).not.toHaveBeenCalled();
+});
+
+test("SDK model access closes only after both scheduler drains and before bridge storage", async () => {
+  const f = fixture();
+  let finishRun!: () => void;
+  let finishSummary!: () => void;
+  f.scheduler.close.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finishRun = resolve;
+      }),
+  );
+  f.summaryScheduler.close.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finishSummary = resolve;
+      }),
+  );
+  const runtime = (await startHisyoRuntime(f.options, f.ports))!;
+  const closing = runtime.close();
+  expect(f.modelAccess.close).not.toHaveBeenCalled();
+  finishRun();
+  await Promise.resolve();
+  expect(f.modelAccess.close).not.toHaveBeenCalled();
+  finishSummary();
+  await closing;
+  expect(f.modelAccess.close).toHaveBeenCalledOnce();
+  expect(f.order.slice(-2)).toEqual(["modelAccess", "base"]);
+});
+
+test("model-access cleanup failure is retained and does not prevent bridge cleanup", async () => {
+  const f = fixture();
+  const failure = new Error("SDK cleanup failed");
+  f.modelAccess.close.mockRejectedValueOnce(failure);
+  const runtime = (await startHisyoRuntime(f.options, f.ports))!;
+  await expect(runtime.close()).rejects.toMatchObject({ errors: [failure] });
+  expect(f.base.close).toHaveBeenCalledOnce();
 });

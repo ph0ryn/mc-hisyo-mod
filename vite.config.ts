@@ -12,12 +12,12 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.test.ts"],
-    // Colocated unit tests only; no network, subprocess or database integration suites.
+    // Colocated domain units and isolated SDK/TCP/SQLite boundary tests; no paid model calls.
     environment: "node",
   },
   pack: {
-    entry: { cli: "src/cli.ts", piExtension: "src/pi/piExtension.ts" },
-    deps: { neverBundle: [/^typebox(?:\/.*)?$/] },
+    entry: { cli: "src/cli.ts" },
+    deps: { neverBundle: [/^typebox(?:\/.*)?$/, /^@earendil-works\//, /^proper-lockfile$/] },
     format: "esm",
     platform: "node",
     target: "node24",

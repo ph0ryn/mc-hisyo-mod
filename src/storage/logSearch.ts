@@ -1,15 +1,11 @@
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
-import { maxPiFrameBytes } from "../pi/piFraming.js";
 import { defaultMaxFrameBytes } from "../transport/jsonLines.js";
 import { validateScope, type WorldScope } from "../protocol/gameEvent.js";
 import type { EventCatalog, EventFilter } from "../events/eventCatalog.js";
 
-// Page JSON has no raw controls: Pi's escaped content costs <=2x, plus details <=1x.
-// ponytail: wrappers/call metadata get 4096 bytes; measure envelopes if they grow.
-export const eventPageBytes = Math.min(
-  defaultMaxFrameBytes - 4096,
-  Math.floor((maxPiFrameBytes - 4096) / 3),
-);
+// Keep each in-process tool page within the game transport's ordinary data budget.
+// There is no nested stdio/JSON escaping envelope in the SDK execution path.
+export const eventPageBytes = defaultMaxFrameBytes - 4096;
 
 export interface EventSearch {
   event?: string;

@@ -4,9 +4,9 @@ import { sameSessionBinding, type SessionBinding } from "../protocol/bridge.js";
 import { ActivePlayClock } from "./activePlayClock.js";
 
 export interface SummarySchedulerOptions {
-  bridge: Pick<BridgeServer, "on" | "off" | "readySession" | "isAgentReady" | "summaries">;
-  /** The trusted Pi owner refreshes credentials without acquiring a main run. */
-  summarize: BridgeServer["summarize"];
+  bridge: Pick<BridgeServer, "on" | "off" | "readySession" | "summaries">;
+  /** The shared SDK credential owner refreshes without acquiring a main run. */
+  summarize: (binding: SessionBinding, input: string, signal: AbortSignal) => Promise<string>;
   now?: () => number;
   wallNow?: () => number;
 }
@@ -58,7 +58,7 @@ export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
     if (this.#closed || this.#failed || !session || !sameSessionBinding(binding, session.binding))
       return false;
     const due = this.#clock.poll(this.#now());
-    if (!due || this.#flight || !this.#bridge.isAgentReady) return false;
+    if (!due || this.#flight) return false;
     const scope = { worldId: binding.worldId, playerId: binding.playerId };
     const pending = this.#bridge.summaries.next(scope);
     if (!pending) return false;

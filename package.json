@@ -16,14 +16,19 @@
     "format": "vp fmt",
     "test": "vp test",
     "test:mod": "cd mod && ./gradlew test --configuration-cache",
-    "verify": "vp check && vp pack && vp test"
+    "smoke:cli": "node --test scripts/cliSmoke.test.mjs",
+    "verify": "vp check && vp pack && vp test && pnpm run smoke:cli"
   },
   "dependencies": {
+    "@earendil-works/chord": "1.3.0",
+    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-durable": "1.3.0",
+    "proper-lockfile": "4.1.2",
     "typebox": "1.3.37"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.2.0",
     "@types/node": "^24.19.2",
+    "@types/proper-lockfile": "4.1.4",
     "typescript": "7.0.2",
     "vite-plus": "1.3.0"
   },

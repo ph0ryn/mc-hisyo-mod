@@ -56,10 +56,10 @@ test.each([
     { reason: "world_detached" },
     ["Run cancellation requested", "Reason: world detached"],
   ],
-  ["pi.ready", { provider: "test", model: "native" }, ["Pi ready", "Model: test/native"]],
-  ["pi.prompt_submitted", {}, ["Run sent to Pi"]],
-  ["pi.agent_settled", { aborted: false }, ["Run finished"]],
-  ["pi.agent_settled", { aborted: true }, ["Run cancelled"]],
+  ["durable.ready", { provider: "test", model: "native" }, ["Durable ready", "Model: test/native"]],
+  ["durable.run_submitted", {}, ["Run accepted"]],
+  ["durable.run_settled", { aborted: false }, ["Run finished"]],
+  ["durable.run_settled", { aborted: true }, ["Run cancelled"]],
 ] as const)("%s is described in plain language", (event, details, expected) => {
   const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   writeCliLog(event, details);
@@ -67,6 +67,13 @@ test.each([
   for (const text of expected) expect(output).toContain(text);
   expect(output).not.toContain(event);
   expect(output).not.toContain("undefined");
+});
+
+test("SDK tool diagnostics do not print a nonexistent RPC call ID", () => {
+  const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+  writeCliLog("tool_execution_start", { toolName: "get_game_state", args: { query: {} } });
+  expect(String(stderr.mock.calls[0]![0])).toContain("Tool started: get_game_state\n");
+  expect(String(stderr.mock.calls[0]![0])).not.toContain("undefined");
 });
 
 test("empty run reasons and internal binding fields do not clutter logs", () => {

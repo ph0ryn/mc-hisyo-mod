@@ -1,55 +1,38 @@
 import { expect, test } from "vite-plus/test";
 import { cliErrorMessage, parseOptions, usage } from "./cliOptions.js";
 
-test("parses the existing modes and only the authorized Pi flags", () => {
-  expect(parseOptions([])).toEqual({ help: false, bridgeOnly: false, executable: "pi" });
+test("parses only modes, state directory, and explicit credential sources", () => {
+  expect(parseOptions([])).toEqual({ help: false, bridgeOnly: false });
   expect(parseOptions(["--help"]).help).toBe(true);
   expect(parseOptions(["--bridge-only", "--data-dir", "/state"]).bridgeOnly).toBe(true);
-  expect(
-    parseOptions([
-      "--pi",
-      "/bin/pi",
-      "--provider",
-      "p",
-      "--model",
-      "m",
-      "--pi-agent-dir",
-      "/input",
-      "--api-key-env",
-      "KEY",
-    ]),
-  ).toEqual({
+  expect(parseOptions(["--pi-agent-dir", "/input", "--api-key-env", "KEY"])).toEqual({
     help: false,
     bridgeOnly: false,
-    executable: "/bin/pi",
-    provider: "p",
-    model: "m",
     agentDirectory: "/input",
     apiKeyEnv: "KEY",
   });
-  expect(usage).not.toContain("not available");
+  expect(usage).toContain("openai/gpt-6-luna");
+  expect(usage).not.toContain("Pi executable");
+  expect(usage).not.toContain("--provider");
+  expect(usage).not.toContain("--model");
 });
 
-test.each(["--pi", "--provider", "--model", "--pi-agent-dir", "--api-key-env"])(
-  "bridge-only rejects explicit %s",
-  (flag) => {
-    expect(() => parseOptions(["--bridge-only", flag, "value"])).toThrow();
-  },
-);
+test.each(["--pi-agent-dir", "--api-key-env"])("bridge-only rejects explicit %s", (flag) => {
+  expect(() => parseOptions(["--bridge-only", flag, "value"])).toThrow();
+});
 
 test.each(
   [
     ["--unknown=SECRET_SENTINEL"],
     ["SECRET_SENTINEL"],
-    ["--pi"],
-    ["--pi", ""],
+    ["--pi", "/bin/pi"],
+    ["--provider", "openai"],
+    ["--model", "gpt-6-luna"],
     ["--data-dir", ""],
-    ["--provider", "p"],
-    ["--model", "m"],
-    ["--provider", "", "--model", "m"],
+    ["--pi-agent-dir", ""],
     ["--api-key-env", "BAD-NAME"],
   ].map((args) => ({ args })),
-)("rejects invalid arguments without reflecting input: $args", ({ args }) => {
+)("rejects obsolete/invalid arguments without reflecting input: $args", ({ args }) => {
   try {
     parseOptions(args);
     throw new Error("unexpected success");

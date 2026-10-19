@@ -1,6 +1,6 @@
 import { expect, test } from "vite-plus/test";
 import { Check } from "typebox/value";
-import { hisyoToolNames } from "../pi/piPolicy.js";
+import { hisyoToolNames } from "./hisyoTools.js";
 import {
   referenceTools,
   validReferenceResult,

@@ -1,25 +1,23 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { EventEmitter } from "node:events";
-import type { Server } from "node:net";
-import { expect, onTestFinished, test, vi } from "vite-plus/test";
-import type { EventLog } from "../storage/eventLog.js";
-import { ActivityLog } from "../storage/activityLog.js";
+import { randomUUID } from "node:crypto";
+import { EventEmitter, once } from "node:events";
+import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
-import { initializeActivityDatabase } from "../storage/activityDatabase.js";
-import type { SummaryStore } from "../storage/summaryStore.js";
-import type { Hook, HookStore } from "../storage/hookStore.js";
-import type { GameEvent } from "../protocol/gameEvent.js";
-import extension from "../pi/piExtension.js";
-import { hisyoToolNames } from "../pi/piPolicy.js";
+import { expect, onTestFinished, test, vi } from "vite-plus/test";
+import { EventCatalog } from "../events/eventCatalog.js";
+import { gameEventDefinitions, type GameEvent } from "../protocol/gameEvent.js";
 import { staleRunErrorCode, type RunBinding, type SessionBinding } from "../protocol/bridge.js";
+import { hisyoTools } from "../protocol/hisyoTools.js";
+import type { TokenUsageData } from "../protocol/tokenUsage.js";
 import snapshot from "../protocol/fixtures/gameState.json" with { type: "json" };
-import { RunScheduler } from "../runtime/runScheduler.js";
-import { SummaryScheduler } from "../runtime/summaryScheduler.js";
-import { startPiProcess } from "../runtime/piProcess.js";
-import { RpcError, type RpcPeer } from "../transport/rpcPeer.js";
+import { initializeEventDatabase } from "../storage/eventDatabase.js";
+import { initializeActivityDatabase } from "../storage/activityDatabase.js";
+import { initializeSummaryDatabase } from "../storage/summaryDatabase.js";
+import { EventLog } from "../storage/eventLog.js";
+import { ActivityLog } from "../storage/activityLog.js";
+import { HookStore, type Hook } from "../storage/hookStore.js";
+import { SummaryStore } from "../storage/summaryStore.js";
+import { RpcError, RpcPeer } from "../transport/rpcPeer.js";
 import { BridgeServer } from "./bridgeServer.js";
-
-vi.mock("../runtime/piProcess.js", () => ({ startPiProcess: vi.fn() }));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -30,163 +28,68 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+const scope = ({ worldId, playerId }: SessionBinding) => ({ worldId, playerId });
+const drain = async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+};
 
-// Value-only authenticated peers: no sockets, server, database, files or native resources.
-class ManualPeer extends EventEmitter<{ close: [Error] }> {
-  readonly handlers = new Map<string, (params: unknown) => unknown>();
-  readonly calls: string[] = [];
-  other!: ManualPeer;
-  isClosed = false;
-  handle(method: string, handler: (params: unknown) => unknown) {
-    this.handlers.set(method, handler);
-  }
-  receive(method: string, params: unknown): unknown {
-    const handler = this.handlers.get(method);
-    if (!handler) throw new Error(`Missing handler ${method}`);
-    return handler(structuredClone(params));
-  }
-  async call(method: string, params: unknown): Promise<unknown> {
-    this.calls.push(method);
-    return await this.other.receive(method, params);
-  }
-  notify(method: string, params: unknown) {
-    this.calls.push(method);
-    this.other.receive(method, params);
-  }
-  close(error = new Error("closed")) {
-    if (this.isClosed) return;
-    this.isClosed = true;
-    this.emit("close", error);
-    this.other.close(error);
-  }
-}
-const tick = () => new Promise<void>((resolve) => queueMicrotask(resolve));
-async function drain() {
-  for (let i = 0; i < 30; i++) await tick();
-}
-
-async function fixture(supportedEvents: string[] = [], persisted?: ActivityLog) {
-  vi.useFakeTimers();
-  onTestFinished(() => {
-    vi.useRealTimers();
+/** Real host, JSON-RPC/TCP and three SQLite stores; only the native game producer is fake. */
+async function fixture(supportedEvents: string[] = []) {
+  const rawDb = new DatabaseSync(":memory:");
+  const activityDb = new DatabaseSync(":memory:");
+  const summaryDb = new DatabaseSync(":memory:");
+  initializeEventDatabase(rawDb);
+  initializeActivityDatabase(activityDb);
+  initializeSummaryDatabase(summaryDb);
+  const catalog = new EventCatalog(gameEventDefinitions);
+  const eventLog = new EventLog(rawDb, catalog);
+  const activityLog = new ActivityLog(activityDb);
+  const hooks = new HookStore(activityDb, catalog);
+  const summaries = new SummaryStore(eventLog, summaryDb);
+  const bridge = new BridgeServer({
+    token: "a".repeat(43),
+    eventLog,
+    activityLog,
+    hooks,
+    summaries,
   });
-  let accept!: (peer: RpcPeer) => void;
-  const rows: unknown[] = [];
-  const observations: GameEvent[] = [];
-  let storageError: Error | undefined;
-  let activityError: Error | undefined;
-  let appendsBeforeFailure = 0;
-  const activityDb = persisted?.db ?? {};
-  const matchedHooks: Hook[] = [];
-  const registeredHooks: Hook[] = [];
-  const rawSearch = vi.fn(() => ({ events: [], through: 41, hasKnownGaps: true, nextCursor: 3 }));
-  const activitySearch = vi.fn(() => ({
-    events: [],
-    through: 9,
-    hasKnownGaps: false,
-    nextCursor: 2,
-  }));
-  const eventLog = {
-    db: {},
-    atomic: <T>(mutate: () => T): T => {
-      const before = observations.length;
-      try {
-        return mutate();
-      } catch (error) {
-        observations.splice(before);
-        throw error;
-      }
-    },
-    append: (value: GameEvent) => {
-      if (storageError && appendsBeforeFailure-- <= 0) throw storageError;
-      observations.push(value);
-      return { id: observations.length, observation: value };
-    },
-    search: rawSearch,
-    catalog: {
-      list: () => supportedEvents.map((name) => ({ name })),
-      validateFilter: vi.fn(),
-    },
-  } as unknown as EventLog;
-  const activityLog =
-    persisted ??
-    ({
-      db: activityDb,
-      atomic: <T>(mutate: () => T): T => {
-        const before = rows.length;
-        const hooksBefore = [...registeredHooks];
-        try {
-          return mutate();
-        } catch (error) {
-          rows.splice(before);
-          registeredHooks.splice(0, registeredHooks.length, ...hooksBefore);
-          throw error;
-        }
-      },
-      appendActivity: (value: unknown) => {
-        if (activityError || storageError) throw activityError ?? storageError;
-        rows.push(value);
-        return { id: rows.length, activity: value };
-      },
-      appendActivities: (values: unknown[]) => {
-        if (activityError || storageError) throw activityError ?? storageError;
-        rows.push(...values);
-      },
-      search: activitySearch,
-    } as unknown as ActivityLog);
-  const hooks = {
-    db: activityDb,
-    catalog: eventLog.catalog,
-    match: vi.fn(() => matchedHooks),
-    add: (_scope: unknown, input: Omit<Hook, "id">) => {
-      const hook = { ...input, filter: input.filter ?? {}, id: "registered-hook" };
-      registeredHooks.push(hook);
-      return hook;
-    },
-    remove: (_scope: unknown, id: string) => {
-      const index = registeredHooks.findIndex((hook) => hook.id === id);
-      if (index < 0) return false;
-      registeredHooks.splice(index, 1);
-      return true;
-    },
-    list: () => ({ hooks: [...registeredHooks] }),
-  } as unknown as HookStore;
-  const bridge = new BridgeServer(
-    {
-      token: "a".repeat(43),
-      eventLog,
-      activityLog,
-      summaries: {
-        context: () => "",
-        next: () => undefined,
-        save: () => {},
-      } as unknown as SummaryStore,
-      hooks,
-    },
-    (register) => {
-      accept = register;
-      return new EventEmitter() as Server;
-    },
-  );
-  onTestFinished(() => bridge.close());
-  async function connect(role: "game" | "agent", protocolVersion = 2) {
-    const host = new ManualPeer();
-    const client = new ManualPeer();
-    host.other = client;
-    client.other = host;
-    accept(host as unknown as RpcPeer);
-    await client.call("bridge.hello", { protocolVersion, role, token: "a".repeat(43) });
-    return { host, client };
+  const faults: Error[] = [];
+  bridge.on("fault", (error) => faults.push(error));
+  const address = await bridge.listen();
+  const clients: RpcPeer[] = [];
+  onTestFinished(async () => {
+    await bridge.close();
+    for (const client of clients) client.close();
+    rawDb.close();
+    activityDb.close();
+    summaryDb.close();
+  });
+  async function connect(role = "game", version = 2, token = "a".repeat(43)) {
+    const socket = createConnection(address);
+    await once(socket, "connect");
+    const peer = new RpcPeer(socket);
+    clients.push(peer);
+    await peer.call("bridge.hello", { protocolVersion: version, role, token });
+    return peer;
   }
-  const game = await connect("game");
-  const agent = await connect("agent");
-  const native: {
+  const game = await connect();
+  const binds: RunBinding[] = [];
+  const clears: RunBinding[] = [];
+  const requests: {
     method: string;
-    params: RunBinding;
+    params: RunBinding & Record<string, unknown>;
     result: ReturnType<typeof deferred<unknown>>;
   }[] = [];
-  game.client.handle("game.run.bind", (params) => params);
-  game.client.handle("game.run.clear", (params) => params);
+  const arrivals = new EventEmitter();
+  game.handle("game.run.bind", (params) => {
+    binds.push(params as RunBinding);
+    return params;
+  });
+  game.handle("game.run.clear", (params) => {
+    clears.push(params as RunBinding);
+    return undefined;
+  });
   for (const method of [
     "game.state.get",
     "game.message.send",
@@ -194,554 +97,399 @@ async function fixture(supportedEvents: string[] = [], persisted?: ActivityLog) 
     "game.files.read",
     "game.files.search",
   ]) {
-    game.client.handle(method, (params) => {
+    game.handle(method, (params) => {
       const result = deferred<unknown>();
-      native.push({ method, params: params as RunBinding, result });
+      requests.push({ method, params: params as RunBinding & Record<string, unknown>, result });
+      arrivals.emit("request");
       return result.promise;
     });
   }
-  const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => unknown>();
-  const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
-  extension(
-    {
-      on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) =>
-        handlers.set(name, handler),
-      registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) =>
-        tools.set(tool.name, tool),
-      getActiveTools: () => [...hisyoToolNames],
-    } as unknown as ExtensionAPI,
-    () => Promise.resolve(agent.client),
-  );
-  const summaryContext = vi.spyOn(bridge.summaries, "context").mockReturnValue("");
-  const complete = vi.fn<(...args: unknown[]) => Promise<unknown>>(() =>
-    Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: "石を採掘した。" }] }),
-  );
-  function context() {
-    const controller = new AbortController();
-    const ctx = {
-      mode: "rpc",
-      model: { api: "openai-completions", provider: "openai", id: "gpt-6-luna" },
-      modelRegistry: {
-        find: () => ({ api: "openai-completions", provider: "openai", id: "gpt-6-luna" }),
-        complete,
-      },
-      signal: controller.signal,
-      abort: () => controller.abort(),
-    } as unknown as ExtensionContext;
-    return { ctx, controller };
+  async function native(index = 0) {
+    while (!requests[index]) await once(arrivals, "request");
+    return requests[index]!;
   }
-  const emit = (name: string, ctx: ExtensionContext, event: unknown = {}) =>
-    handlers.get(name)?.(event, ctx);
-  await emit("session_start", context().ctx);
-  const world = (await game.client.call("game.attach", {
-    worldId: "w",
-    playerId: "p",
-    language: "ja_jp",
-    supportedEvents,
-    paused: false,
-  })) as SessionBinding;
-  await game.client.call("game.ready", world);
+  async function attach(worldId = "w", playerId = "p") {
+    const binding = (await game.call("game.attach", {
+      worldId,
+      playerId,
+      language: "ja_jp",
+      supportedEvents,
+      paused: false,
+    })) as SessionBinding;
+    await game.call("game.ready", binding);
+    return binding;
+  }
+  const world = await attach();
+  const rows = (event?: string, scope = world) =>
+    activityLog
+      .search(
+        { worldId: scope.worldId, playerId: scope.playerId },
+        event ? { event, limit: 500 } : { limit: 500 },
+      )
+      .events.map(({ activity }) => activity);
+  const observations = () =>
+    eventLog.search(scope(world), { limit: 500 }).events.map(({ observation }) => observation);
+  function failActivities(event?: string) {
+    activityDb.exec(
+      `CREATE TRIGGER fail_activity BEFORE INSERT ON activities ${event ? `WHEN NEW.event = '${event}'` : ""} BEGIN SELECT RAISE(ABORT, 'activity write failed'); END;`,
+    );
+  }
   return {
     bridge,
-    connect,
     game,
-    agent,
+    world,
+    connect,
+    attach,
     native,
+    requests,
+    binds,
+    clears,
     rows,
     observations,
     eventLog,
     activityLog,
-    rawSearch,
-    activitySearch,
     hooks,
-    matchedHooks,
-    world,
-    context,
-    emit,
-    tools,
-    complete,
-    summaryContext,
-    failActivities: (error: Error) => {
-      activityError = error;
-    },
-    failStorage: (error: Error, afterObservations = 0) => {
-      storageError = error;
-      appendsBeforeFailure = afterObservations;
-    },
+    summaries,
+    rawDb,
+    activityDb,
+    summaryDb,
+    faults,
+    failActivities,
   };
 }
 
-const reportedUsage = { input: 100, output: 20, cacheRead: 40, cacheWrite: 0, totalTokens: 160 };
-const storedTokens = { input: 140, output: 20, cacheRead: 40, cacheWrite: null, total: 160 };
-const rawUsageEvent = {
-  usage: {
-    prompt_tokens: 140,
-    completion_tokens: 20,
-    total_tokens: 160,
-    prompt_tokens_details: { cached_tokens: 40 },
-  },
-};
-
-function emitRawUsage(h: Awaited<ReturnType<typeof fixture>>, ctx: ExtensionContext) {
-  return h.emit("provider_stream_event", ctx, {
-    provider: "openai",
-    api: "openai-completions",
-    model: "gpt-6-luna",
-    data: rawUsageEvent,
-  });
+function observation(binding: SessionBinding, seq = 1): GameEvent {
+  return {
+    ...binding,
+    seq,
+    tick: 20,
+    observedAt: 1000 + seq,
+    event: "block_broken",
+    dimension: "minecraft:overworld",
+    position: [1, 2, 3],
+    data: { blockId: "minecraft:stone", position: [1, 2, 3] },
+  };
 }
+const tokens = { input: 140, output: 20, cacheRead: 40, cacheWrite: null, total: 160 };
+const usage = (requestId: string, source: "run" | "summary" = "run"): TokenUsageData => ({
+  source,
+  requestId,
+  provider: "openai",
+  model: "gpt-6-luna",
+  api: "openai-completions",
+  stopReason: "stop",
+  ...tokens,
+});
 
-function usageRows(rows: unknown[]) {
-  return rows.filter((row) => (row as { event: string }).event === "hisyo.token_usage");
-}
-
-test("extension and authenticated bridge persist independent run/summary counters into real SQLite", async () => {
-  const db = new DatabaseSync(":memory:");
-  initializeActivityDatabase(db);
-  const log = new ActivityLog(db);
-  const h = await fixture([], log);
-  onTestFinished(async () => {
-    await h.bridge.close();
-    db.close();
-  });
+test("trusted host begins without any agent socket and records each response into SQLite", async () => {
+  const h = await fixture();
   const run = await h.bridge.beginRun();
-  const { ctx } = h.context();
-  h.emit("agent_start", ctx);
-  await emitRawUsage(h, ctx);
-  h.complete.mockImplementation((_model, _context, options) => {
-    (options as { onProviderStreamEvent: (data: unknown) => void }).onProviderStreamEvent({
-      usage: { prompt_tokens: 9 },
-    });
-    return Promise.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
+  expect(h.binds).toEqual([run]);
+  h.bridge.beginModelRequest(h.world, "run", run.runId);
+  expect(h.bridge.recordUsage({ ...h.world, ...usage(run.runId) })).toEqual({ recorded: true });
+  h.bridge.recordUsage({
+    ...h.world,
+    ...usage(run.runId),
+    stopReason: "error",
+    input: null,
+    output: null,
+    cacheRead: null,
+    cacheWrite: null,
+    total: null,
   });
-  await h.bridge.summarize(h.world, "events", new AbortController().signal);
-  await h.emit("message_end", ctx, {
-    message: {
-      role: "assistant",
-      provider: "openai",
-      model: "gpt-6-luna",
-      api: "openai-completions",
-      stopReason: "stop",
-    },
-  });
-  // The next response has no raw usage. It must not reuse the preceding call's counts.
-  await h.emit("message_end", ctx, {
-    message: {
-      role: "assistant",
-      provider: "openai",
-      model: "gpt-6-luna",
-      api: "openai-completions",
+  expect(h.rows("hisyo.token_usage").map(({ data }) => data)).toEqual([
+    usage(run.runId),
+    {
+      ...usage(run.runId),
       stopReason: "error",
-      usage: reportedUsage,
-    },
-  });
-  const stored = log.search(
-    { worldId: h.world.worldId, playerId: h.world.playerId },
-    { event: "hisyo.token_usage" },
-  ).events;
-  expect(stored.map(({ activity }) => activity.data)).toEqual([
-    expect.objectContaining({ source: "summary", input: 9, output: null, total: null }),
-    expect.objectContaining({ source: "run", requestId: run.runId, ...storedTokens }),
-    expect.objectContaining({
-      source: "run",
       input: null,
       output: null,
       cacheRead: null,
       cacheWrite: null,
       total: null,
-    }),
-  ]);
-  expect(stored.every(({ activity }) => activity.sessionId === h.world.sessionId)).toBe(true);
-  h.emit("agent_settled", ctx);
-  h.bridge.finishRun(run);
-});
-
-test("each assistant response records tokens once, including invalidated runs, without prose", async () => {
-  const h = await fixture();
-  const run = await h.bridge.beginRun();
-  const { ctx } = h.context();
-  h.emit("agent_start", ctx);
-  const message = {
-    role: "assistant",
-    provider: "openai",
-    model: "gpt-6-luna",
-    api: "openai-completions",
-    stopReason: "toolUse",
-    usage: reportedUsage,
-    content: [{ type: "text", text: "PRIVATE_PROSE" }],
-    errorMessage: "PRIVATE_ERROR",
-  };
-  await h.emit("message_end", ctx, { message: { role: "user", content: "PRIVATE_INPUT" } });
-  await emitRawUsage(h, ctx);
-  await h.emit("message_end", ctx, { message });
-  h.bridge.invalidateRun("cancelled");
-  await emitRawUsage(h, ctx);
-  await h.emit("message_end", ctx, { message: { ...message, stopReason: "aborted" } });
-  h.emit("agent_end", ctx, { messages: [message] });
-  const records = usageRows(h.rows);
-  expect(records).toHaveLength(2);
-  expect(records[0]).toEqual({
-    ...h.world,
-    origin: "cli",
-    recordedAt: expect.any(Number),
-    event: "hisyo.token_usage",
-    data: {
-      source: "run",
-      requestId: run.runId,
-      provider: "openai",
-      model: "gpt-6-luna",
-      api: "openai-completions",
-      stopReason: "toolUse",
-      ...storedTokens,
     },
-  });
-  expect(records[1]).toMatchObject({ data: { stopReason: "aborted", ...storedTokens } });
-  expect(JSON.stringify(records)).not.toContain("PRIVATE_");
-});
-
-test.each(["stop", "length", "error", "cancelled", "rejected"])(
-  "summary usage persists even when the result is %s",
-  async (outcome) => {
-    const h = await fixture();
-    const response = deferred<unknown>();
-    h.complete.mockImplementation((_model, _context, options) => {
-      if (outcome !== "rejected")
-        (options as { onProviderStreamEvent: (data: unknown) => void }).onProviderStreamEvent(
-          rawUsageEvent,
-        );
-      return response.promise;
-    });
-    const controller = new AbortController();
-    const pending = h.bridge.summarize(h.world, "PRIVATE_OBSERVATIONS", controller.signal);
-    const settled = pending.catch((error: unknown) => error);
-    if (outcome === "cancelled") controller.abort();
-    if (outcome === "rejected") response.reject(new Error("PRIVATE_CREDENTIAL"));
-    else
-      response.resolve({
-        stopReason: outcome === "cancelled" ? "stop" : outcome,
-        usage: reportedUsage,
-        content: [{ type: "text", text: "completed" }],
-      });
-    if (outcome === "stop") expect(await settled).toBe("completed");
-    else expect(await settled).toBeInstanceOf(Error);
-    const records = usageRows(h.rows);
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({
-      ...h.world,
-      event: "hisyo.token_usage",
-      data: {
-        source: "summary",
-        requestId: expect.any(String),
-        provider: "openai",
-        model: "gpt-6-luna",
-        stopReason: outcome === "cancelled" ? "stop" : outcome === "rejected" ? "error" : outcome,
-        ...(outcome === "rejected"
-          ? { input: null, output: null, cacheRead: null, cacheWrite: null, total: null }
-          : storedTokens),
-      },
-    });
-    expect(JSON.stringify(records)).not.toContain("PRIVATE_");
-  },
-);
-
-test("late cancelled summary usage stays with its original session after detach and replacement", async () => {
-  const h = await fixture();
-  const response = deferred<unknown>();
-  h.complete.mockImplementation((_model, _context, options) => {
-    (options as { onProviderStreamEvent: (event: unknown) => void }).onProviderStreamEvent(
-      rawUsageEvent,
-    );
-    return response.promise;
-  });
-  const controller = new AbortController();
-  const pending = h.bridge.summarize(h.world, "events", controller.signal);
-  const failed = expect(pending).rejects.toThrow();
-  controller.abort();
-  await h.game.client.call("game.detach", h.world);
-  const replacement = await h.game.client.call("game.attach", {
-    worldId: "new-world",
-    playerId: "new-player",
-    language: "ja_jp",
-    supportedEvents: [],
-    paused: false,
-  });
-  await h.game.client.call("game.ready", replacement);
-  response.resolve({ stopReason: "aborted", content: [] });
-  await failed;
-  expect(usageRows(h.rows)).toEqual([
-    expect.objectContaining({
-      ...h.world,
-      data: expect.objectContaining({ source: "summary", ...storedTokens }),
-    }),
   ]);
+  h.bridge.finishModelRequest(h.world, "run", run.runId);
+  expect(() => h.bridge.recordUsage({ ...h.world, ...usage(run.runId) })).toThrow();
+  expect(h.bridge.finishRun(run)).toBe(true);
+  await drain();
+  expect(h.clears).toEqual([run]);
 });
 
-test.each([false, true])(
-  "summary token storage failure is not hidden by cancellation=%s",
-  async (cancelled) => {
-    const h = await fixture();
-    const faults: Error[] = [];
-    h.bridge.on("fault", (error) => faults.push(error));
-    const response = deferred<unknown>();
-    h.complete.mockImplementation(() => response.promise);
-    const controller = new AbortController();
-    const pending = h.bridge.summarize(h.world, "events", controller.signal);
-    const failed = expect(pending).rejects.toThrow("Token usage recording failed");
-    h.failActivities(new Error("usage storage failed"));
-    if (cancelled) controller.abort();
-    response.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
-    await failed;
-    expect(faults.map((error) => error.message)).toEqual(["usage storage failed"]);
-    expect(usageRows(h.rows)).toEqual([]);
-  },
-);
+test("agent role, old versions, wrong tokens and duplicate game connections are rejected", async () => {
+  const h = await fixture();
+  const ready = h.bridge.readySession;
+  for (const args of [
+    ["agent", 2],
+    ["game", 1],
+    ["game", 2, "b".repeat(43)],
+  ] as const)
+    await expect(h.connect(args[0], args[1], args[2])).rejects.toThrow();
+  await expect(h.connect()).rejects.toMatchObject({ code: -32002 });
+  expect(h.bridge.readySession).toEqual(ready);
+  for (const method of [
+    "hisyo.ready",
+    "hisyo.run.bind",
+    "hisyo.run.invalidate",
+    "hisyo.usage.record",
+    "hisyo.summary.get",
+    "hisyo.summary.create",
+    "hisyo.hooks.list",
+    "game.state.get",
+    "game.event",
+    "director.ready",
+  ]) {
+    await expect(h.game.call(method, {})).rejects.toMatchObject({ code: -32601 });
+  }
+});
 
-test("token reports require the agent role and an exact retained request binding", async () => {
+test("request lifecycle validates exact source, session, request ID and numeric counters", async () => {
   const h = await fixture();
   const run = await h.bridge.beginRun();
-  const report = {
-    ...h.world,
-    source: "run",
-    requestId: run.runId,
-    provider: "openai",
-    model: "gpt-6-luna",
-    api: "openai-completions",
-    stopReason: "stop",
-    ...storedTokens,
-  };
-  await expect(h.game.client.call("hisyo.usage.record", report)).rejects.toMatchObject({
-    code: -32010,
-  });
+  const report = { ...h.world, ...usage(run.runId) };
+  expect(() => h.bridge.recordUsage(report)).toThrow();
+  expect(() => h.bridge.beginModelRequest(h.world, "run", "foreign")).toThrow();
+  h.bridge.beginModelRequest(h.world, "run", run.runId);
+  expect(() => h.bridge.beginModelRequest(h.world, "run", run.runId)).toThrow();
   for (const patch of [
-    { sessionId: "other" },
-    { requestId: "other" },
+    { sessionId: "foreign" },
+    { requestId: "foreign" },
     { source: "summary" },
     { input: -1 },
     { total: 1.5 },
     { output: Number.MAX_SAFE_INTEGER + 1 },
     { secret: "PRIVATE_TOKEN" },
   ])
-    await expect(
-      h.agent.client.call("hisyo.usage.record", { ...report, ...patch }),
-    ).rejects.toBeInstanceOf(Error);
-  expect(usageRows(h.rows)).toEqual([]);
+    expect(() => h.bridge.recordUsage({ ...report, ...patch })).toThrow();
+  expect(h.rows("hisyo.token_usage")).toEqual([]);
   h.bridge.invalidateRun("cancelled");
-  await expect(h.agent.client.call("hisyo.usage.record", report)).resolves.toEqual({
-    recorded: true,
-  });
+  h.bridge.recordUsage({ ...report, stopReason: "aborted" });
+  expect(h.rows("hisyo.token_usage")).toHaveLength(1);
+  h.bridge.finishModelRequest(h.world, "run", run.runId);
+  expect(() => h.bridge.recordUsage(report)).toThrow();
+});
+
+test("declared run settlement closes retained metering without touching independent summary ownership", async () => {
+  const h = await fixture();
+  const run = await h.bridge.beginRun();
+  const summaryId = randomUUID();
+  h.bridge.beginModelRequest(h.world, "run", run.runId);
+  h.bridge.beginModelRequest(h.world, "summary", summaryId);
+  h.bridge.invalidateRun("cancelled");
+  h.bridge.recordUsage({ ...h.world, ...usage(run.runId), stopReason: "aborted" });
   h.bridge.finishRun(run);
-  await expect(h.agent.client.call("hisyo.usage.record", report)).rejects.toBeInstanceOf(Error);
-  expect(usageRows(h.rows)).toHaveLength(1);
+  expect(() => h.bridge.recordUsage({ ...h.world, ...usage(run.runId) })).toThrow();
+  expect(h.bridge.finishModelRequest(h.world, "run", run.runId)).toBe(false);
+  h.bridge.recordUsage({ ...h.world, ...usage(summaryId, "summary") });
+  expect(h.rows("hisyo.token_usage")).toHaveLength(2);
 });
 
-test("token storage failures are fatal and never acknowledged as saved", async () => {
+test("independent summary ownership starts paused, survives detach for late usage and ends explicitly", async () => {
   const h = await fixture();
-  await h.bridge.beginRun();
-  const faults: Error[] = [];
-  h.bridge.on("fault", (error) => faults.push(error));
-  h.failActivities(new Error("usage storage failed"));
-  const { ctx, controller } = h.context();
-  h.emit("agent_start", ctx);
-  await expect(
-    h.emit("message_end", ctx, {
-      message: {
-        role: "assistant",
-        provider: "openai",
-        model: "gpt-6-luna",
-        api: "openai-completions",
-        stopReason: "stop",
-        usage: reportedUsage,
-      },
+  await h.game.call("game.status", { ...h.world, paused: true });
+  const id = randomUUID();
+  h.bridge.beginModelRequest(h.world, "summary", id);
+  expect(h.binds).toEqual([]);
+  expect(() => h.bridge.beginModelRequest(h.world, "summary", randomUUID())).toThrow();
+  await h.game.call("game.detach", h.world);
+  const replacement = await h.attach("new-world", "new-player");
+  h.bridge.recordUsage({ ...h.world, ...usage(id, "summary"), stopReason: "aborted" });
+  expect(h.rows("hisyo.token_usage")).toEqual([
+    expect.objectContaining({
+      ...h.world,
+      data: { ...usage(id, "summary"), stopReason: "aborted" },
     }),
-  ).rejects.toThrow();
-  expect(faults.map((error) => error.message)).toEqual(["usage storage failed"]);
-  expect(controller.signal.aborted).toBe(true);
-  expect(usageRows(h.rows)).toEqual([]);
+  ]);
+  expect(h.rows("hisyo.token_usage", replacement)).toEqual([]);
+  h.bridge.finishModelRequest(replacement, "summary", id);
+  h.bridge.recordUsage({ ...h.world, ...usage(id, "summary") }); // Foreign finish never releases the owner.
+  h.bridge.finishModelRequest(h.world, "summary", id);
+  expect(() => h.bridge.recordUsage({ ...h.world, ...usage(id, "summary") })).toThrow();
+  expect(() => h.bridge.beginModelRequest(h.world, "summary", randomUUID())).toThrow();
+  h.bridge.beginModelRequest(replacement, "summary", randomUUID());
 });
 
-test("summarization is independent of run admission and rejects cancelled late results", async () => {
-  const h = await fixture();
-  expect(await h.bridge.summarize(h.world, "observed events", new AbortController().signal)).toBe(
-    "石を採掘した。",
-  );
-  expect(h.native).toHaveLength(0);
-  expect(h.complete.mock.calls[0]![2]).toMatchObject({
-    serviceTier: "priority",
-    reasoningEffort: "low",
-  });
-  const response = deferred<unknown>();
-  h.complete.mockImplementation(() => response.promise);
-  const controller = new AbortController();
-  const pending = h.bridge.summarize(h.world, "more observations", controller.signal);
-  controller.abort();
-  expect((h.complete.mock.calls[1]![2] as { signal: AbortSignal }).signal.aborted).toBe(true);
-  await expect(
-    h.bridge.summarize(h.world, "overlap", new AbortController().signal),
-  ).rejects.toThrow("Summarization is not available");
-  const rejected = expect(pending).rejects.toThrow();
-  response.resolve({ stopReason: "stop", content: [{ type: "text", text: "late" }] });
-  await rejected;
-});
-
-test("summaries can start while paused without admitting a main run", async () => {
-  const h = await fixture();
-  await h.game.client.call("game.status", { ...h.world, paused: true });
-  await expect(
-    h.bridge.summarize(h.world, "observed events", new AbortController().signal),
-  ).resolves.toBe("石を採掘した。");
-  expect(h.native).toHaveLength(0);
-  expect(h.game.host.calls).not.toContain("game.run.bind");
-  expect(h.agent.host.calls).not.toContain("hisyo.run.bind");
-});
-
-test.each([false, true])(
-  "bridge saves summaries and starts the next batch across pause; resumed=%s",
-  async (resume) => {
+test.each(["run", "summary"] as const)(
+  "%s usage storage failure is fatal and never acknowledged",
+  async (source) => {
     const h = await fixture();
-    const attached = h.bridge.readySession!;
-    vi.spyOn(h.bridge.summaries, "next").mockReturnValue({
-      source: {
-        after: 0,
-        through: 1,
-        sourceSessionId: h.world.sessionId,
-        sourceCount: 1,
-        firstObservedAt: 1,
-        lastObservedAt: 1,
-        input: "attachment observed",
-      },
-      backlog: false,
-    });
-    const save = vi.spyOn(h.bridge.summaries, "save").mockImplementation(() => {});
-    const response = deferred<unknown>();
-    h.complete.mockImplementation(() => response.promise);
-    let now = 0;
-    const summaryScheduler = new SummaryScheduler({
-      bridge: h.bridge,
-      summarize: (...args) => h.bridge.summarize(...args),
-      now: () => now,
-    });
-    try {
-      now = 60_000;
-      expect(summaryScheduler.poll(h.world)).toBe(true);
-      const signal = (h.complete.mock.calls[0]![2] as { signal: AbortSignal }).signal;
-      await h.game.client.call("game.status", { ...h.world, paused: true });
-      expect(signal.aborted).toBe(false);
-      expect(attached.paused).toBe(false); // Host emits fresh snapshots, never its mutable world.
-      expect(summaryScheduler.poll(h.world)).toBe(false);
-      if (resume) await h.game.client.call("game.status", { ...h.world, paused: false });
-      response.resolve({ stopReason: "stop", content: [{ type: "text", text: "completed" }] });
-      await drain();
-      expect(save).toHaveBeenCalledOnce();
-      expect(save.mock.calls[0]![2]).toBe("completed");
-      now = 120_000;
-      expect(summaryScheduler.poll(h.world)).toBe(true);
-      await drain();
-      expect(save).toHaveBeenCalledTimes(2);
-      expect(h.complete).toHaveBeenCalledTimes(2);
-    } finally {
-      response.resolve({ stopReason: "stop", content: [{ type: "text", text: "cleanup" }] });
-      await summaryScheduler.close();
-    }
+    const id = source === "run" ? (await h.bridge.beginRun()).runId : randomUUID();
+    h.bridge.beginModelRequest(h.world, source, id);
+    h.failActivities("hisyo.token_usage");
+    expect(() => h.bridge.recordUsage({ ...h.world, ...usage(id, source) })).toThrow(
+      "activity write failed",
+    );
+    expect(h.rows("hisyo.token_usage")).toEqual([]);
+    expect(h.faults.map(({ message }) => message)).toEqual(["activity write failed"]);
+    expect(h.bridge.readySession).toBeUndefined();
   },
 );
 
-test("saved summary context is authenticated, run-bound, fresh and not exposed as a new game tool", async () => {
-  const h = await fixture();
-  const run = await h.bridge.beginRun();
-  h.summaryContext.mockReturnValue("saved summary");
-  expect(await h.agent.client.call("hisyo.summary.get", run)).toEqual({
-    ...run,
-    text: "saved summary",
-  });
-  expect(h.summaryContext).toHaveBeenCalledWith({
-    worldId: run.worldId,
-    playerId: run.playerId,
-  });
-  await expect(h.game.client.call("hisyo.summary.get", run)).rejects.toThrow(
-    "forbidden bridge role",
-  );
-  await expect(
-    h.agent.client.call("hisyo.summary.get", { ...run, runId: "stale" }),
-  ).rejects.toThrow();
-  expect(h.tools.size).toBe(10);
-});
-
-test("the bridge exposes canonical RPCs without old aliases", async () => {
-  const h = await fixture();
-  for (const method of [
-    "game.event",
-    "director.ready",
-    "director.events.get",
-    "director.history.get",
-  ])
-    expect(h.game.host.handlers.has(method)).toBe(false);
-  for (const method of ["game.events", "hisyo.ready", "hisyo.events.search", "hisyo.summary.get"])
-    expect(h.game.host.handlers.has(method)).toBe(true);
-});
-
-test("protocol 1 and old binding fields are rejected without replacing the ready session", async () => {
-  const h = await fixture();
-  const ready = h.bridge.readySession;
-  await expect(h.connect("game", 1)).rejects.toThrow("Authentication failed");
-  await expect(
-    h.game.client.call("game.status", {
-      worldId: h.world.worldId,
-      playerId: h.world.playerId,
-      worldSessionId: h.world.sessionId,
-      paused: true,
-    }),
-  ).rejects.toThrow("Invalid method parameters");
-  expect(h.bridge.readySession).toEqual(ready);
-  expect(h.game.client.isClosed).toBe(false);
-});
-
-test("event batches persist in order before observation delivery, including one-event batches", async () => {
+test("saved summary context is run-bound, refreshed and not another game tool", async () => {
   const h = await fixture(["block_broken"]);
-  const events = Array.from({ length: 100 }, (_, index) => ({
-    ...h.world,
-    seq: index + 1,
-    tick: index + 20,
-    observedAt: index + 1000,
+  const run = await h.bridge.beginRun();
+  expect(h.bridge.summaryContext(run)).toBe("");
+  await h.game.call("game.events", { events: [observation(h.world)] });
+  const source = h.summaries.next(scope(h.world))!.source;
+  h.summaries.save(scope(h.world), source, "saved summary", 2000);
+  expect(h.bridge.summaryContext(run)).toContain("saved summary");
+  expect(() => h.bridge.summaryContext({ ...run, runId: "stale" })).toThrow();
+  expect(hisyoTools).toHaveLength(10);
+  h.bridge.invalidateRun("cancelled");
+  expect(() => h.bridge.summaryContext(run)).toThrow();
+});
+
+test("direct tool inputs enforce the exact ten-tool allowlist and schemas before side effects", async () => {
+  const h = await fixture(["block_broken"]);
+  const run = await h.bridge.beginRun();
+  for (const [name, args] of [
+    ["bash", {}],
+    ["send_message", { text: " " }],
+    ["send_message", { text: "hello", runId: "injected" }],
+    ["get_game_state", { query: { nbt: true } }],
+    ["list_game_files", { query: { root: "minecraft:0", path: "../secret" } }],
+    ["add_hook", { event: "hisyo.status_reported", instruction: "bad" }],
+    ["add_hook", { event: "block_broken", instruction: " " }],
+    ["search_events", { query: { filter: {} } }],
+  ] as const)
+    await expect(h.bridge.executeTool(run, name, args)).rejects.toThrow();
+  expect(h.requests).toEqual([]);
+  expect(h.hooks.list(scope(h.world)).hooks).toEqual([]);
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    h.bridge.executeTool(run, "send_message", { text: "cancelled" }, controller.signal),
+  ).rejects.toThrow();
+  expect(h.requests).toEqual([]);
+});
+
+test("async player intake must durably accept before the game receives an ACK", async () => {
+  const h = await fixture();
+  await expect(
+    h.game.call("game.player_message", { ...h.world, text: "not accepted" }),
+  ).rejects.toMatchObject({ code: -32003 });
+  const retained = deferred<void>();
+  const called = deferred<void>();
+  const release = h.bridge.handlePlayerMessages((binding, text) => {
+    expect(binding).toEqual(h.world);
+    expect(text).toBe("hello");
+    called.resolve();
+    return retained.promise;
+  });
+  expect(() => h.bridge.handlePlayerMessages(() => {})).toThrow();
+  let accepted = false;
+  const pending = h.game
+    .call("game.player_message", { ...h.world, text: "hello" })
+    .then((result) => {
+      accepted = true;
+      return result;
+    });
+  await called.promise;
+  await drain();
+  expect(accepted).toBe(false);
+  expect(h.rows("hisyo.player_input").at(-1)?.data).toEqual({ text: "hello" });
+  retained.resolve();
+  await expect(pending).resolves.toEqual({ accepted: true });
+  release();
+  await expect(
+    h.game.call("game.player_message", { ...h.world, text: "late" }),
+  ).rejects.toMatchObject({ code: -32003 });
+});
+
+test("failed asynchronous intake never claims player input was accepted", async () => {
+  const h = await fixture();
+  h.bridge.handlePlayerMessages(async () => {
+    throw new Error("durable intake failed");
+  });
+  await expect(
+    h.game.call("game.player_message", { ...h.world, text: "retained fact only" }),
+  ).rejects.toMatchObject({ code: -32603 });
+  expect(h.rows("hisyo.player_input")).toHaveLength(1);
+});
+
+test("event batches commit raw observations and hook audits before ordered delivery", async () => {
+  const h = await fixture(["block_broken"]);
+  const run = await h.bridge.beginRun();
+  const hook = (await h.bridge.executeTool(run, "add_hook", {
     event: "block_broken",
-    dimension: "minecraft:overworld",
-    position: [1, 2, 3],
-    data: { blockId: "minecraft:stone", position: [1, 2, 3] },
-  }));
-  h.matchedHooks.push({ id: "hook", event: "block_broken", filter: {}, instruction: "report" });
-  const delivered: unknown[] = [];
+    instruction: "report",
+  })) as Hook;
+  const events = Array.from({ length: 100 }, (_, index) => observation(h.world, index + 1));
+  const delivered: GameEvent[] = [];
   h.bridge.on("observation", (stored, hooks) => {
-    expect(h.observations.slice(0, events.length)).toEqual(events); // Whole raw batch persisted before its first delivery.
-    expect(hooks).toEqual(h.matchedHooks);
-    expect(h.rows).toContainEqual(
-      expect.objectContaining({
-        event: "hisyo.hook_matched",
-        data: { hookId: "hook", sourceEventId: stored.id },
-      }),
+    expect(h.observations().slice(0, 100)).toEqual(events);
+    expect(hooks).toEqual([hook]);
+    expect(h.rows("hisyo.hook_matched")).toContainEqual(
+      expect.objectContaining({ data: { hookId: hook.id, sourceEventId: stored.id } }),
     );
     delivered.push(stored.observation);
   });
-  await expect(h.game.client.call("game.events", { events })).resolves.toEqual({ stored: 100 });
+  await expect(h.game.call("game.events", { events })).resolves.toEqual({ stored: 100 });
   expect(delivered).toEqual(events);
-  const single = { ...events[0], seq: 101 };
-  await expect(h.game.client.call("game.events", { events: [single] })).resolves.toEqual({
-    stored: 1,
-  });
-  expect(delivered.at(-1)).toEqual(single);
+  await expect(
+    h.game.call("game.events", { events: [observation(h.world, 101)] }),
+  ).resolves.toEqual({ stored: 1 });
+  expect(delivered).toHaveLength(101);
 });
 
-test("event batches reject invalid scope, capabilities and malformed input without partial delivery", async () => {
+test("observation intake is awaited once before diagnostics and the stored ACK", async () => {
   const h = await fixture(["block_broken"]);
-  const event = {
-    ...h.world,
-    seq: 1,
-    tick: 20,
-    observedAt: 1000,
-    event: "block_broken",
-    dimension: "minecraft:overworld",
-    position: [1, 2, 3],
-    data: {},
-  };
-  const before = { activities: [...h.rows], observations: [...h.observations] };
+  const entered = deferred<void>();
+  const retained = deferred<void>();
+  const admitted: number[] = [];
+  const delivered: number[] = [];
+  const release = h.bridge.handleObservations(async (stored) => {
+    expect(h.observations()).toHaveLength(2);
+    admitted.push(stored.id);
+    entered.resolve();
+    if (stored.id === 1) await retained.promise;
+  });
+  expect(() => h.bridge.handleObservations(() => {})).toThrow();
+  h.bridge.on("observation", (stored) => delivered.push(stored.id));
+  let acknowledged = false;
+  const pending = h.game
+    .call("game.events", { events: [observation(h.world), observation(h.world, 2)] })
+    .then((result) => {
+      acknowledged = true;
+      return result;
+    });
+  await entered.promise;
+  await drain();
+  expect(admitted).toEqual([1]);
+  expect(delivered).toEqual([]);
+  expect(acknowledged).toBe(false);
+  retained.resolve();
+  await expect(pending).resolves.toEqual({ stored: 2 });
+  expect(admitted).toEqual([1, 2]);
+  expect(delivered).toEqual([1, 2]);
+  release();
+  await h.game.call("game.events", { events: [observation(h.world, 3)] });
+  expect(admitted).toEqual([1, 2]);
+  expect(delivered).toEqual([1, 2, 3]);
+});
+
+test.each([false, true])(
+  "observation admission failure leaves raw persistence factual; owner handles stored ACK=%s",
+  async (handled) => {
+    const h = await fixture(["block_broken"]);
+    const schedulerFaults: Error[] = [];
+    h.bridge.handleObservations(async () => {
+      const failure = new Error("durable queue failed");
+      if (!handled) throw failure;
+      schedulerFaults.push(failure); // Owner reports failure yet retains the already-stored ACK policy.
+    });
+    const pending = h.game.call("game.events", { events: [observation(h.world)] });
+    if (handled) await expect(pending).resolves.toEqual({ stored: 1 });
+    else await expect(pending).rejects.toMatchObject({ code: -32603 });
+    expect(h.observations()).toEqual([observation(h.world)]);
+    expect(schedulerFaults).toHaveLength(handled ? 1 : 0);
+    expect(h.bridge.readySession).toBeDefined(); // No fictional storage rollback or storage-fault latch.
+  },
+);
+
+test("event batches reject malformed input, foreign scope and unadvertised capabilities without partial persistence", async () => {
+  const h = await fixture(["block_broken"]);
+  const event = observation(h.world);
   for (const params of [
     { events: [] },
     { events: [event, { ...event, seq: 2, sessionId: "stale" }] },
@@ -750,516 +498,293 @@ test("event batches reject invalid scope, capabilities and malformed input witho
     { events: [event], extra: true },
     { events: Array(1025).fill(event) },
   ]) {
-    await expect(h.game.client.call("game.events", params)).rejects.toThrow();
-    expect({ activities: h.rows, observations: h.observations }).toEqual(before);
+    await expect(h.game.call("game.events", params)).rejects.toThrow();
+    expect(h.observations()).toEqual([]);
+    expect(h.rows()).toHaveLength(1);
   }
-  await expect(h.agent.client.call("game.events", { events: [event] })).rejects.toMatchObject({
-    code: -32010,
-  });
-  h.failStorage(new Error("write failed"));
-  await expect(h.game.client.call("game.events", { events: [event] })).rejects.toThrow(
-    "write failed",
-  );
-  expect({ activities: h.rows, observations: h.observations }).toEqual(before);
 });
 
-test("a failed event batch rolls back its earlier observations without delivering hooks", async () => {
+test("failed second raw insert rolls back the complete batch and delivers nothing", async () => {
   const h = await fixture(["block_broken"]);
-  const event = {
-    ...h.world,
-    seq: 1,
-    tick: 20,
-    observedAt: 1000,
-    event: "block_broken",
-    dimension: "minecraft:overworld",
-    position: [1, 2, 3],
-    data: {},
-  };
-  const before = { activities: [...h.rows], observations: [...h.observations] };
-  const delivered: unknown[] = [];
-  h.bridge.on("observation", (stored) => delivered.push(stored));
-  h.failStorage(new Error("second write failed"), 1);
+  h.rawDb.exec(
+    "CREATE TRIGGER fail_raw BEFORE INSERT ON events WHEN NEW.seq = 2 BEGIN SELECT RAISE(ABORT, 'second raw write failed'); END;",
+  );
+  const delivered = vi.fn();
+  h.bridge.on("observation", delivered);
   await expect(
-    h.game.client.call("game.events", { events: [event, { ...event, seq: 2 }] }),
-  ).rejects.toThrow("second write failed");
-  expect({ activities: h.rows, observations: h.observations }).toEqual(before);
-  expect(delivered).toEqual([]);
+    h.game.call("game.events", { events: [observation(h.world), observation(h.world, 2)] }),
+  ).rejects.toMatchObject({ code: -32603 });
+  expect(h.observations()).toEqual([]);
+  expect(delivered).not.toHaveBeenCalled();
+  expect(h.faults[0]?.message).toBe("second raw write failed");
 });
 
 test.each(["match", "audit"])(
-  "%s failure leaves the raw batch durable but emits no observation or ACK",
+  "%s failure preserves committed raw batch but emits no delivery or ACK",
   async (stage) => {
     const h = await fixture(["block_broken"]);
-    const events = [1, 2].map((seq) => ({
-      ...h.world,
-      seq,
-      tick: 20,
-      observedAt: 1000,
-      event: "block_broken",
-      dimension: "minecraft:overworld",
-      position: [1, 2, 3],
-      data: {},
-    }));
-    h.matchedHooks.push({ id: "hook", event: "block_broken", filter: {}, instruction: "report" });
-    const before = [...h.rows];
-    const failure = new Error(`${stage} failed`);
+    const run = await h.bridge.beginRun();
+    await h.bridge.executeTool(run, "add_hook", { event: "block_broken", instruction: "report" });
     if (stage === "match")
-      vi.spyOn(h.hooks, "match").mockImplementation(() => {
-        expect(h.observations).toEqual(events); // Raw commit precedes activity work.
-        throw failure;
-      });
-    else {
-      const append = h.activityLog.appendActivity.bind(h.activityLog);
-      vi.spyOn(h.activityLog, "appendActivity")
-        .mockImplementationOnce(append)
-        .mockImplementationOnce(() => {
-          throw failure;
-        });
-    }
+      h.activityDb.exec("UPDATE hooks SET filter_json = '{\"unknownField\":true}';");
+    else
+      h.activityDb.exec(
+        "CREATE TRIGGER fail_match BEFORE INSERT ON activities WHEN NEW.event = 'hisyo.hook_matched' AND json_extract(NEW.activity_json,'$.data.sourceEventId') = 2 BEGIN SELECT RAISE(ABORT, 'match audit failed'); END;",
+      );
     const delivered = vi.fn();
-    const faults = vi.fn();
     h.bridge.on("observation", delivered);
-    h.bridge.on("fault", faults);
-    await expect(h.game.client.call("game.events", { events })).rejects.toBe(failure);
-    expect(h.observations).toEqual(events);
-    expect(h.rows).toEqual(before); // The whole activity audit batch rolls back.
+    const events = [observation(h.world), observation(h.world, 2)];
+    await expect(h.game.call("game.events", { events })).rejects.toMatchObject({ code: -32603 });
+    expect(h.observations()).toEqual(events);
+    expect(h.rows("hisyo.hook_matched")).toEqual([]);
     expect(delivered).not.toHaveBeenCalled();
-    expect(faults).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(h.faults).toHaveLength(1);
     expect(h.bridge.readySession).toBeUndefined();
   },
 );
 
-test("event queries keep raw and explicit Hisyo activity cursors independent", async () => {
+test("event and activity searches retain separate high-water/cursor namespaces", async () => {
   const h = await fixture(["block_broken"]);
   const run = await h.bridge.beginRun();
-  for (const query of [{}, { event: "block_broken", after: 3, through: 41, limit: 1 }]) {
-    await expect(h.agent.client.call("hisyo.events.search", { ...run, query })).resolves.toEqual({
-      events: [],
-      through: 41,
-      hasKnownGaps: true,
-      nextCursor: 3,
-    });
-    expect(h.rawSearch).toHaveBeenLastCalledWith({ worldId: "w", playerId: "p" }, query);
-  }
-  const query = {
-    event: "hisyo.status_reported",
-    filter: { paused: true },
-    after: 2,
-    through: 9,
-    limit: 1,
+  await h.game.call("game.events", { events: [observation(h.world, 2), observation(h.world, 3)] });
+  await h.game.call("game.status", { ...h.world, paused: true });
+  const raw = (await h.bridge.executeTool(run, "search_events", { query: { limit: 1 } })) as {
+    through: number;
+    nextCursor: number;
+    hasKnownGaps: boolean;
   };
-  await expect(h.agent.client.call("hisyo.events.search", { ...run, query })).resolves.toEqual({
-    events: [],
-    through: 9,
-    hasKnownGaps: false,
-    nextCursor: 2,
-  });
-  expect(h.activitySearch).toHaveBeenCalledExactlyOnceWith({ worldId: "w", playerId: "p" }, query);
-  expect(h.rawSearch).toHaveBeenCalledTimes(2);
-  const result = (await h.agent.client.call("hisyo.events.list", run)) as { events: unknown[] };
-  expect(result.events).toContainEqual(
+  expect(raw).toMatchObject({ through: 2, nextCursor: 1, hasKnownGaps: true });
+  const logged = (await h.bridge.executeTool(run, "search_events", {
+    query: { event: "hisyo.status_reported", filter: { paused: true } },
+  })) as { events: unknown[]; through: number };
+  expect(logged.events).toEqual([
+    expect.objectContaining({
+      activity: expect.objectContaining({ event: "hisyo.status_reported" }),
+    }),
+  ]);
+  expect(logged.through).toBe(2);
+  const catalog = (await h.bridge.executeTool(run, "list_event_types", {})) as {
+    events: unknown[];
+  };
+  expect(catalog.events).toContainEqual(
     expect.objectContaining({ name: "block_broken", origin: "game", hookable: true }),
   );
-  expect(result.events).toContainEqual(
+  expect(catalog.events).toContainEqual(
     expect.objectContaining({ name: "hisyo.status_reported", origin: "cli", hookable: false }),
   );
 });
 
-test.each(["add", "remove"])(
-  "hook %s rolls back its mutation when activity audit fails",
-  async (method) => {
+test.each(["add_hook", "remove_hook"])(
+  "%s mutation rolls back with a failed audit in real SQLite",
+  async (name) => {
     const h = await fixture(["block_broken"]);
     const run = await h.bridge.beginRun();
-    const added = (await h.agent.client.call("hisyo.hooks.add", {
-      ...run,
+    const hook = (await h.bridge.executeTool(run, "add_hook", {
       event: "block_broken",
       instruction: "report",
     })) as Hook;
-    expect(h.rows.at(-1)).toMatchObject({
-      event: "hisyo.hook_added",
-      data: { hookId: added.id },
-    });
-    const before = h.hooks.list(h.world);
-    const rawAtomic = vi.spyOn(h.eventLog, "atomic");
-    const failure = new Error("audit failed");
-    h.failActivities(failure);
-    const params =
-      method === "add"
-        ? { ...run, event: "block_broken", instruction: "report again" }
-        : { ...run, id: added.id };
-    await expect(h.agent.client.call(`hisyo.hooks.${method}`, params)).rejects.toBe(failure);
-    expect(h.hooks.list(h.world)).toEqual(before);
-    expect(h.observations).toEqual([]);
-    expect(rawAtomic).not.toHaveBeenCalled();
+    expect(h.rows("hisyo.hook_added")[0]?.data).toMatchObject({ hookId: hook.id });
+    const before = h.hooks.list(scope(h.world));
+    h.failActivities();
+    const args =
+      name === "add_hook" ? { event: "block_broken", instruction: "again" } : { id: hook.id };
+    await expect(h.bridge.executeTool(run, name, args)).rejects.toThrow("activity write failed");
+    expect(h.hooks.list(scope(h.world))).toEqual(before);
+    expect(h.observations()).toEqual([]);
   },
 );
 
-test.each(["raw", "hooks"])("bridge rejects invalid %s database ownership", (invalid) => {
-  const raw = {};
-  const activities = {};
-  expect(
-    () =>
-      new BridgeServer(
-        {
-          token: "a".repeat(43),
-          eventLog: { db: raw } as EventLog,
-          activityLog: { db: invalid === "raw" ? raw : activities } as ActivityLog,
-          hooks: { db: invalid === "hooks" ? raw : activities } as HookStore,
-          summaries: {} as SummaryStore,
-        },
-        () => new EventEmitter() as Server,
-      ),
-  ).toThrow(invalid === "raw" ? /separate/ : /Activity.*hooks/);
+test("list/remove hook tools preserve scoped results and audit only successful removals", async () => {
+  const h = await fixture(["block_broken"]);
+  const run = await h.bridge.beginRun();
+  const hook = (await h.bridge.executeTool(run, "add_hook", {
+    event: "block_broken",
+    instruction: "report",
+  })) as Hook;
+  expect(await h.bridge.executeTool(run, "list_hooks", { limit: 1 })).toEqual({ hooks: [hook] });
+  expect(await h.bridge.executeTool(run, "remove_hook", { id: hook.id })).toEqual({
+    removed: true,
+  });
+  expect(await h.bridge.executeTool(run, "remove_hook", { id: hook.id })).toEqual({
+    removed: false,
+  });
+  expect(h.rows("hisyo.hook_removed")).toHaveLength(1);
 });
 
-test("attachment retains the initial language and rejects missing or invalid language codes", async () => {
+test("attachment retains language; legacy binding fields and invalid languages cannot replace it", async () => {
   const h = await fixture();
-  expect(h.bridge.currentSession).toMatchObject({ language: "ja_jp" });
-  await h.game.client.call("game.detach", h.world);
+  const ready = h.bridge.readySession;
+  await expect(
+    h.game.call("game.status", {
+      worldId: "w",
+      playerId: "p",
+      worldSessionId: h.world.sessionId,
+      paused: true,
+    }),
+  ).rejects.toMatchObject({ code: -32602 });
+  expect(h.bridge.readySession).toEqual(ready);
+  await h.game.call("game.detach", h.world);
   const attach = { worldId: "w", playerId: "p", supportedEvents: [], paused: false };
   for (const language of [undefined, null, "", 123, "a".repeat(17), "ja_jp\n"])
-    await expect(h.game.client.call("game.attach", { ...attach, language })).rejects.toMatchObject({
+    await expect(h.game.call("game.attach", { ...attach, language })).rejects.toMatchObject({
       code: -32602,
     });
   expect(h.bridge.currentSession).toBeUndefined();
-  await h.game.client.call("game.attach", { ...attach, language: "en_us" });
+  await h.game.call("game.attach", { ...attach, language: "en_us" });
   expect(h.bridge.currentSession).toMatchObject({ language: "en_us" });
 });
 
-test("native withdrawal FIRST cancels without retirement; queued manual/tick wait for actual settlement and validated resume", async () => {
-  const h = await fixture();
-  const flights: {
-    binding: RunBinding;
-    ctx: ExtensionContext;
-    controller: AbortController;
-    settled: ReturnType<typeof deferred<void>>;
-    context: Promise<unknown>;
-  }[] = [];
-  let providerDispatches = 0;
-  let retired = false;
-  const session = Object.assign(new EventEmitter(), {
-    run: vi.fn(async (_message: string) => {
-      const { ctx, controller } = h.context();
-      const invalidated = () => controller.abort();
-      h.bridge.on("runInvalidated", invalidated);
-      let binding: RunBinding | undefined;
-      try {
-        binding = await h.bridge.beginRun();
-        if (controller.signal.aborted) return { status: "not_started" };
-        h.emit("agent_start", ctx);
-        const settled = deferred<void>();
-        const context = Promise.resolve(h.emit("context", ctx, { messages: [] }))
-          .catch((error: unknown) => error)
-          .then((result) => {
-            if (!controller.signal.aborted) providerDispatches++;
-            return result;
-          });
-        flights.push({ binding, ctx, controller, settled, context });
-        await settled.promise;
-        return { status: "settled", aborted: controller.signal.aborted };
-      } catch (error) {
-        if (controller.signal.aborted && !binding) return { status: "not_started" };
-        throw error;
-      } finally {
-        if (binding) h.bridge.finishRun(binding);
-        h.bridge.off("runInvalidated", invalidated);
-      }
-    }),
-    close: async () => {
-      retired = true;
-    },
-  });
-  // Existing owner resource port only; real scheduler, host and extension handlers are exercised.
-  vi.mocked(startPiProcess).mockResolvedValue(
-    session as unknown as Awaited<ReturnType<typeof startPiProcess>>,
-  );
-  let now = 0;
-  const scheduler = new RunScheduler({
-    bridge: h.bridge,
-    dataDirectory: "/unused",
-    executable: "unused",
-    bundledExtension: "/unused",
-    model: { provider: "p", id: "m", apiKey: "unused" },
-    connection: { protocolVersion: 2, host: "127.0.0.1", port: 1, token: "unused", pid: 1 },
-    monotonicNow: () => now,
-  });
-  onTestFinished(() => scheduler.close());
-  const faults: Error[] = [];
-  scheduler.on("fault", (error) => faults.push(error));
-  await drain();
-  expect(flights).toHaveLength(1);
-  await h.game.client.call("game.player_message", { ...h.world, text: "retained" });
-  // Poll reason is queued behind the still-running context, not a separate run.
-  now = 60_000;
-  expect(scheduler.poll(h.world)).toBe(true);
-  expect(flights[0]!.controller.signal.aborted).toBe(false);
-  expect(h.agent.host.calls).not.toContain("hisyo.run.invalidate");
-  h.native[0]!.result.reject(new RpcError(-32001, "Inactive or stale execution binding"));
-  await flights[0]!.context;
-  expect(h.agent.client.isClosed).toBe(false);
-  expect(retired).toBe(false);
-  expect(providerDispatches).toBe(0);
-  expect(flights[0]!.controller.signal.aborted).toBe(true);
-  expect(h.bridge.currentSession!.paused).toBe(false); // No fabricated pause fact/summaries.
-  expect(h.rows).toHaveLength(3); // attach, first reasons, input, no inferred status row.
-  await expect(
-    h.tools
-      .get("send_message")!
-      .execute("id", { text: "stale" }, flights[0]!.controller.signal, undefined, flights[0]!.ctx),
-  ).rejects.toThrow();
-  h.emit("agent_end", flights[0]!.ctx);
-  expect(session.run).toHaveBeenCalledTimes(1);
-  expect(() =>
-    h.agent.client.receive("hisyo.run.bind", { ...flights[0]!.binding, runId: "too-early" }),
-  ).toThrow();
-  h.emit("agent_settled", flights[0]!.ctx);
-  flights[0]!.settled.resolve();
-  await drain();
-  expect(session.run).toHaveBeenCalledTimes(2); // Host-only reservation waits, no native bind.
-  expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
-  expect(h.native).toHaveLength(1);
-  await expect(
-    h.game.client.call("game.status", { ...h.world, paused: false, extra: true }),
-  ).rejects.toMatchObject({ code: -32602 });
-  await drain();
-  expect(session.run).toHaveBeenCalledTimes(2);
-  await h.game.client.call("game.status", { ...h.world, paused: true });
-  await drain();
-  expect(session.run).toHaveBeenCalledTimes(2);
-  expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
-  await h.game.client.call("game.status", { ...h.world, paused: false });
-  await drain();
-  expect(flights).toHaveLength(2);
-  expect(JSON.parse(session.run.mock.calls[1]![0])).toMatchObject({
-    playerMessages: ["retained"],
-    poll: true,
-  });
-  expect(h.native[1]!.params.runId).not.toBe(flights[0]!.binding.runId);
-  h.native[1]!.result.resolve({ ...flights[1]!.binding, state: { ...snapshot, tick: 999 } });
-  expect(await flights[1]!.context).toMatchObject({
-    messages: [{ content: expect.stringContaining('"tick":999') }],
-  });
-  expect(providerDispatches).toBe(1);
-  expect(faults).toEqual([]);
-  expect(retired).toBe(false);
-  h.emit("agent_settled", flights[1]!.ctx);
-  flights[1]!.settled.resolve();
-  await drain();
-});
-
 const forwards = [
-  ["game.state.get", { query: {} }],
-  ["game.message.send", { text: "hello" }],
-  ["game.files.list", { query: {} }],
-  ["game.files.read", { query: { root: "minecraft:0", path: "data/a.json" } }],
-  ["game.files.search", { query: { root: "minecraft:0", path: "data", text: "a" } }],
+  ["get_game_state", "game.state.get", { query: {} }, { state: snapshot }],
+  ["send_message", "game.message.send", { text: "hello" }, { displayed: true }],
+  [
+    "list_game_files",
+    "game.files.list",
+    { query: {} },
+    { reference: { kind: "roots", roots: [], nextCursor: null } },
+  ],
+  [
+    "read_game_file",
+    "game.files.read",
+    { query: { root: "minecraft:0", path: "data/a.json" } },
+    { reference: { root: "minecraft:0", path: "data/a.json", content: "{}", bytes: 2 } },
+  ],
+  [
+    "search_game_files",
+    "game.files.search",
+    { query: { root: "minecraft:0", path: "data", text: "a" } },
+    {
+      reference: {
+        root: "minecraft:0",
+        path: "data",
+        text: "a",
+        matches: [],
+        scanned: 0,
+        nextCursor: null,
+        firstMatchPerFile: true,
+      },
+    },
+  ],
 ] as const;
 
 test.each(forwards)(
-  "pause preserves admitted %s and subsequent state access",
-  async (method, args) => {
+  "pause preserves admitted %s, exact native wire and fresh context",
+  async (name, method, args, result) => {
     const h = await fixture();
     const binding = await h.bridge.beginRun();
     const invalidated = vi.fn();
     h.bridge.on("runInvalidated", invalidated);
-    const pending = h.agent.client
-      .call(method, { ...binding, ...args })
-      .catch((error: unknown) => error);
-    await h.game.client.call("game.status", { ...h.world, paused: true });
-    const result =
-      method === "game.state.get"
-        ? { state: snapshot }
-        : method === "game.message.send"
-          ? { displayed: true }
-          : method === "game.files.list"
-            ? { reference: { kind: "roots", roots: [], nextCursor: null } }
-            : method === "game.files.read"
-              ? { reference: { root: "minecraft:0", path: "data/a.json", content: "{}", bytes: 2 } }
-              : {
-                  reference: {
-                    root: "minecraft:0",
-                    path: "data",
-                    text: "a",
-                    matches: [],
-                    scanned: 0,
-                    nextCursor: null,
-                    firstMatchPerFile: true,
-                  },
-                };
-    h.native[0]!.result.resolve({ ...binding, ...result });
+    const pending = h.bridge.executeTool(binding, name, args);
+    const call = await h.native();
+    expect(call.method).toBe(method);
+    expect(call.params).toEqual({ ...binding, ...args });
+    await h.game.call("game.status", { ...h.world, paused: true });
+    call.result.resolve({ ...binding, ...result });
     expect(await pending).toEqual({ ...binding, ...result });
-    const nextState = h.agent.client.call("game.state.get", { ...binding, query: {} });
-    h.native[1]!.result.resolve({ ...binding, state: snapshot });
-    expect(await nextState).toEqual({ ...binding, state: snapshot });
-    await h.game.client.call("game.status", { ...h.world, paused: false });
-    expect(await h.agent.client.call("hisyo.summary.get", binding)).toEqual({
-      ...binding,
-      text: "",
-    });
+    const next = h.bridge.getGameState(binding);
+    (await h.native(1)).result.resolve({ ...binding, state: { ...snapshot, tick: 999 } });
+    expect(await next).toEqual({ ...snapshot, tick: 999 });
+    expect(h.bridge.summaryContext(binding)).toBe("");
     expect(invalidated).not.toHaveBeenCalled();
-    expect(h.agent.host.calls).not.toContain("hisyo.run.invalidate");
     expect(h.bridge.finishRun(binding)).toBe(true);
   },
 );
 
-test("startup pause updates attachment state without making the session ready", async () => {
+test("startup pause updates facts but never grants readiness; admitted preparation may bind paused", async () => {
   const h = await fixture();
-  await h.game.client.call("game.detach", h.world);
-  const binding = (await h.game.client.call("game.attach", {
+  await h.game.call("game.detach", h.world);
+  const binding = (await h.game.call("game.attach", {
     worldId: "w",
     playerId: "p",
     language: "ja_jp",
     supportedEvents: [],
     paused: false,
   })) as SessionBinding;
-  const attached = vi.fn();
+  const attach = vi.fn();
   const status = vi.fn();
-  h.bridge.on("attach", attached);
+  h.bridge.on("attach", attach);
   h.bridge.on("status", status);
-  await expect(h.game.client.call("game.status", { ...binding, paused: true })).resolves.toEqual({
-    paused: true,
-  });
+  await h.game.call("game.status", { ...binding, paused: true });
   expect(h.bridge.readySession).toBeUndefined();
-  expect(attached).not.toHaveBeenCalled();
+  expect(attach).not.toHaveBeenCalled();
   expect(status).not.toHaveBeenCalled();
-  await h.game.client.call("game.ready", binding);
-  expect(attached).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ paused: true }));
-  expect(h.game.client.isClosed).toBe(false);
-});
-
-test("pause gates scheduler dispatch without rejecting a run already preparing to bind", async () => {
-  const h = await fixture();
-  await h.game.client.call("game.status", { ...h.world, paused: true });
-  const prepared = deferred<void>();
-  const bindings: RunBinding[] = [];
-  const process = Object.assign(new EventEmitter(), {
-    run: vi.fn(async (_message: string) => {
-      // Authentication/preflight can finish after the game reports pause.
-      await prepared.promise;
-      const binding = await h.bridge.beginRun();
-      bindings.push(binding);
-      h.emit("agent_settled", h.context().ctx);
-      h.bridge.finishRun(binding);
-      return { status: "settled" as const, aborted: false };
-    }),
-    close: vi.fn(async () => {}),
-  });
-  vi.mocked(startPiProcess).mockResolvedValueOnce(process as never);
-  const scheduler = new RunScheduler({
-    bridge: h.bridge,
-    dataDirectory: "/unused",
-    executable: "/unused/pi",
-    bundledExtension: "/unused/extension.mjs",
-    connection: { protocolVersion: 2, host: "127.0.0.1", port: 1, token: "unused", pid: 1 },
-    model: { provider: "openai", id: "gpt-6-luna", apiKey: "unused" },
-  });
-  const fault = vi.fn();
-  scheduler.on("fault", fault);
-  onTestFinished(async () => {
-    prepared.resolve();
-    await scheduler.close();
-  });
-  await drain();
-  await h.game.client.call("game.player_message", { ...h.world, text: "queued while paused" });
-  expect(process.run).not.toHaveBeenCalled();
-  await h.game.client.call("game.status", { ...h.world, paused: false });
-  expect(process.run).toHaveBeenCalledOnce();
-  await h.game.client.call("game.status", { ...h.world, paused: true });
-  await h.game.client.call("game.player_message", { ...h.world, text: "next response" });
-  prepared.resolve();
-  await drain();
-  expect(fault).not.toHaveBeenCalled();
-  expect(bindings).toHaveLength(1);
-  expect(process.close).not.toHaveBeenCalled();
-  expect(h.bridge.readySession!.paused).toBe(true);
-  expect(process.run).toHaveBeenCalledOnce();
-  await h.game.client.call("game.status", { ...h.world, paused: false });
-  await drain();
-  expect(bindings).toHaveLength(2);
-  expect(JSON.parse(process.run.mock.calls[0]![0])).toMatchObject({
-    initial: true,
-    playerMessages: ["queued while paused"],
-  });
-  expect(JSON.parse(process.run.mock.calls[1]![0])).toMatchObject({
-    initial: false,
-    playerMessages: ["next response"],
-  });
-  expect(fault).not.toHaveBeenCalled();
+  await expect(h.bridge.beginRun()).rejects.toThrow();
+  await h.game.call("game.ready", binding);
+  expect(attach).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ paused: true }));
+  const run = await h.bridge.beginRun(); // Scheduler, not bridge, owns admission pause gate.
+  expect(h.binds).toEqual([run]);
 });
 
 test.each(forwards)(
-  "owned native withdrawal before status is scoped for %s",
-  async (method, args) => {
+  "owned native withdrawal cancels first for %s without fabricating pause",
+  async (name, _method, args) => {
     const h = await fixture();
     const binding = await h.bridge.beginRun();
-    const pending = h.agent.client
-      .call(method, { ...binding, ...args })
-      .catch((error: unknown) => error);
-    expect(h.native).toHaveLength(1);
-    h.native[0]!.result.reject(new RpcError(-32001, "native stale"));
+    const invalidated: unknown[] = [];
+    h.bridge.on("runInvalidated", (run, reason) => invalidated.push({ run, reason }));
+    const pending = h.bridge.executeTool(binding, name, args).catch((error: unknown) => error);
+    (await h.native()).result.reject(new RpcError(-32001, "native stale"));
     expect(await pending).toMatchObject({ code: staleRunErrorCode, data: binding });
-    expect(h.agent.host.calls).toContain("hisyo.run.invalidate");
-    expect(h.bridge.readySession!.paused).toBe(false);
-    expect(h.bridge.currentSession!.paused).toBe(false);
+    expect(invalidated).toEqual([{ run: binding, reason: "native_run_withdrawn" }]);
+    expect(h.bridge.readySession?.paused).toBe(false);
+    expect(h.rows("hisyo.status_reported")).toEqual([]);
+    await expect(h.bridge.beginRun()).rejects.toThrow("Previous run has not settled");
+    await expect(
+      h.bridge.executeTool(binding, "add_hook", { event: "block_broken", instruction: "stale" }),
+    ).rejects.toMatchObject({ code: staleRunErrorCode });
   },
 );
 
-test("earlier pause/resume cannot mask a later genuine native withdrawal", async () => {
+test("withdrawn slot remains until settlement, then binding waits for a subsequent valid resume", async () => {
   const h = await fixture();
   const binding = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.state.get", { ...binding, query: {} })
-    .catch((error: unknown) => error);
-  await h.game.client.call("game.status", { ...h.world, paused: true });
-  await h.game.client.call("game.status", { ...h.world, paused: false });
-  h.native[0]!.result.reject(new RpcError(-32001, "native stale"));
-  expect(await pending).toMatchObject({ code: staleRunErrorCode, data: binding });
-  expect(h.bridge.readySession!.paused).toBe(false);
-  h.emit("agent_settled", h.context().ctx);
+  const pending = h.bridge.getGameState(binding).catch((error: unknown) => error);
+  await h.native();
+  await h.game.call("game.status", { ...h.world, paused: true });
+  await h.game.call("game.status", { ...h.world, paused: false });
+  h.requests[0]!.result.reject(new RpcError(-32001, "native stale"));
+  expect(await pending).toMatchObject({ code: staleRunErrorCode });
+  expect(h.bridge.finishRun({ ...binding, runId: "foreign" })).toBe(false);
+  await expect(h.bridge.beginRun()).rejects.toThrow("Previous run has not settled");
   expect(h.bridge.finishRun(binding)).toBe(true);
   let admitted: RunBinding | undefined;
-  const admission = h.bridge.beginRun().then(
-    (next) => {
-      admitted = next;
-    },
-    (error: unknown) => error,
-  );
-  try {
-    await drain();
-    expect(admitted).toBeUndefined();
-    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
-    await h.game.client.call("game.status", { ...h.world, paused: false });
-    await drain();
-    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(2);
-    expect(h.agent.host.calls.filter((method) => method === "hisyo.run.bind")).toHaveLength(2);
-    expect(admitted).toMatchObject(h.world);
-    expect(admitted!.runId).not.toBe(binding.runId);
-  } finally {
-    await h.bridge.close();
-    await admission;
-  }
+  const admission = h.bridge.beginRun().then((run) => {
+    admitted = run;
+    return run;
+  });
+  await drain();
+  expect(admitted).toBeUndefined();
+  expect(h.binds).toHaveLength(1);
+  await expect(
+    h.game.call("game.status", { ...h.world, paused: false, extra: true }),
+  ).rejects.toThrow();
+  await h.game.call("game.status", { ...h.world, paused: true });
+  expect(admitted).toBeUndefined();
+  await h.game.call("game.status", { ...h.world, paused: false });
+  const next = await admission;
+  expect(next.runId).not.toBe(binding.runId);
+  expect(h.binds).toHaveLength(2);
 });
 
-test("old capture cannot invalidate or gate a new owner", async () => {
+test("late old capture cannot invalidate a new run or route a tool into it", async () => {
   const h = await fixture();
   const first = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.state.get", { ...first, query: {} })
-    .catch((error: unknown) => error);
+  const pending = h.bridge.getGameState(first).catch((error: unknown) => error);
+  await h.native();
   h.bridge.invalidateRun("cancelled");
-  h.emit("agent_settled", h.context().ctx);
   h.bridge.finishRun(first);
   const next = await h.bridge.beginRun();
-  const before = h.agent.host.calls.filter((method) => method === "hisyo.run.invalidate").length;
-  h.native[0]!.result.reject(new RpcError(-32001, "old native stale"));
+  const invalidated = vi.fn();
+  h.bridge.on("runInvalidated", invalidated);
+  h.requests[0]!.result.reject(new RpcError(-32001, "old native stale"));
   expect(await pending).toMatchObject({ code: -32001 });
-  expect(h.agent.host.calls.filter((method) => method === "hisyo.run.invalidate")).toHaveLength(
-    before,
-  );
-  expect(h.bridge.readySession!.paused).toBe(false);
-  const fresh = h.agent.client.call("game.state.get", { ...next, query: {} });
-  h.native[1]!.result.resolve({ ...next, state: snapshot });
-  await expect(fresh).resolves.toMatchObject({ runId: next.runId });
+  expect(invalidated).not.toHaveBeenCalled();
+  await expect(
+    h.bridge.executeTool(first, "send_message", { text: "wrong world" }),
+  ).rejects.toThrow();
+  const fresh = h.bridge.getGameState(next);
+  (await h.native(1)).result.resolve({ ...next, state: snapshot });
+  expect(await fresh).toEqual(snapshot);
 });
 
 test.each([
@@ -1268,92 +793,124 @@ test.each([
   new RpcError(-32010, "auth"),
   new RpcError(-32004, "storage"),
   new RpcError(-32123, "arbitrary"),
-  new RpcError(-32001, "non-native data", { runId: "foreign" }),
-  new Error("transport"),
-])("fatal native failure is unchanged despite cancellation: %s", async (failure) => {
+  new RpcError(-32001, "foreign data", { runId: "foreign" }),
+])("fatal native error remains fatal despite cancellation: %s", async (failure) => {
   const h = await fixture();
   const binding = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.state.get", { ...binding, query: {} })
-    .catch((error: unknown) => error);
+  const pending = h.bridge.getGameState(binding).catch((error: unknown) => error);
+  const native = await h.native();
   h.bridge.invalidateRun("cancelled");
-  h.native[0]!.result.reject(failure);
-  expect(await pending).toBe(failure);
-  expect(h.bridge.readySession!.paused).toBe(false);
-});
-
-test("captured displayed ACK is recorded before stale fence; storage failure remains latched", async () => {
-  const h = await fixture();
-  const binding = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.message.send", { ...binding, text: "hello" })
-    .catch((error: unknown) => error);
-  h.bridge.invalidateRun("cancelled");
-  h.native[0]!.result.resolve({ ...binding, displayed: true });
-  expect(await pending).toMatchObject({ code: staleRunErrorCode });
-  expect(h.rows.at(-1)).toMatchObject({
-    event: "hisyo.hud_displayed",
-    data: { runId: binding.runId, text: "hello" },
+  native.result.reject(failure);
+  expect(await pending).toMatchObject({
+    code: failure.code,
+    message: failure.message,
+    data: failure.data,
   });
-  h.emit("agent_settled", h.context().ctx);
-  h.bridge.finishRun(binding);
-  const next = await h.bridge.beginRun();
-  const failed = h.agent.client
-    .call("game.message.send", { ...next, text: "hello" })
-    .catch((error: unknown) => error);
-  const failure = new Error("storage");
-  h.failStorage(failure);
-  const faults: Error[] = [];
-  h.bridge.on("fault", (error) => faults.push(error));
-  h.native[1]!.result.resolve({ ...next, displayed: true });
-  expect(await failed).toBe(failure);
-  expect(faults).toEqual([failure]);
-  expect(h.bridge.readySession).toBeUndefined();
 });
 
-test.each(["version1", "missing-visibility"])("rejects unsafe %s snapshots", async (kind) => {
-  const h = await fixture();
-  const binding = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.state.get", { ...binding, query: {} })
-    .catch((error: unknown) => error);
-  const state =
-    kind === "version1"
-      ? { ...snapshot, version: 1 }
-      : { ...snapshot, nearby: { ...snapshot.nearby, visibility: undefined } };
-  h.native[0]!.result.resolve({ ...binding, state });
-  expect(await pending).toMatchObject({ code: -32603 });
-});
-
-test.each(["malformed", "foreign"])(
-  "fulfilled %s state stays fatal under cancellation",
+test.each(["invalidate", "abort", "detach"])(
+  "displayed native ACK is recorded in original scope before %s fence",
   async (kind) => {
     const h = await fixture();
     const binding = await h.bridge.beginRun();
-    const pending = h.agent.client
-      .call("game.state.get", { ...binding, query: {} })
+    const controller = new AbortController();
+    const args = { text: "literal displayed text" };
+    const pending = h.bridge
+      .executeTool(binding, "send_message", args, controller.signal)
       .catch((error: unknown) => error);
+    const call = await h.native();
+    args.text = "mutated";
+    if (kind === "invalidate") h.bridge.invalidateRun("cancelled");
+    else if (kind === "abort") controller.abort();
+    else {
+      await h.game.call("game.detach", h.world);
+      await h.attach("other", "player");
+    }
+    call.result.resolve({ ...binding, displayed: true });
+    expect(await pending).toBeInstanceOf(Error);
+    expect(h.rows("hisyo.hud_displayed")).toEqual([
+      expect.objectContaining({
+        ...h.world,
+        data: { runId: binding.runId, text: "literal displayed text" },
+      }),
+    ]);
+  },
+);
+
+test("displayed ACK storage failure is fatal and remains latched", async () => {
+  const h = await fixture();
+  const binding = await h.bridge.beginRun();
+  const pending = h.bridge
+    .executeTool(binding, "send_message", { text: "hello" })
+    .catch((error: unknown) => error);
+  const call = await h.native();
+  h.failActivities("hisyo.hud_displayed");
+  call.result.resolve({ ...binding, displayed: true });
+  expect(await pending).toMatchObject({ message: "activity write failed" });
+  expect(h.faults).toHaveLength(1);
+  expect(h.bridge.readySession).toBeUndefined();
+  expect(h.rows("hisyo.hud_displayed")).toEqual([]);
+});
+
+test.each(["version1", "missing-visibility", "foreign", "malformed"])(
+  "unsafe %s state remains fatal even after cancellation",
+  async (kind) => {
+    const h = await fixture();
+    const binding = await h.bridge.beginRun();
+    const pending = h.bridge.getGameState(binding).catch((error: unknown) => error);
+    const call = await h.native();
     h.bridge.invalidateRun("cancelled");
-    h.native[0]!.result.resolve({
+    const state =
+      kind === "version1"
+        ? { ...snapshot, version: 1 }
+        : kind === "missing-visibility"
+          ? { ...snapshot, nearby: { ...snapshot.nearby, visibility: undefined } }
+          : kind === "malformed"
+            ? {}
+            : snapshot;
+    call.result.resolve({
       ...binding,
       runId: kind === "foreign" ? "foreign" : binding.runId,
-      state: kind === "malformed" ? {} : snapshot,
+      state,
+    });
+    expect(await pending).toMatchObject({ code: -32603 });
+  },
+);
+
+test.each(["bytes", "unicode", "control", "foreign"])(
+  "reference %s result validation survives the direct API",
+  async (kind) => {
+    const h = await fixture();
+    const binding = await h.bridge.beginRun();
+    const pending = h.bridge
+      .executeTool(binding, "read_game_file", {
+        query: { root: "minecraft:0", path: "data/a.json" },
+      })
+      .catch((error: unknown) => error);
+    const call = await h.native();
+    const content = kind === "unicode" ? "\ud800" : kind === "control" ? "\u0001" : "{}";
+    call.result.resolve({
+      ...binding,
+      runId: kind === "foreign" ? "foreign" : binding.runId,
+      reference: {
+        root: "minecraft:0",
+        path: "data/a.json",
+        content,
+        bytes: kind === "bytes" ? 99 : Buffer.byteLength(content),
+      },
     });
     expect(await pending).toMatchObject({ code: -32603 });
   },
 );
 
 test.each(["cancel", "detach", "closing", "storage"])(
-  "unknown-availability admission wakes safely on %s without status",
+  "unknown-availability binding wakes safely on %s without a status report",
   async (kind) => {
     const h = await fixture();
     const binding = await h.bridge.beginRun();
-    const pending = h.agent.client
-      .call("game.state.get", { ...binding, query: {} })
-      .catch((error: unknown) => error);
-    h.native[0]!.result.reject(new RpcError(-32001, "native stale"));
+    const pending = h.bridge.getGameState(binding).catch((error: unknown) => error);
+    (await h.native()).result.reject(new RpcError(-32001, "native stale"));
     expect(await pending).toMatchObject({ code: staleRunErrorCode });
-    h.emit("agent_settled", h.context().ctx);
     h.bridge.finishRun(binding);
     let completed = false;
     const waiting = h.bridge.beginRun().catch((error: unknown) => {
@@ -1362,32 +919,63 @@ test.each(["cancel", "detach", "closing", "storage"])(
     });
     await drain();
     expect(completed).toBe(false);
-    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
-    if (kind === "cancel") h.bridge.invalidateRun("pi_process_closed");
-    else if (kind === "detach") h.game.client.close();
+    expect(h.binds).toHaveLength(1);
+    if (kind === "cancel") h.bridge.invalidateRun("owner_closed");
+    else if (kind === "detach") await h.game.call("game.detach", h.world);
     else if (kind === "closing") await h.bridge.close();
     else {
-      h.bridge.on("fault", () => {});
-      const failure = new Error("storage");
-      h.failStorage(failure);
-      await expect(h.game.client.call("game.status", { ...h.world, paused: false })).rejects.toBe(
-        failure,
-      );
+      h.failActivities();
+      await expect(h.game.call("game.status", { ...h.world, paused: false })).rejects.toThrow();
     }
     expect(await waiting).toMatchObject({
       code: kind === "cancel" || kind === "detach" ? staleRunErrorCode : -32001,
     });
-    expect(h.game.host.calls.filter((method) => method === "game.run.bind")).toHaveLength(1);
+    expect(h.binds).toHaveLength(1);
   },
 );
 
-test("closing never upgrades native stale to owned cancellation", async () => {
+test("closing never promotes a native stale result to owned cancellation", async () => {
   const h = await fixture();
   const binding = await h.bridge.beginRun();
-  const pending = h.agent.client
-    .call("game.state.get", { ...binding, query: {} })
-    .catch((error: unknown) => error);
+  const pending = h.bridge.getGameState(binding).catch((error: unknown) => error);
+  await h.native();
   await h.bridge.close();
-  h.native[0]!.result.reject(new RpcError(-32001, "native stale"));
   expect(await pending).not.toMatchObject({ code: staleRunErrorCode });
+});
+
+test("malformed native bind ACK fails closed without acquiring a run", async () => {
+  const h = await fixture();
+  // A second real host connection supplies a deliberately malformed native acknowledgment.
+  await h.game.call("game.detach", h.world);
+  h.game.close();
+  await drain();
+  const replacement = await h.connect();
+  replacement.handle("game.run.bind", (params) => ({
+    ...(params as RunBinding),
+    runId: "foreign",
+  }));
+  replacement.handle("game.run.clear", () => undefined);
+  const world = (await replacement.call("game.attach", {
+    worldId: "w",
+    playerId: "p",
+    language: "ja_jp",
+    supportedEvents: [],
+    paused: false,
+  })) as SessionBinding;
+  await replacement.call("game.ready", world);
+  await expect(h.bridge.beginRun()).rejects.toThrow("Invalid run binding acknowledgment");
+});
+
+test.each(["raw", "hooks"])("bridge rejects invalid %s database ownership", async (invalid) => {
+  const h = await fixture();
+  expect(
+    () =>
+      new BridgeServer({
+        token: "a".repeat(43),
+        eventLog: h.eventLog,
+        activityLog: invalid === "raw" ? new ActivityLog(h.rawDb) : h.activityLog,
+        hooks: invalid === "hooks" ? new HookStore(h.rawDb, h.eventLog.catalog) : h.hooks,
+        summaries: h.summaries,
+      }),
+  ).toThrow(invalid === "raw" ? /separate/ : /Activity.*hooks/);
 });

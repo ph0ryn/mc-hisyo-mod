@@ -11,7 +11,7 @@ const strict = { additionalProperties: false } as const;
 export const HelloSchema = Type.Object(
   {
     protocolVersion: Type.Literal(protocolVersion),
-    role: Type.Union([Type.Literal("game"), Type.Literal("agent")]),
+    role: Type.Literal("game"),
     token: Type.String({ pattern: "^[A-Za-z0-9_-]{43}$" }),
   },
   strict,

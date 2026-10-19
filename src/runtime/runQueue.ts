@@ -24,19 +24,35 @@ export class RunQueueFullError extends Error {
   }
 }
 
-/** One live binding's volatile pending reasons; never rematches historical events. */
+/** Pure bounded coalescing; RunInbox persists snapshots without rematching historical events. */
 export class RunQueue {
   readonly #binding: SessionBinding;
   readonly #maxBytes: number;
   #pending: RunRequest;
   #failure: RunQueueFullError | undefined;
 
-  constructor(binding: SessionBinding, maxBytes = 1024 * 1024) {
+  constructor(binding: SessionBinding, maxBytes = 1024 * 1024, restored?: RunRequest) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0)
       throw new Error("Invalid run queue byte budget");
     this.#binding = structuredClone(binding);
     this.#maxBytes = maxBytes;
-    this.#pending = this.#empty();
+    if (
+      restored &&
+      (restored.binding.worldId !== binding.worldId ||
+        restored.binding.playerId !== binding.playerId)
+    )
+      throw new Error("Run queue belongs to another world or player");
+    // Reconnect changes execution authorization, never the source identity of observations.
+    this.#pending = restored
+      ? { ...structuredClone(restored), binding: structuredClone(binding) }
+      : this.#empty();
+    if (Buffer.byteLength(JSON.stringify(this.#pending), "utf8") > this.#maxBytes)
+      throw new RunQueueFullError(this.#maxBytes);
+  }
+
+  snapshot(): RunRequest {
+    this.#healthy();
+    return structuredClone(this.#pending);
   }
 
   enqueueStart(): void {

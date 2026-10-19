@@ -23,7 +23,6 @@ function fixture(paused = false) {
   }[] = [];
   const bridge = Object.assign(new EventEmitter(), {
     readySession: { binding, paused, supportedEvents: [], language: "ja_jp" } as AttachedSession,
-    isAgentReady: true,
     summaries: {
       next: vi.fn<() => { source: SummarySource; backlog: boolean } | undefined>(() => ({
         source,
@@ -31,14 +30,14 @@ function fixture(paused = false) {
       })),
       save: vi.fn(),
     },
-    summarize: vi.fn(
-      (_binding: typeof binding, _input: string, signal: AbortSignal) =>
-        new Promise<string>((resolve, reject) => pending.push({ signal, resolve, reject })),
-    ),
   });
+  const summarize = vi.fn(
+    (_binding: typeof binding, _input: string, signal: AbortSignal) =>
+      new Promise<string>((resolve, reject) => pending.push({ signal, resolve, reject })),
+  );
   const summaryScheduler = new SummaryScheduler({
     bridge: bridge as unknown as SummarySchedulerOptions["bridge"],
-    summarize: bridge.summarize,
+    summarize,
     now: () => now,
     wallNow: () => 200,
   });
@@ -47,6 +46,7 @@ function fixture(paused = false) {
   return {
     summaryScheduler,
     bridge,
+    summarize,
     pending,
     fault,
     at: (value: number) => {
@@ -72,7 +72,7 @@ test("one independent elapsed minute reserves one bounded prefix and stores its 
   f.at(60_000);
   expect(f.summaryScheduler.poll(binding)).toBe(true);
   expect(f.bridge.summaries.next).toHaveBeenCalledWith({ worldId: "world", playerId: "player" });
-  expect(f.bridge.summarize).toHaveBeenCalledWith(binding, source.input, expect.any(AbortSignal));
+  expect(f.summarize).toHaveBeenCalledWith(binding, source.input, expect.any(AbortSignal));
   f.pending[0]!.resolve("木を集めた。");
   await f.settle();
   expect(f.bridge.summaries.save).toHaveBeenCalledExactlyOnceWith(
@@ -127,7 +127,7 @@ test.each([false, true])("an empty delta never calls the model; paused=%s", asyn
   f.at(60_000);
   expect(f.summaryScheduler.poll(binding)).toBe(false);
   expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
-  expect(f.bridge.summarize).not.toHaveBeenCalled();
+  expect(f.summarize).not.toHaveBeenCalled();
   await f.summaryScheduler.close();
 });
 

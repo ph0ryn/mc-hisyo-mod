@@ -1,14 +1,15 @@
 import type { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { CliOptions } from "../cliOptions.js";
 import { startBridgeRuntime, type BridgeRuntime } from "./bridgeRuntime.js";
 import { resolveTrustedConfig, type ConfigInput } from "./hisyoConfig.js";
 import { RunScheduler, type RunSchedulerOptions } from "./runScheduler.js";
 import { SummaryScheduler, type SummarySchedulerOptions } from "./summaryScheduler.js";
+import { createModelAccess, type ModelAccess } from "./modelAccess.js";
 
 export interface HisyoRuntimePorts extends Omit<ConfigInput, "homeDirectory"> {
   startBridge: typeof startBridgeRuntime;
+  createModelAccess: typeof createModelAccess;
   createScheduler: (
     options: RunSchedulerOptions,
   ) => Pick<RunScheduler, "poll" | "close" | "summarize"> &
@@ -20,9 +21,9 @@ export interface HisyoRuntimePorts extends Omit<ConfigInput, "homeDirectory"> {
   everySecond: (sample: () => void) => () => void;
 }
 const resources: HisyoRuntimePorts = {
-  readText: (path) => readFileSync(path, "utf8"),
   readEnv: (name) => process.env[name],
   startBridge: startBridgeRuntime,
+  createModelAccess,
   createScheduler: (options) => new RunScheduler(options),
   createSummaryScheduler: (options) => new SummaryScheduler(options),
   everySecond: (sample) => {
@@ -33,17 +34,16 @@ const resources: HisyoRuntimePorts = {
 interface HisyoRuntimeOptions extends Pick<RunSchedulerOptions, "onLog"> {
   options: CliOptions;
   homeDirectory: string;
-  bundledExtension: string;
   signal: AbortSignal;
   onFault: (error: Error) => void;
 }
 
-/** One concrete resource boundary; scheduler/Pi process retain all run and child ownership. */
+/** Owns SDK credentials and application resources; the scheduler owns game-bound runs. */
 export async function startHisyoRuntime(
   input: HisyoRuntimeOptions,
   ports = resources,
 ): Promise<BridgeRuntime | undefined> {
-  const { options, homeDirectory, bundledExtension, signal, onFault, onLog } = input;
+  const { options, homeDirectory, signal, onFault, onLog } = input;
   if (options.help) return;
   signal.throwIfAborted();
   const config = options.bridgeOnly
@@ -52,6 +52,7 @@ export async function startHisyoRuntime(
   const dataDirectory =
     config?.dataDirectory ?? resolve(options.dataDirectory ?? join(homeDirectory, ".mc-hisyo"));
   let base: BridgeRuntime | undefined;
+  let modelAccess: ModelAccess | undefined;
   let scheduler: ReturnType<HisyoRuntimePorts["createScheduler"]> | undefined;
   let summaryScheduler: ReturnType<HisyoRuntimePorts["createSummaryScheduler"]> | undefined;
   let cancelTimer: (() => void) | undefined;
@@ -69,6 +70,12 @@ export async function startHisyoRuntime(
       }
       scheduler?.off("fault", onFault);
       summaryScheduler?.off("fault", onFault);
+      // An aborted SDK caller may still have a locked OAuth rotation/save in flight.
+      try {
+        await modelAccess?.close();
+      } catch (error) {
+        errors.push(error);
+      }
       try {
         await base?.close();
       } catch (error) {
@@ -95,19 +102,17 @@ export async function startHisyoRuntime(
     return shutdown;
   };
   try {
+    if (config) {
+      modelAccess = await ports.createModelAccess(config, { readEnv: ports.readEnv });
+      signal.throwIfAborted();
+    }
     base = await ports.startBridge({ dataDirectory, signal, onFault });
     signal.throwIfAborted();
     if (config) {
       scheduler = ports.createScheduler({
         dataDirectory: config.dataDirectory,
-        executable: config.executable,
-        model: config.model,
-        ...(config.oauthAgentDirectory === undefined
-          ? {}
-          : { oauthAgentDirectory: config.oauthAgentDirectory }),
+        modelAccess: modelAccess!,
         bridge: base.bridge,
-        connection: base.connection,
-        bundledExtension,
         ...(onLog ? { onLog } : {}),
       });
       scheduler.on("fault", onFault);
