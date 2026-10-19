@@ -456,11 +456,13 @@ test("omits visibility caveats while retaining nearby observations", () => {
   expect(source.input).not.toMatch(/not FOV|lighting|full sight|empty != absence/u);
 });
 
-test("renders container opening as only its menu type", () => {
+test("renders only the container menu type while retaining the common event location", () => {
   const entry = row(1, "container_opened");
   const original = structuredClone(entry);
   const source = compactHistory(0, [entry])!;
-  expect(source.input.split("\n").slice(2)).toEqual(["e1 container_opened menuType=generic_9x3"]);
+  expect(source.input.split("\n").slice(2)).toEqual([
+    "e1 container_opened menuType=generic_9x3 @overworld:2,64,0",
+  ]);
   expect(source).toMatchObject({ after: 0, through: 1, sourceCount: 1 });
   expect(entry).toEqual(original);
 });

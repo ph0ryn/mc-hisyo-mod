@@ -126,7 +126,7 @@ function prepare(entry: StoredEvent, localId: number): Projection {
     text = `last ${valueText(data)}${location}`;
     sampleKey = `${event}:${dimension}`;
   } else if (event === "container_opened") {
-    text = `${event} menuType=${valueText(data.menuType)}`;
+    text = `${event} menuType=${valueText(data.menuType)}${location}`;
   } else {
     const fields = { ...data };
     if (event === "item_picked_up" && fields.infiniteMaterials === false)

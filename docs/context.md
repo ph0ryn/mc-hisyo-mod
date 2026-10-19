@@ -40,7 +40,8 @@ Fastは[公式の互換名](https://developers.openai.com/api/docs/guides/fast-m
   到着順、既知のsequence欠損、省略、観測の限界を残す。座標は0.1 block単位、既定の`minecraft:`名前空間は省略し、対応する`beforeX` / `afterX`は`x=前->後`（同じscalar値なら`x=値`）にする。
   構造物sample、空かつ未打切りの効果sample、レシピ実績通知、完了済みのcriterion通知は入力から除く。
   `entityPosition`・`hand`・`remainingCount`・手の装備注記とpickupの`infiniteMaterials=false`を省くが、slot別の数量、他の装備部位、移動の`@`は残す。
-  `container_opened`は`menuType`だけを残し、周辺sampleの`not FOV/lighting/full sight, empty != absence`注記は付けない。
+  `container_opened`のdataは`menuType`だけを残し、イベント共通の`@`位置注記は維持する。
+  周辺sampleの`not FOV/lighting/full sight, empty != absence`注記は付けない。
   `e`番号は入力ごとの元行順で1から振り直す。保存ID・session・時刻はメタデータに維持し、session・観測時刻範囲は入力へ書かない。
 - 1回の対象は同じsource sessionの連続prefix、最大500行。system指示と入力は合計12,000 UTF-8 bytes以内。
   応答は日本語の事実を最大3項目、1,200 bytes以内とする。完全な記録ではなく、詳細はraw履歴を検索する。
