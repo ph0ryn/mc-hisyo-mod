@@ -8,10 +8,10 @@ Modはローカルsingleplayerとの接続口で、CLIを自動起動しない�
 
 - released 1.3.0のPi Durable / Pi AI / Chordを[依存定義](<../package.json>)で固定する。
 - mainは`openai/gpt-6-luna` / `medium`。summaryは同じモデルのToolなし / `priority` / `low`。
-- world / player別のDurable SQLiteにconversation、task、受付済み入力とdispatchを保存する。
+- world / player別のDurable SQLiteにconversation、task、受付済み入力とdispatch、長期方針document `hisyo.plan` v1を保存する。
 - Mod観測、CLI事実・hook、summaryはそれぞれ独立したdomain SQLiteで管理する。
 - summaryは終了済みUnix分の最新を優先し、保存後は即再選択して過去分を新しい順に埋める。main contextは保存順ではなく元観測時刻で選ぶ。
-- 10 game Toolだけを公開し、各モデル要求前に最新game stateとsummaryを取得する。
+- mainモデルには10 game Toolとlocal `update_plan`の計11 Toolを公開し、各要求前に最新game state、summary、現在の長期方針を取得する。bridgeのgame ToolとMod wireは変更しない。
 - pauseは新しいmain runとそのpoll時計だけを制限する。入力受付と独立summaryは続ける。
 - [トークン使用量](<tokenUsage.md>)は生のprovider counterを保存し、未報告値を`null`にする。
 
@@ -22,7 +22,8 @@ storage境界ではSIGKILLした子processのcommitとdead-owner lock回収を�
 
 | 境界 | 主な確認内容 |
 | --- | --- |
-| [DurableAgent tests](<../src/runtime/durableAgent.test.ts>) | 実Harnessとtemp SQLiteで再open、submission重複排除、保留generation、10 Tool、Tool後のcontext更新、fail-closed、unsafe Toolの非再送、取消usage |
+| [DurableAgent tests](<../src/runtime/durableAgent.test.ts>) | 実Harnessとtemp SQLiteで再open、submission重複排除、保留generation、10 game Tool + local plan Tool、方針の保存・scope分離・reset後の保持・CAS・消去・不正更新拒否、Tool後のcontext更新、fail-closed、unsafe Toolの非再送、取消usage |
+| [LongTermPlan tests](<../src/runtime/longTermPlan.test.ts>) | 実Harnessのcommit待ち中にnative bindingを無効化しても、方針更新をcommitしない |
 | [RunInbox tests](<../src/runtime/runInbox.test.ts>) | 受付済み同文チャットの順序、予約 / submit間の再open、安定request ID、clear、容量超過rollback |
 | [Durable storage tests](<../src/runtime/durableStorage.test.ts>) | scope別所有者とprivate file、実SIGKILL後のcommit復旧・dead PID lock回収、symlink拒否 |
 | [bridge tests](<../src/bridge/bridgeServer.test.ts>) | 実TCPのfake gameとSQLiteで認証、binding、直接host API、非同期受付ACK、記録、stale / native-first取消 |
@@ -34,6 +35,19 @@ storage境界ではSIGKILLした子processのcommitとdead-owner lock回収を�
 
 終了・再open試験は実際のSQLite保存を確認するが、stubの解決順を実native処理の完了と同一視しない。
 テストごとに使用resourceを確認し、実認証や既存ワールドへ勝手に接続しない。
+
+## 長期方針の実装境界
+
+[longTermPlan](<../src/runtime/longTermPlan.ts>)はruntime所有の`hisyo.plan` v1とSDK-localな`update_plan`を定義する。
+conversation scopeの現在値を保持し、再接続・abort・SDK conversation resetを跨いで引き継ぐ。初期planは目標・行動が`null`、好み・境界が空配列である。
+更新は有効なnative runに限り、revisionのCASでplan全体を置換する。strict schemaと、revision・JSON escapeを含む状態全体の4,096 UTF-8 bytes上限を検証し、失敗時に切詰め・初期化しない。
+各main provider要求の直前に現在のplanを取り直してtransientな`LONG_TERM_PLAN`へ含めるが、通常のTool呼出し引数はconversationに残る。
+
+local更新はsequential / unsafeで、commit済みのplanは取消やTool receipt中断でも残り得る。再実行で推測せず、次のcontextのrevisionと状態で判別する。
+hook変更・HUD表示・domain DBとは一つのtransactionにならず、保存だけでhookや表示は変わらない。
+bridgeの10 game Tool、Mod wire、domain DB schemaに追加はなく、summary実装・最小context・破棄可能な派生記憶という役割も変更しない。
+新しいsummary worker、会話compaction、過去時点のplan復元や分岐操作は実装範囲に含めない。
+詳細は[保存内容](<context.md#長期方針document>)と[local Tool契約](<tools.md#sdk-localなupdate_plan>)を参照。
 
 ## 検証コマンド
 

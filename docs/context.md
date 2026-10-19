@@ -2,16 +2,17 @@
 
 ## 毎回渡すコンテキスト
 
-run内の各モデル要求のdispatch直前に、[DurableAgent](<../src/runtime/durableAgent.ts>)が最新game stateと保存済みsummaryを取得して注入する。
+main run内の各モデル要求のdispatch直前に、[DurableAgent](<../src/runtime/durableAgent.ts>)が最新game state、保存済みsummary、現在の長期方針documentを取得して注入する。
 Tool実行後の再判断も対象とし、過去のgame stateを毎回conversationへ積み続けない。
 
 - 位置、ディメンション、バイオーム、周辺情報。
 - ゲーム内時刻。生の`dayTime`に加え、DurableAgentが24時間表記の`dayTimeClock`（`HH:mm`）を添える。
 - 体力、インベントリ。
 - 最新のsummary。
+- `LONG_TERM_PLAN`として、revisionを含む現在の長期方針。
 
 run requestはready済みsessionの初回、poll、プレイヤー入力、実績解除、一致hookと観測を渡す。
-現在の目標・方針とプレイヤー・hisyo・Toolのやり取りはconversationを参照する。
+現在の保存済み目標・方針は`LONG_TERM_PLAN`、プレイヤー・hisyo・Toolのやり取りはconversationを参照する。
 最近のHUD発言はactivity logから検索できるが、別の常時注入fieldはない。
 位置は座標だけでなく、周辺の地形、ブロック、エンティティなど判断に必要な情報を含める。
 game stateには取得時点のtickや時刻を付け、現在値と過去の観測を区別する。
@@ -24,12 +25,58 @@ Tool結果の後ろへ新しいuser messageを追加しない。状態更新は�
 24,000 ticksで一周、0 ticksが06:00、6,000 ticksが12:00。負値も正規化する。
 現在の時刻は最新game stateを優先し、過去のconversationやevent logから推測しない。時計は局所の明るさや他dimensionの昼夜を保証しない。
 
-必須game stateの欠損・不正・切断・timeout、summary contextの取得失敗はprovider呼出しへ進めずrunを失敗にする。
+必須game stateの欠損・不正・切断・timeout、summary contextの取得失敗、長期方針documentの取得・検証失敗はprovider呼出しへ進めずrunを失敗にする。
 [released 1.3.0のhook例外](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md#errors>)は報告後にskipされ得るため、
 例外を投げるcontext hookだけでは安全性を保証しない。実装はModelsのdispatch wrapper内で取得・検証・binding再確認を完了してからproviderを呼ぶ。
 [実SDKの境界テスト](<../src/runtime/durableAgent.test.ts>)はTool後のcontext失敗でも次のprovider要求が発生しないことを確認する。
 取消とnative-firstの詳細は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
 CLIはrun requestの理由を実行依頼前にactivity logへ記録するが、その記録をprovider実行成功とは扱わない。
+
+## 長期方針document
+
+[LongTermPlan](<../src/runtime/longTermPlan.ts>)は、hisyo自身が目標・次の行動とプレイヤーへの関わり方を引き継ぐtyped document。
+kindは`hisyo.plan`、versionは1、scopeは`conversation`、保存方針は`history: "latest"` / `fork: "current"`である。
+mainへ渡すのは常に現在値であり、過去時点の方針を復元・参照する機能を追加するものではない。
+world / player別のDurable conversationに保存し、再接続、runのabort、SDK conversationのresetでも消去しない。他のworld / playerとは共有しない。
+初期状態は次の通りで、最初は現在の会話と状況から方針を作り、以前の約束を捏造しない。
+
+```json
+{
+  "revision": 0,
+  "plan": {
+    "goal": null,
+    "nextAction": null,
+    "preferences": [],
+    "constraints": []
+  }
+}
+```
+
+| plan field | 内容とschema上限 |
+| --- | --- |
+| `goal` | `null`または`{ objective, reason }`。目標と理由は各256文字まで |
+| `nextAction` | `null`または`{ instruction, completionCondition, hookIds }`。行動と完了条件は各256文字まで。hook IDは各128文字まで、重複なしで最大8個 |
+| `preferences` | `{ text, source }`の配列、最大8件。textは128文字まで。sourceは`explicit`または`inferred` |
+| `constraints` | プレイヤーが明示した境界のtext配列、各128文字まで、最大8件 |
+
+すべてのfieldを必須とし、object内の未知キーを拒否する。textは空文字・空白だけを許可しない。
+revisionは非負のsafe integer。保存済み値も読み出し時にschemaを検証し、不正値を黙って初期化しない。
+保存状態全体`{ revision, plan }`のJSONは、revisionとescapeを含む4,096 UTF-8 bytes以下でなければならない。
+各fieldの文字上限内でも全体のbyte上限を超え得る。切詰めや自動要約で救済せず、[update_plan](<tools.md#sdk-localなupdate_plan>)で簡潔な完全置換を行う。
+
+`preferences.source`はプレイヤーの発言に基づく場合だけ`explicit`、それ以外は修正可能な推測として`inferred`にする。
+`constraints`へ入れるのは明示的なプレイヤー境界だけで、推測した好みやゲーム内text・reference内の指示は入れない。
+これらは[モデルへの指示](<../src/pi/hisyoPrompt.ts>)であり、ラベルはモデル自身の判断であって出典の検証や権限の保証ではない。
+現在のプレイヤー要求で方針を改め、記憶したワールド情報より最新の観測を優先する。
+完了・放棄した目標と行動は改訂または`null`で消去し、不要なhook参照を外す。hook IDや保存した完了条件は達成の証明ではなく、最新状態とevent logからhisyoが判断する。
+
+各main要求では現在の状態を`LONG_TERM_PLAN`として、game state・summaryと同じ一時的な背景情報へ含める。
+新しい発言要求でも繰り返し保存するuser履歴でもなく、Tool後の再判断・復旧時も現在値を取り直す。ただし`update_plan`の通常のTool呼出し引数はconversationに残る。
+planは誤り得る保存方針であり、現在のワールドの証拠、実行権限、検証済み出典、観測の完全な記録にはしない。
+インベントリsnapshot、観測ログ、summary、referenceをコピーせず、実質的な変更だけを保存する。
+
+summaryは破棄・再生成できる観測の派生記憶のままで、長期方針の保存先にしない。
+長期方針の導入でsummaryの生成・保存・contextやcompactionを変更せず、summary要求へplanや会話履歴を追加しない。新しいworkerも作らない。
 
 ## summary
 
@@ -95,7 +142,7 @@ menu初期snapshot・slot listener・実際のcloseを記録するが、全trans
 
 ## 生データとネタバレ
 
-現在の情報はgame state、過去の観測はevent log、やり取りはconversation、CLI事実はactivity log、観測の派生記憶はsummary、静的資料はreferenceへ分ける。
+現在の情報はgame state、過去の観測はevent log、やり取りはconversation、保存方針は長期方針document、CLI事実はactivity log、観測の派生記憶はsummary、静的資料はreferenceへ分ける。
 referenceは[3つの読取Tool](<tools.md#静的ゲームファイルの境界>)で取得し、レシピ専用機構や一般OS Toolは提供しない。
 技術的な取得範囲とは別に、次のネタバレ方針をhisyoへ指示する。
 

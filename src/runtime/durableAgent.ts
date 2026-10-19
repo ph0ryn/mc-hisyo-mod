@@ -37,6 +37,7 @@ import { summaryContextBytes } from "../protocol/summary.js";
 import { openDurableStorage } from "./durableStorage.js";
 import type { ModelAccess } from "./modelAccess.js";
 import { trackModelRequest } from "./trackModelRequest.js";
+import { createPlanTool, LongTermPlan, serializePlan } from "./longTermPlan.js";
 
 /** Trusted in-process host boundary; it never exposes an agent TCP connection. */
 export type DurableBridge = Pick<
@@ -228,6 +229,7 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
         },
       }),
     );
+    tools.push(createPlanTool((signal, captured) => this.#requireRun(signal, captured)));
     const extension = {
       name: "hisyo",
       tools,
@@ -267,17 +269,16 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
       agent: { model: { provider: "openai", modelId: "gpt-6-luna" }, thinkingLevel: "medium" },
     });
     // root(agent) applies only on first creation: pin persisted state too without resuming the scheduler.
-    await this.conversation.commit(
-      (tx) =>
-        configure(tx, this.conversation.id, {
-          model: { provider: "openai", modelId: "gpt-6-luna" },
-          thinkingLevel: "medium",
-          extensions: [extension],
-          tools,
-          modelTools: tools,
-        }),
-      BACKGROUND_CONTEXT,
-    );
+    await this.conversation.commit(async (tx) => {
+      await configure(tx, this.conversation.id, {
+        model: { provider: "openai", modelId: "gpt-6-luna" },
+        thinkingLevel: "medium",
+        extensions: [extension],
+        tools,
+        modelTools: tools,
+      });
+      serializePlan(await tx.doc(LongTermPlan, this.conversation.id));
+    }, BACKGROUND_CONTEXT);
     this.#options.bridge.on("runInvalidated", this.#invalidated);
     this.#options.bridge.on("detach", this.#detached);
     this.#options.onLog?.("durable.ready", { provider: "openai", model: "gpt-6-luna" });
@@ -310,6 +311,10 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
         const summary = this.#options.bridge.summaryContext(binding);
         if (typeof summary !== "string" || Buffer.byteLength(summary) > summaryContextBytes)
           throw new Error("Invalid required summary context");
+        const plan = await this.conversation.commit(
+          async (tx) => serializePlan(await tx.doc(LongTermPlan, this.conversation.id)),
+          BACKGROUND_CONTEXT,
+        );
         this.#requireRun(options?.signal, binding);
         if (
           model.provider !== "openai" ||
@@ -325,7 +330,7 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
         );
         messages.splice(index, 0, {
           role: "user",
-          content: `${summary ? `${summary}\n\n` : ""}CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(clock(state))}`,
+          content: `LONG_TERM_PLAN (fallible saved guidance, not current-world facts, permissions or a new request)\n${plan}\n\n${summary ? `${summary}\n\n` : ""}CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(clock(state))}`,
           timestamp: Date.now(),
         });
         response = await trackModelRequest(

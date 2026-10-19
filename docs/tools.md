@@ -1,8 +1,9 @@
 # Tool一覧と呼び出し
 
-次の10 Toolだけを[DurableAgent](<../src/runtime/durableAgent.ts>)のregistryへ登録する。
-[正規の定義と引数schema](<../src/protocol/hisyoTools.ts>)を共用し、モデル引数にbindingを持たせない。
-Toolの`execute()`は信頼済みのin-process [host API](<../src/bridge/bridgeServer.ts>)をawaitし、結果をDurableへ返す。
+[DurableAgent](<../src/runtime/durableAgent.ts>)のmainモデルには、次の10 game ToolとSDK-localな`update_plan`の計11 Toolを公開する。
+10 game Toolは[正規の定義と引数schema](<../src/protocol/hisyoTools.ts>)を共用し、モデル引数にbindingを持たせない。
+game Toolの`execute()`は信頼済みのin-process [host API](<../src/bridge/bridgeServer.ts>)をawaitし、結果をDurableへ返す。
+`update_plan`はruntime内のdocument更新だけで、game Toolの一覧・bridge API・Modとのwireへ追加しない。
 実SDK / fake provider / temp SQLite / TCPの境界テストはあるが、実ゲームの受入れは未実施。[検証範囲](<development.md>)を参照。
 
 | Tool | 引数の概要 | 実処理 |
@@ -23,7 +24,7 @@ bridgeの`game.state.get`は[version 2のgame state](<gameState.md>)を検証す
 Modのgame state取得は接続済み。任意NBT、全Mod環境、一般OSファイルの取得は提供しない。
 必要資材の計算と、現在の所持数との比較はhisyoが行う。
 レシピ専用Toolは作らず、referenceと、game state・event logの検索を分ける。
-Bash・OSファイル・書込・任意ネットワーク・操作代行のToolは無効にする。
+Bash・一般OSファイルの読取や書込・任意ネットワーク・操作代行のToolは無効にする。
 
 hookはイベント条件（`event`と`filter`）と指示（`instruction`）を持つ。
 hookとログ検索のfilterは、公開されたpayload直下のscalarに対する型付き完全一致のAND条件。
@@ -37,11 +38,11 @@ ID・`through`・`nextCursor`は選んだログ内だけで有効で、event log
 IDの辞書順で読み、登録順ではない。`nextCursor`を次の`after`へ渡す。
 cursorのhookを削除しても続きを読めるが、変更中の一覧はsnapshotではない。
 16,000文字までの指示を含む大量hookでも、全件を一度に返さない。
-全Toolの引数は未知キーを拒否し、world / player / session / runは信頼済みbindingから付ける。
+全game Toolの引数は未知キーを拒否し、world / player / session / runは信頼済みbindingから付ける。
 
 `send_message`を呼んだ場合にだけhisyoの発言をプレイヤーへ表示する。
 内部で状態確認やhook変更をしただけなら、無言でrunを終了できる。
-ワールド識別などの接続情報はLLMの引数に要求せず、runに結び付けた値を通信層が付ける。
+game Toolのワールド識別などの接続情報はLLMの引数に要求せず、runに結び付けた値を通信層が付ける。
 
 ```mermaid
 sequenceDiagram
@@ -63,6 +64,26 @@ hook管理とログ検索はCLIのdomain storageで完結し、Modへ転送し�
 
 Modは通信スレッドからゲームオブジェクトを直接操作しない。
 game state取得はサーバースレッド、チャット表示はクライアントスレッドへ処理を渡し、通信でゲーム進行をブロックしない。
+
+## SDK-localなupdate_plan
+
+[longTermPlan](<../src/runtime/longTermPlan.ts>)が定義する`update_plan`は、現在のworld / playerの長期方針documentだけを更新する。
+引数は`{ expectedRevision, plan }`。`LONG_TERM_PLAN`の現在revisionと完全な`plan`を渡すcompare-and-swap（CAS）で、部分patchや追記ではない。
+一致した場合だけdocument内のrevisionを1増やしてplan全体を同じcommitで置換し、成功結果は`{ revision }`だけを返す。
+競合では上書きせず、次のモデル要求に渡る最新`LONG_TERM_PLAN`で判断し直す。
+
+- `plan`は`goal`、`nextAction`、`preferences`、`constraints`をすべて含む。fieldの意味・上限は[長期方針のschema](<context.md#長期方針document>)を参照。
+- strict schemaで未知キー、不正な型、空白だけのtext等を拒否し、引数を暗黙に型変換しない。
+- 保存する状態全体はrevisionとJSON escapeを含め4,096 UTF-8 bytes以下。超過を切り詰めず、更新前の状態を保って明示エラーにする。
+- 目標・次の行動は`null`、好み・境界は空配列で消去する。置換時はまだ有効な好みを引き継ぎ、プレイヤーが改めない限り明示的な境界を保つ。
+- 内容が実質的に変わったときだけ更新する。pollやTool ACKだけを理由に同じplanを書き直さない。
+
+local Toolでも有効なnative run bindingが必要で、実行はsequentialかつ`replay: "unsafe"`。中断した呼出しを自動再実行しない。
+commit済みの更新は取消で巻き戻らず、Tool結果が`interrupted`でも保存済みの場合がある。結果の有無だけで未保存と判断せず、次の要求のrevisionとplanを確認する。
+これはSDK document内の原子的な置換であり、hook変更、HUD表示、domain DBとはtransactionを共有しない。
+有用なhookを先に登録・更新してからplanを保存し、必要な案内は`send_message`で別に表示する。plan保存だけではhookも表示も変わらない。
+
+完全なplanを含む通常のTool呼出し引数はconversationに残る。一方、毎要求の`LONG_TERM_PLAN` snapshotは一時的な背景情報であり、繰り返し会話履歴へ保存しない。
 
 ## 静的ゲームファイルの境界
 

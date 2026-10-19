@@ -18,6 +18,7 @@ summary生成や観測は別の対話主体ではない。
 | **game state** | 体力・所持品・位置・周辺など、取得時点の限定情報 | 過去の出来事、summary |
 | **event log** | Mod由来のゲーム内観測の蓄積。1件はevent | プレイヤー入力、HUD発言、CLI内部の事実 |
 | **conversation** | 入力、AI応答、Toolとのやり取りを含む継続的な会話 | game接続、HUD発言だけの一覧 |
+| **長期方針 / long-term plan** | hisyoが保存する目標・理由、次の行動・完了条件、プレイヤーの好み・明示した境界 | 現在の観測、権限、検証済みの出典、summary |
 | **activity log** | 接続、入力受付、run要求、hook一致、表示確認などCLI事実 | Mod観測、開発用診断ログ |
 | **summary** | event logの一部を短く整理した記録 | conversationの短縮、現在値、activity logの要約 |
 | **hook** | eventの条件と一致時の指示を持つ永続登録 | SDKのtask hook、操作代行、即時発言の保証 |
@@ -64,7 +65,7 @@ summarizeはDurableAgentを経由せず、mainの起動・conversation・保存�
 
 | 用語 | 識別するもの | 寿命・制約 |
 | --- | --- | --- |
-| **world / player scope** | 保存されたワールドとプレイヤー | domain記憶、conversation、run inboxの永続範囲 |
+| **world / player scope** | 保存されたワールドとプレイヤー | domain記憶、conversation、run inbox、長期方針の永続範囲 |
 | **session** | 今回のgame attachment | 再接続で別の`sessionId`。readyは別途必要 |
 | **run binding** | 今回のゲーム側の実行権限 | `runId`。取消・detachで無効になり、再利用しない |
 | **request** | 一つの要求と応答・取消 | `requestId`。dispatchとsummaryは別の所有権 |
@@ -86,6 +87,7 @@ TypeScriptのfileはcamelCase、型・classはPascalCase、関数・変数はcam
 | native SDKモデルと認証 | [modelAccess](<../src/runtime/modelAccess.ts>) / [piCredentialStore](<../src/runtime/piCredentialStore.ts>) |
 | game TCPとtrusted host API | [bridgeServer](<../src/bridge/bridgeServer.ts>) |
 | Durable conversation・Tool・context | [durableAgent](<../src/runtime/durableAgent.ts>) |
+| 長期方針document・schema・local更新Tool | [longTermPlan](<../src/runtime/longTermPlan.ts>) |
 | scope別SQLiteと所有者lock | [durableStorage](<../src/runtime/durableStorage.ts>) |
 | 入力集約・永続admission・実行制御 | [runQueue](<../src/runtime/runQueue.ts>) / [runInbox](<../src/runtime/runInbox.ts>) / [runScheduler](<../src/runtime/runScheduler.ts>) |
 | summary処理順・単発生成・保存・入力加工 | [summaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) / [summaryStore](<../src/storage/summaryStore.ts>) / [summaryInput](<../src/events/summaryInput.ts>) |
@@ -94,7 +96,9 @@ TypeScriptのfileはcamelCase、型・classはPascalCase、関数・変数はcam
 | CLI事実の定義 | [activity](<../src/events/activity.ts>) |
 | hook保存と照合 | [hookStore](<../src/storage/hookStore.ts>) |
 | game state schema | [gameState](<../src/protocol/gameState.ts>) |
-| 10 Toolの契約 | [hisyoTools](<../src/protocol/hisyoTools.ts>) |
+| 10 game Toolの契約 | [hisyoTools](<../src/protocol/hisyoTools.ts>) |
+
+`update_plan`はSDK-localな方針更新Toolであり、game Toolや新しいRPCではない。mainモデルへ公開する数は10 game Tool + 1 local Toolの計11個である。
 
 ## 通信・保存名
 
@@ -109,6 +113,7 @@ CLI activityのevent名は`hisyo.*`、run要求は`hisyo.run_requested_*`。
 | summary | `summary.sqlite`、`summaries` |
 | conversationとtask | `durable/<scope hash>/conversation.sqlite` |
 | run inbox document | `hisyo.run-inbox`、conversation scope |
+| 長期方針document | `hisyo.plan` v1、conversation scope、`history: "latest"` / `fork: "current"` |
 
 Mod観測は`observation` / `observedAt`、保存列は`observation_json` / `observed_at`。
 CLI事実は`activity` / `recordedAt`、保存列は`activity_json` / `recorded_at`。

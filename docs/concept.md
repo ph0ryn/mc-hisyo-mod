@@ -14,6 +14,8 @@ hisyoは相談にも答える。例えば、作りたいものの必要資材を
 - 本体は常駐CLIとし、Fabric Modはゲーム接続インターフェイスにする。
 - 推論、conversation、Tool呼び出しは、常駐CLIと同じプロセスのPi Durable SDKを実行基盤にする。
 - world / player別の保存と、現在のsession / runのTool権限を分け、復旧した処理も最新状態とbindingを確認して実行する。
+- 目標・次の行動・プレイヤーの好みと明示した境界は、runtime所有の[長期方針document](<context.md#長期方針document>)で引き継ぐ。誤り得る記憶であり、現在の観測・要求やTool権限の代わりにはしない。
+- summaryは破棄・再生成できる観測の派生情報に留め、長期方針の保存先にしない。summary生成は固定指示と対象ログだけを使い、mainの会話や方針を渡さない。
 - 平時はready済みsessionの最初のrunと、定期ポーリングによるrunで状況を判断する。
 - 必要なhookはhisyo自身がToolで追加・削除する。hookはイベント条件と、一致時に実行する指示の組である。
 - 個数や進捗、次の行動の判断はhisyoに任せ、CLIやModに目標別の進行ロジックを実装しない。
