@@ -40,6 +40,7 @@ Piの通常のコーディング用Toolや無関係な拡張・コンテキス�
 
 ## 関連資料
 
+- [用語と命名](naming.md)
 - [コンセプトと基本方針](concept.md)
 - [通信プロトコル](protocol.md)
 - [Tool一覧と呼び出し](tools.md)
