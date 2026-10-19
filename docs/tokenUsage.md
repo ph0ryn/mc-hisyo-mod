@@ -18,13 +18,14 @@
 | `source` | 通常判断は`run`、独立要約は`summary` |
 | `requestId` | runでは元の`runId`、summaryでは独立要求のID。同じrun内の複数応答は別のactivity行になる |
 | `provider` / `model` / `api` | 使用provider、応答model（分かる場合）とphysical API |
-| `stopReason` | Piが返した完了・打切り・エラー・取消などの理由 |
+| `stopReason` | SDKのモデル応答が返した完了・打切り・エラー・取消などの理由 |
 | `input` / `output` | providerが報告した入力・出力トークン数 |
 | `cacheRead` / `cacheWrite` | providerが報告したキャッシュ読込・書込トークン数 |
 | `total` | providerが報告した合計トークン数。未報告なら`null` |
 
 カウンターは0以上の安全な整数、未報告の項目は`null`とする。報告された`0`と、未報告の`null`を区別する。
-Piの正規化済み`usage`は欠損を0で補うため使わず、[API応答の抽出処理](<../src/pi/tokenUsage.ts>)で生のstreamイベントから必要な数値だけを保持する。
+SDKの正規化済み`usage`は欠損を0で補うため使わず、[TokenUsageTracker](<../src/pi/tokenUsage.ts>)と
+[DurableAgent](<../src/runtime/durableAgent.ts>)の`onProviderStreamEvent`で、生のproviderイベントから必要な数値だけを保持する。
 文字数からの推計や、欠損した合計の補完は行わない。
 
 入力のキャッシュ計上方法はproviderの定義を維持する。OpenAIの`input_tokens` / `prompt_tokens`はキャッシュ分を含むため、
@@ -33,18 +34,19 @@ Anthropicは合計fieldを報告しないため`total`は`null`になる。出�
 
 ## 記録のタイミングと限界
 
-- runはassistantの`message_end`で1件保存する。Tool後の再判断やPiの再試行は、それぞれ別の応答として記録する。
-  `turn_end`・`agent_end`やconversation再開時の履歴を再集計しない。
-- summaryは独立したモデル呼出しの完了時に、本文の検証・取消判定より先に保存する。
-  打切り・不正な本文・取消によってsummary自体を採用しなくても、取得済みの使用量は残す。
-- 取消後も元の要求slotが残っている間は、そのworld / player / sessionへ記録する。新しいsessionへ付け替えない。
-- APIがusageを返さない失敗やモデル呼出し前の失敗では、未知の項目を`null`で記録する。
-  その行だけで、providerへの送信や課金が発生したとは断定できない。
-- 記録単位はPiの論理的なモデル応答であり、provider内部のHTTPリトライ1回ごとの課金台帳ではない。
-  切断・強制終了などで応答や保存に到達しなかった呼出しは記録できない。providerの請求明細との完全一致は保証しない。
-- 通常の退出・CLI終了ではsummaryへ取消を通知し、使用量の保存応答まで待ってからPi接続を閉じる。
-  providerが取消に応答しない場合は、モデル要求の既存期限（最大5分）まで終了を待つことがある。
-- 保存失敗はfatalとして扱い、保存成功のACKを返さずPi拡張を停止する。自動再送はしない。
+- mainはtrackedなモデル呼出しの`finally`で1件保存する。Tool後の再判断は別の応答であり、別行になる。
+  conversation再openで保存済み履歴を再集計しない。mainのgeneration retryと自動compactionは無効にしている。
+- summaryも同じtracked経路を通り、本文の検証・取消判定より先にusageを保存する。
+  打切り・不正本文・取消でsummaryを採用しなくても、取得済みの使用量は残す。
+- hostの`beginModelRequest` / `recordUsage` / `finishModelRequest`はsource・元session・request IDを照合する。
+  取消・detach後も進行中要求の所有権を保持し、新しいsessionへusageを付け替えない。
+- tracked経路に入った後のAPI失敗でusageが得られなければ未知項目を`null`にする。
+  必須context取得など、その経路より前に拒否した要求にはusage行がない。どちらも送信や課金の証明ではない。
+- 記録単位はSDKの論理的なモデル呼出しであり、provider内部のHTTP試行ごとの課金台帳ではない。
+  crashや保存失敗で記録に到達しない呼出しもあり、provider請求明細との完全一致やexactly-onceを保証しない。
+- 通常終了ではモデル処理と遅いusage記録を待ってからbridge・activity DBを閉じる。
+  要求の取消には最大5分のモデル期限があるが、取消を無視する外部処理などでcloseが直ちに終わる保証はない。
+- 保存失敗はfatalとして扱い、成功扱いにせずruntimeを止める。自動再送はしない。
 - このusageレコードへプロンプト、応答本文、生のstreamイベント、エラーメッセージ、認証情報は保存しない。
   同じactivity logの別イベントには、従来どおりチャット入力などが含まれる。
 
@@ -77,7 +79,13 @@ usageはCLIの事実であり、hook対象にはできない。
 
 ## 検証範囲
 
-[bridgeテスト](<../src/bridge/bridgeServer.test.ts>)で拡張からhostへの呼出し、取消・失敗・要求scope・保存失敗を検証する。
-[storageテスト](<../src/storage/activityLog.test.ts>)はin-memory SQLiteで保存・検索・既存レコードとschema versionの維持を確認する。
-[抽出テスト](<../src/pi/tokenUsage.test.ts>)は3種類のphysical API、欠損と明示0、累積カウンターと不正値を確認する。
+[bridgeテスト](<../src/bridge/bridgeServer.test.ts>)は直接host API、取消後の所有権、要求scope、保存失敗を確認する。
+[DurableAgentテスト](<../src/runtime/durableAgent.test.ts>)は実SDK / fake provider / temp SQLiteと、実TCP bridgeを組み合わせた取消後の遅いusage保存を確認する。
+[storageテスト](<../src/storage/activityLog.test.ts>)はin-memory SQLiteで保存・検索・既存レコードとschema versionを確認する。
+[抽出テスト](<../src/pi/tokenUsage.test.ts>)は3種類のphysical API、欠損と明示0、累積counterと不正値を確認する。
+本体のモデルは固定OpenAIで、抽出処理の他API対応をモデル選択機能と混同しない。
 実ゲーム・実providerの課金明細との照合は未実施。
+
+## 一次資料
+
+- [Pi AI 1.3.0のprovider stream観測](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/ai/README.md#observing-provider-stream-events>)

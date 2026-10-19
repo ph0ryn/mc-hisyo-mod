@@ -1,8 +1,8 @@
 # game state
 
 [状態schema](<../src/protocol/gameState.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
-現在のunit suiteは実TCPの接続境界を検証しない。
-[Pi拡張](<../src/pi/piExtension.ts>)のcontext注入は実装済み。
+[bridge tests](<../src/bridge/bridgeServer.test.ts>)には実TCPのfake gameを使う境界検証がある。
+[DurableAgent tests](<../src/runtime/durableAgent.test.ts>)は実SDK / fake provider / temp SQLiteで、毎要求のtransient contextとTool後の再取得を確認する。
 [Mod producer](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerGameState.java>)と接続済み。
 以下は実装契約であり、ゲーム内の動作実績ではない。
 

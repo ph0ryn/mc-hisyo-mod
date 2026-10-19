@@ -2,11 +2,11 @@
 
 ## 毎回渡すコンテキスト
 
-run内の各モデル呼出し前に、Pi拡張の`context`イベントから最新game stateと保存済みsummaryを取得して注入する。
+run内の各モデル要求のdispatch直前に、[DurableAgent](<../src/runtime/durableAgent.ts>)が最新game stateと保存済みsummaryを取得して注入する。
 Tool実行後の再判断も対象とし、過去のgame stateを毎回conversationへ積み続けない。
 
 - 位置、ディメンション、バイオーム、周辺情報。
-- ゲーム内時刻。生の`dayTime`に加え、Pi拡張が24時間表記の`dayTimeClock`（`HH:mm`）を添える。
+- ゲーム内時刻。生の`dayTime`に加え、DurableAgentが24時間表記の`dayTimeClock`（`HH:mm`）を添える。
 - 体力、インベントリ。
 - 最新のsummary。
 
@@ -16,25 +16,30 @@ run requestはready済みsessionの初回、poll、プレイヤー入力、実�
 位置は座標だけでなく、周辺の地形、ブロック、エンティティなど判断に必要な情報を含める。
 game stateには取得時点のtickや時刻を付け、現在値と過去の観測を区別する。
 bridgeは[game state](<gameState.md>)のschemaを検証する。範囲外・未ロード・打切りと、field自体の欠損を混同しない。
-[Pi拡張](<../src/pi/piExtension.ts>)は毎回`game.state.get`を待ち、`CURRENT_GAME_STATE`として直近のrun入力の直前へ一時注入する。
+DurableAgentは毎回hostの`getGameState()`を待ち、`CURRENT_GAME_STATE`として直近のrun入力の直前へ一時注入する。
 Tool結果の後ろへ新しいuser messageを追加しない。状態更新は背景情報であり、新たな発言要求ではない。
-このgame stateはconversationへ永続化せず、Tool呼出し後の再判断でも取得し直す。
-`dayTimeClock`は`get_game_state`の結果にも添えるhisyo向けの派生値で、Modとのwire schemaは変えない。
+この背景情報はconversationへ永続化せず、Tool呼出し後と保留generationの再開時にも取得し直す。
+明示的な`get_game_state`のTool結果は通常のTool履歴として残るため、現在値と混同しない。
+`dayTimeClock`はこのTool結果にも添えるhisyo向けの派生値で、Modとのwire schemaは変えない。
 24,000 ticksで一周、0 ticksが06:00、6,000 ticksが12:00。負値も正規化する。
 現在の時刻は最新game stateを優先し、過去のconversationやevent logから推測しない。時計は局所の明るさや他dimensionの昼夜を保証しない。
-必須game stateの欠損・不正・切断・timeoutはbinding破棄、同期abort、接続の引退でrunを止める。
-ただしhostが先に無効化した**同じrun**の取消通知と、厳密なbinding付き`-32005`は通常の取消であり、拡張を引退させない。
-不正・別runのエラーを取消扱いにしない。詳細は[取消の順序](<protocol.md#native側が先にrunを無効化した場合>)を参照。
-CLIはrun requestの理由をrun開始前にactivity logへ記録して渡す。
+
+必須game stateの欠損・不正・切断・timeout、summary contextの取得失敗はprovider呼出しへ進めずrunを失敗にする。
+[released 1.3.0のhook例外](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md#errors>)は報告後にskipされ得るため、
+例外を投げるcontext hookだけでは安全性を保証しない。実装はModelsのdispatch wrapper内で取得・検証・binding再確認を完了してからproviderを呼ぶ。
+[実SDKの境界テスト](<../src/runtime/durableAgent.test.ts>)はTool後のcontext失敗でも次のprovider要求が発生しないことを確認する。
+取消とnative-firstの詳細は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
+CLIはrun requestの理由を実行依頼前にactivity logへ記録するが、その記録をprovider実行成功とは扱わない。
 
 ## summary
 
 通常モードでは、session接続中の経過1分ごとに[summaryScheduler](<../src/runtime/summaryScheduler.ts>)が未要約のevent logを古い順に処理する。pause中の時間も数える。
 CLIと同じプロセス内のschedulerであり、別worker threadや別CLIプロセスではない。
-runとは独立して時計・取消・single-flightを管理し、Pi拡張によるToolなしのモデル呼出しを行う。新しいPi子プロセスやconversationは作らない。
+runとは独立して時計・取消・single-flightを管理し、DurableAgentから同じModelsを使って直接Toolなしの要求を行う。
+mainのconversationやrun bindingを取得せず、summary生成をDurable taskとして保存するわけではない。
 モデルはrunと同じ`openai/gpt-6-luna`、summaryの思考量は`reasoningEffort: low`とする。runの`medium`は変えない。
-Fastは[公式のwire値](<https://developers.openai.com/api/docs/guides/fast-mode.md>)である`serviceTier: priority`で要求する。
-隔離した実Piで成功を確認したが、応答の実提供tierは未取得。別tier・別モデルへ自動fallbackしない。
+Fastは`serviceTier: priority`で要求する。これは要求値であり、実providerでの提供tier・応答時間・料金を検証した結果ではない。
+別tier・別モデルへ自動fallbackしない。
 
 - [summaryInput](<../src/events/summaryInput.ts>)の`prepareSummaryInput`でevent logのJSONを短い観測テキストへ変える。
   同一操作の連続を数え、移動・周辺sampleは件数、観測した種類、最初／最後のsampleなどへ集約する。
@@ -51,7 +56,7 @@ Fastは[公式のwire値](<https://developers.openai.com/api/docs/guides/fast-mo
   正常なsummaryの保存とcursorの進行はsummary DB内の同一transaction。event logやhookは変更しない。
   入力元はMod由来の観測だけ。プレイヤー入力、hisyoのHUD発言、hook変更、run要求などのCLI事実は`activityLog.sqlite`へ保存し、summaryへ混ぜない。
 - pause中も同じ周期で新しいsummaryを開始し、進行中のsummaryも完了・保存まで続ける。runのpause制御とは独立する。
-  ChatGPT OAuth利用時はrunとは別に、各summaryの前に信頼済みPi所有者が認証を更新し、隔離子にはaccess tokenだけを渡す。
+  ChatGPT OAuth利用時は各要求のSDK認証解決が元の共有storeで必要なrefreshを行う。認証のためにmain runのslotを取らない。
   退出・終了では先に結果を無効化して取消し、遅い完了を保存せず、終了時の追加summaryもしない。
   空の差分では呼び出さず、重なった周期を後から連打しない。取消・失敗時はcursorを進めず、失敗は通常のruntime faultとして扱う。
 - 再接続後も同じworld / playerのcursorから継続し、以前のsessionも古い順に読む。
@@ -94,7 +99,8 @@ referenceは[3つの読取Tool](<tools.md#静的ゲームファイルの境界>)
 
 ## 一次資料
 
-- [Pi拡張仕様](<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md>)
+- [Pi Durable 1.3.0](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md>)
+- [Pi AI 1.3.0のprovider-specific options](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/ai/README.md#provider-specific-options-streamcomplete>)
 
 ## 関連資料
 

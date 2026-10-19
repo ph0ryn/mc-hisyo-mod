@@ -12,8 +12,8 @@ hisyoは相談にも答える。例えば、作りたいものの必要資材を
 
 - シングルプレイを優先する。
 - 本体は常駐CLIとし、Fabric Modはゲーム接続インターフェイスにする。
-- PiはPATH上の`pi`を子プロセスとして利用する。
-- 推論、conversation、Tool呼び出しの実行基盤はPiに任せる。
+- 推論、conversation、Tool呼び出しは、常駐CLIと同じプロセスのPi Durable SDKを実行基盤にする。
+- world / player別の保存と、現在のsession / runのTool権限を分け、復旧した処理も最新状態とbindingを確認して実行する。
 - 平時はready済みsessionの最初のrunと、定期ポーリングによるrunで状況を判断する。
 - 必要なhookはhisyo自身がToolで追加・削除する。hookはイベント条件と、一致時に実行する指示の組である。
 - 個数や進捗、次の行動の判断はhisyoに任せ、CLIやModに目標別の進行ロジックを実装しない。

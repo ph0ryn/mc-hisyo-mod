@@ -1,69 +1,70 @@
 # runの予約とhook
 
-run queue、初回・チャット・実績解除・一致hook・pollのsingle-flight実行制御、active-play計時と通常CLI / Modへの配線は実装済み。
-実ゲームを含むschedulerの受入れは未実施。[実装・検証状況](<development.md>)を参照。
+runのadmission、集約、pause、single-flightはアプリのschedulerが管理し、conversationと実行taskはPi Durableが保持する。
+[RunInbox](<../src/runtime/runInbox.ts>)は集約済み入力とdispatch予約を同じDurable SQLiteへ保存する。
+実SDK / fake provider / temp SQLite / TCPの境界テストはあるが、実ゲームの受入れは未実施。[検証範囲](<development.md>)を参照。
 
 ## runを予約する入口
 
-1. ready済みsessionの最初のrun（理由`initial`）。ワールドの新規作成やnative JOINを意味しない。
-2. プレイヤーからのチャット。
-3. 定期ポーリング。
-4. hisyoが登録したhookの一致。
-5. 表示を持つ実績の解除（`advancement_completed`かつ`hasDisplay: true`）。hook登録は不要。
+1. ready済みsessionの最初のrun（`initial`）。ワールド新規作成やnative JOINではない。
+2. プレイヤーの通常チャット。
+3. 定期poll。
+4. 登録済みhookに一致した観測。
+5. 表示対象の実績完了（`advancement_completed`かつ`hasDisplay: true`）。hook登録は不要。
 
-通常のゲームイベントはCLIへ通知してevent logへ記録するが、記録するだけではrunを予約しない。
-観測は1秒間隔の一括送信なので、実績解除・hookによる予約にも通常は1秒程度の送信待ちがある。チャット・pause通知はこの待ちに含めない。
-予約条件は上記5つに限り、hisyoがrunとrunの間もゲームを常時監視しているわけではない。
-実績解除以外の作業完了や行き詰まりに即応するには対応するhookが必要。この条件と制約をsystem promptにも明記する。
-criterion単体や表示を持たない内部進捗は自動でrunを予約しない。event logへの記録とhook照合は引き続き行う。
+通常イベントはevent logへ保存するだけで、すべてがrunを予約するわけではない。
+criterion単体や表示を持たない内部進捗は、hookに一致しなければ予約しない。
+観測は約1秒のbatch送信なので、hook・実績の予約にもその待ちがある。チャット・pauseは即送信する。
+run間もモデルがゲームを常時監視しているわけではなく、即応したい作業には対応hookが必要である。
 
 ## 定期ポーリング
 
-hisyoが主導して目標と行動を決め、プレイヤーに有効な指示がある状態を保つ。初回や次にやることが不明なときは、質問や新しいイベントを待たず、具体的な行動を伝える。
-指示の個数やrunごとの発言回数は固定せず、必要なら複数の手順をまとめて伝える。指示が有効でプレイヤーが取り組んでいる間は、pollでもhookでも指示を追加・反復せず、その作業を任せる。
-例えば「鉄を1スタック集める」と指示済みで収集中なら追加指示は不要。達成・行き詰まり・状況に不適合になった時点で、次の行動を指示するか計画を修正する。
-発言は指示に限定しない。作業中でもhisyoから自然な雑談・出来事への反応・励ましをしてよく、現在の目標に関係のない会話も許す。会話の好みはプレイヤーに合わせる。
-質問や意味のある危険には応答し、指示の停止・削減の希望にも従う。会話に関連するアイテムの話題は許すが、HUDの通常値・所持品一覧は実況しない。
-必要なhookの登録・更新は発言前に済ませ、そのrunでの指示や会話が済んだら終了する。game stateの再取得や表示ACKを、新しい発言要求として扱わない。
+hisyoが主導して目標と次の行動を決める。初回や次の行動が不明なときは、質問やイベントを待たず具体的な行動を示す。
+指示が有効でプレイヤーが取り組んでいる間は追加・反復せず、達成・行き詰まり・状況変化で計画を更新する。
+自然な雑談・反応・励ましもよいが、HUDの通常値や所持品一覧を実況しない。
+必要なhookは発言前に登録し、Toolの表示ACKや状態更新を新しい発言要求として扱わない。
 
 ```text
-sessionがready・プレイ中であることを確認
-  → CLIの定期タイマーが発火
-  → runを予約
-  → Piが空いたら固定mediumで実行
-  → 必要ならToolで確認
-  → 発言・hook変更・無言で終了
+ready済み・非pauseのsession
+  → active-playの期限到達
+  → inboxへpoll理由をcommit
+  → main slotが空いたらdispatch予約
+  → native bindingを確保してDurableへsubmit
+  → mediumのモデル要求・必要なTool
+  → settled後にdispatchを消費
 ```
 
-プレイ中60秒を初期値とする。計測済みの最適値ではない。
-[ActivePlayClock](<../src/runtime/activePlayClock.ts>)はタイマーを持たず、単調増加するミリ秒値だけを受け取る。
-`setPlaying(playing, nowMs)`で状態変更直前までの経過を加算し、`poll(nowMs)`はactiveな累計が60秒に達した場合だけ`true`を返す。
-ポーズ前の端数は保持するが、ポーズ中の経過は除外する。同時刻の再sampleは許し、非有限・負数・逆行する時刻は明示エラーにする。
-遅れたsampleも1予約にまとめ、超過分は持ち越さず、そのsampleから次の60秒を数える。復帰後に過去の回数分を実行しない。
-ポーズ直前に既に60秒へ達していた場合は復帰後のsampleで1回だけ予約できる。
+[ActivePlayClock](<../src/runtime/activePlayClock.ts>)は単調増加ミリ秒を受け、非pauseの累計60秒を初期周期とする。
+これは計測済みの最適値ではない。
+pause前の端数を保持し、pause中の時間は除外する。非有限・負数・逆行時刻はエラー。
+遅れたsampleも1予約にまとめ、超過分を持ち越して連打しない。
+ready時に時計を作り、退出・切断・session変更で時計を作り直す。
 
-run schedulerはready済みsessionごとに時計を作り、ready時点から非pauseの時間だけを計る。退出・切断・session変更では時計と揮発予約を破棄する。
-`poll(binding)`は現在のbinding・非pause・未故障・未closeを確認してから時刻をsampleし、期限到達時は既存run queueのpoll flagへまとめる。
-戻り値`true`は予約の受付・集約であり実行完了ではない。未到達・古いbinding・停止中は`false`、計時や受付の失敗は`fault`で明示して停止する。
-プレイヤー入力・hookは同じ次回run requestに保持し、pollだけのために別slotや割込みを作らない。
-hookを含むrunが`settled`になった時点で、保留pollだけを取り消し、そこから60秒のactive-play計時をやり直す。
-無言・明示取消を含むが、`not_started`ではリセットしない。保留のチャット・hookは残し、pause中の時間は引き続き数えない。
-時計の既定入力は`performance.now()`で、unitでは`monotonicNow` portへ手動時刻を渡す。
-[hisyoRuntime](<../src/runtime/hisyoRuntime.ts>)は1,000 msごとにready済みsessionへこの入口を呼び、shutdown時にtimerを最初に止める。
+`poll(binding)`の`true`はadmissionを予約した意味で、provider実行や永続commitの完了ではない。
+後から保存に失敗すればscheduler faultになる。binding不一致・pause・未到達・終了中は`false`。
+[hisyoRuntime](<../src/runtime/hisyoRuntime.ts>)は1,000 msごとに現在のready sessionをsampleし、終了時はtimerを先に止める。
 
-pauseの実行制限はrun schedulerだけが担い、定期実行までの経過時間を数えず、次のrun requestをPiへ渡さない。
-接続・起動・入力受付・ゲーム内時刻の取得を止める意味ではない。
-既にPiへ渡したrunは、認証更新やbinding準備中にpauseされても拒否せず、開始済みのrun・Toolと同じく完了まで続ける。
-[summary](<context.md#summary>)はrunとは別の時計でpause中も経過時間を数え、新規開始・完了・保存する。
-退出・切断・明示停止では実行中のbindingを直ちに無効化し、CLIはPiへabortを要求する。
-`agent_settled`を確認するまでslotを解放せず、停止待ちの間に復帰してもrunを重ねない。
+hookを含むrunが`settled`になれば保留pollだけを消し、その時点からactive-playの60秒を数え直す。
+無言・明示取消を含むが`not_started`ではresetしない。保留チャット・hookは消さない。
+時計そのものは永続化せず、host再起動後も以前の経過秒を復元するわけではない。
+
+## pauseと取消
+
+pauseは**次のmain runのdispatch**とpoll時計だけを止める。
+接続・Durable storageの起動・入力受付・game state取得は止めない。
+既にdispatchしたrunは、native bind準備中にpauseされても、その理由だけでは取消さない。
+進行中のモデル・Tool・完了を待ち、解除後もslotを重ねない。
+[独立summary](<context.md#summary>)はpause中も経過時間を数え、新規開始・完了・保存を続ける。
+
+明示的な退出・切断・取消は、先にrun bindingをfenceし、SDKへabortを要求する。
+abort signalを出しただけでsettledとみなさず、SDKと進行中native処理が終了するまで所有権を保つ。
+次のrunで古い効果を新しいbindingへ付け替えない。
+[native-first取消](<protocol.md#native側が先にrunを無効化した場合>)の不確定待機も、この単一slotとは別に維持する。
 
 ## hook
 
-hookはイベント条件と指示の組であり、一致した観測と指示をrun requestへ入れる。
-Pi自体のライフサイクルイベントとは区別する。
-
-hisyoによる`add_hook`の登録例。
+hookはイベント条件（`event`、任意の`filter`）と指示（`instruction`）の永続登録。
+SDKのtask hookとは別の概念である。
 
 ```json
 {
@@ -73,111 +74,87 @@ hisyoによる`add_hook`の登録例。
 }
 ```
 
-`filter`はイベントに含まれるIDなど、監視対象を指定するためのものとする。
-CLIはイベントと対象の一致を判定し、所持数や進捗の意味は解釈しない。
-hisyoは対応イベント一覧を参照し、必要なhookをToolで設定する。
+CLIは公開scalarへの型付き完全一致ANDで照合し、個数や目標の意味は解釈しない。
+hisyoが対応一覧を参照して登録・削除する。
+登録後に受信したlive観測だけを対象にし、過去のevent logを再照合しない。
+hook削除はevent logを消さず、既に捕捉した指示も変更しない。
 
 ```text
-Modがイベントを通知
-  → CLIがevent logへ記録
-  → 登録済みhookと照合し、一致をactivity logへ記録
-  → 一致したhookの指示と観測を添えてrunを予約
-  → PiがコンテキストやToolでgame stateを確認
+Modの観測 → event DBへ保存
+  → live hook照合とactivity監査
+  → 一致した指示・正確な保存イベントをinboxへcommit
+  → runで最新game stateを確認
   → 発言・hook変更・無言で終了
 ```
 
-hookはhisyoが削除するまで維持する。
-登録後にCLIが受け取った観測を対象とし、過去の出来事はevent logから確認する。
-目標変更時に不要になったhookを削除する判断もhisyoに任せる。
-
-## かまど作成の例
-
-| runの理由 | hisyoの動作 |
-| --- | --- |
-| sessionの初回 | 石破壊hookを追加し、「かまど用の丸石を8個集めましょう」と指示 |
-| 定期ポーリング | 作業中なら指示は維持し、自然な会話も可。指示なし・達成・行き詰まりなら次の行動を示す |
-| 石破壊hook | 所持数を確認し、足りなければ追加指示は不要 |
-| 石破壊hook | 十分なら石破壊hookを削除し、かまど入手hookを追加して「クラフトしましょう」と指示 |
-| かまど入手hook | 次の行動を判断し、必要なhookへ変更 |
-
-この進行を専用の状態機械として実装しない。
-石の破壊と丸石の入手のタイミングの違いなども、最新game stateとevent logを取得してhisyoが判断する。
-
-## run実行中の扱い
-
-Piはrunを1件ずつ処理する。
-CLIが実行待ちを管理し、同じhookの一致は観測を失わずにまとめて次回へ渡す。
-プレイヤーからの入力も保持し、pollを重ねて予約しない。
-処理待ち入力が容量上限を超えたら、明示エラーでrun処理を停止する。黙示的な破棄や永続inboxへの退避は行わない。
-
-現在は優先度別laneや入力割込みを設けず、同じrun queueで順番に処理する。
-取消はbinding無効化・停止等で行い、pauseや入力到着だけで進行中のrunを中断しない。
-
-Piの`steer`は進行中のAPI応答を即座に中断する機能ではなく、次のモデル呼出し前に入力を渡す仕組みである。
-runの完了確認には`agent_settled`を使う。
-`prompt`の受理応答や`agent_end`だけでは、その後の自動処理まで完了したと判断しない。
+例えば石破壊hookで所持数を確認し、十分なら削除して次のクラフトのhookへ変える。
+これを専用の目標別状態機械としてCLIに実装せず、hisyoが最新状態とevent logから判断する。
 
 ## run queue
 
-[RunQueue](<../src/runtime/runQueue.ts>)は、一つのworld / player / `sessionId`に属するrun requestを保持する。
-初回・pollはそれぞれ1予約へまとめ、チャットは同文でも受信順に別々に残す。
-hookは一致時のID・指示・正確な保存イベントIDを保持し、同じhookの一致をまとめる。
-一致した観測の内容と連番欠損情報はrun request内に1コピーだけ保持し、複数hookからIDで参照する。
-実績解除も`observations`へ保持する。同時にhookが一致しても内容は1コピーで、別々のrunには分けない。
-後でhookを削除しても捕捉済みの指示は変えず、新規hookを過去イベントへ照合し直さない。
+[RunQueue](<../src/runtime/runQueue.ts>)は一つのbinding向けrun requestを集約する純粋なdomain部品。
+[RunInbox](<../src/runtime/runInbox.ts>)がそのsnapshotをconversation内の`hisyo.run-inbox` documentへ保存する。
 
-- 既定上限は保留run requestをJSON化したUTF-8で1 MiB。指示・参照・観測本文・JSON escapeも数える。
-  初期の容量制限であり、最適値を計測したものでも、process全体のRSS上限でもない。
-- 一つの観測に複数hookが一致した場合も、全件を収められなければ受付を失敗させる。一部だけをrunへ渡さない。
-- 超過後は新しい受付もrun request取得も同じエラーで拒否し、自動回復しない。古い入力を追い出して空きを作らない。
-- run request取得後の入力は次の保留run requestへ入り、取得済みの内容を書き換えない。
-  runtimeも取得済みrun requestを1件に制限し、その実行前・実行中の入力を次の保留run requestへ分離する。
-- 保留はsession内の揮発状態。crash・退出・明示停止を超えた配送保証や、次のsessionへの再送は行わない。
-  永続するevent log・activity log・hook登録とは分ける。
+- `initial`とpollはそれぞれ1つのflagへまとめる。
+- 同文チャットも受信順に別々に残す。
+- hookは一致時点のID・指示・正確な保存event IDを保持し、同じhookの複数一致をまとめる。
+- 観測本文と既知欠番情報は1コピーにし、複数hookからIDで参照する。実績とhookが重なっても二重runにしない。
+- pendingの既定上限はJSON化したUTF-8で1 MiB。指示・参照・観測・escapeを含む。process全体のRSS上限ではない。
+- 1観測に複数hookが一致して収まらない場合も、一部だけを採用しない。
+  admissionのcommitをrollbackし、以前の受付済み入力を保持してscheduler faultにする。古い入力を追い出さない。
+- dispatchを予約した後の入力は次のpendingへ入り、取得済みの束を書き換えない。
 
-[隣接するVitest](<../src/runtime/runQueue.test.ts>)は、literalの`StoredEvent`・hook入力と公開queue APIだけを使うunit testである。
-DB保存・hook登録や照合は検証しない。single-flightは次のscheduler unit testと区別する。
+## 永続admissionとdispatch
 
-## 実行制御
+inbox documentには`pending`と`dispatch`を持つ。dispatchは安定した`requestId`と入力を保持する。
 
-[RunScheduler](<../src/runtime/runScheduler.ts>)はready済みsessionから初回理由を1回取り込み、
-チャット・実績解除・一致hook・期限到達pollのrun requestをPiプロセス所有者へ順番に渡す。他の観測はhookに一致しなければ保存だけを行う。
-pause中も入力は保持するがrunを開始しない。pause解除がsettledより先でも、slotを重ねず次回へ進む。
-`not_started`は取得済みrun requestを保持し、開始後のsettledは取消済みでも消費する。曖昧な失敗は再送しない。
+1. チャット受付はpendingへのcommitをawaitする。成功した場合だけgameへ`accepted: true`を返す。
+2. `take()`はpendingを取り出す操作とdispatch予約を同じcommitで行う。
+3. schedulerは保存済みIDを`conversation.submit({ requestId, ... })`へ渡す。
+4. hostが予約後・submit前後で止まっても、再open後は同じIDで元submissionを取得する。
+5. `settled`を待ってdispatchを完了する。`not_started`では予約を保持する。
 
-容量超過は同期的に失敗を固定し、実行bindingを無効化・Piを取消してから`fault`を通知する。
-その後のチャットも`-32004`で拒否し、session再接続だけでは回復しない。
-hook受付時点でevent logは保存済みなので、容量超過でも`stored` ACKとevent logは維持する。停止後も観測保存を続けられる。
-RPCの明示エラーとruntimeの`fault`で失敗を伝える。独立したゲーム内scheduler診断HUDは提供しない。
+これは**入力のadmission重複排除**であり、表示やhook変更のexactly-onceではない。
+全Toolを`replay: "unsafe"`とし、未確定の実行を再open後に自動dispatchしない。
+[電源断・外部副作用・別DB transactionの限界](<architecture.md#durabilityが保証する範囲>)も参照。
 
-退出時は古い揮発入力を次のbindingへ移さず、起動途中のcleanupと実子プロセスの終了を待ってから次の所有者を起動する。
-起動中の明示`close()`は受付と新規runを直ちに止め、既存の期限付き起動・cleanup完了を待つ。
-終了確認に失敗したらcleanup promiseを失敗のまま保ち、leaseを回収したり次を起動したりしない。
+| 終了理由 | 保留状態 |
+| --- | --- |
+| host close / process crash | conversationのtask、pending、dispatchを残す |
+| 明示ゲームdetach / 切断 | SDK abort後、inboxをclearし、古い理由を次のsessionへ送らない |
+| 保存・binding失敗などのruntime fault | schedulerを停止し、保存済み状態を成功扱いで捨てない |
 
-[隣接するVitest](<../src/runtime/runScheduler.test.ts>)は、bridgeの公開イベント・受付とPi所有者の境界だけを置き換えるunit testである。
-ファイル・SQLite・TCP・子プロセスは使わず、closeの未解決promiseで所有権の引渡し待ちを検証する。
-stubの解決順確認が実プロセスの終了検証を代替するとは扱わない。
-[clock unit](<../src/runtime/activePlayClock.test.ts>)はactive時間・遅延集約・不正時刻を確認する。
-[framing unit test](<../src/pi/piFraming.test.ts>)は、受付済みrun requestのprompt・user echo、frame容量の境界・超過拒否を確認する。
-Pi送受信の上限は2 MiB + 256 bytes、run queueの上限は1 MiBとし、超過は明示失敗で停止する。
-任意raw文字列、拡張した`maxPendingBytes`、複数message・Tool結果・モデル出力を集約した全イベントの配送保証ではない。
-定期timer・CLI / Mod接続は実装済みだが、実Piでのscheduler受入れは未実施。
-run要求の理由はPiへ実行を依頼する前にactivity logへ保存する。実績解除は`hisyo.run_requested_advancement`に元の保存イベントIDを記録する。要求記録はprovider実行の証拠ではない。
-native-first取消の待機は[通信契約](<protocol.md#native側が先にrunを無効化した場合>)を参照。
+host再起動後は同じworld / playerの受付済み入力を復旧できるが、storageをopenしただけではモデル要求を出さない。
+ready済みの現在sessionと新しいnative run bindingを得て初めて、保存済みrequest IDで再開する。
+元の観測に付いたsource sessionは変えず、現在の実行権限だけを新しいsessionへ結び付ける。
 
-## 推論設定
+## 実行制御と検証
 
-現在は全runで`medium`固定。Pi 1.2.0のcatalog・対応thinking levels・実際のidle stateを毎run前に検査し、未対応なら停止する。
-`quick` / `high`切替や即応後の別laneは実装していない。応答時間の保証もない。
+[RunScheduler](<../src/runtime/runScheduler.ts>)はmainをsingle-flightにし、優先度laneや入力割込みを設けない。
+入力到着やpauseだけで進行中runを止めない。受付はsessionごとに直列化する。
+容量超過後のチャットは`-32004`で拒否し、同じruntimeのsession再接続だけでは回復しない。
+観測は既にdomain保存済みなので、run受付失敗を観測保存の失敗へすり替えない。
+独立したゲーム内scheduler診断HUDはない。
+
+退出のcleanup、SDK処理とstorage closeが完了するまで、次の所有者を起動しない。
+closeが失敗したままleaseを奪ったり、settledを捏造したりしない。
+run要求のactivityは実行依頼前に保存するが、provider送信や応答の証拠ではない。
+
+- [queue unit tests](<../src/runtime/runQueue.test.ts>)は集約と容量を公開APIで確認する。
+- [inbox tests](<../src/runtime/runInbox.test.ts>)は実SDK / temp SQLiteで予約と受付済み入力の再openを確認する。
+- [scheduler tests](<../src/runtime/runScheduler.test.ts>)はbridgeとagentの依存境界、実Durable documentを使い、pause・単一slot・終了順序を確認する。
+- [core tests](<../src/runtime/durableAgent.test.ts>)は実Harnessとfake providerでgeneration・Tool・contextの再openを確認する。
+- [clock tests](<../src/runtime/activePlayClock.test.ts>)はactive時間・遅延集約・不正時刻を確認する。
+
+主処理は全runで`medium`固定であり、`quick` / `high`切替や即応lane、応答時間の保証はない。
 
 ## 一次資料
 
-- [Pi RPC仕様](<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md>)
-- [Pi RPCコマンド](<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc-commands.md>)
-- [Fabricイベント](<https://docs.fabricmc.net/develop/events/>)
+- [Pi Durable 1.3.0のpersist / resume](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md#persist-and-resume>)
+- [Pi Durable 1.3.0の独自document](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md#your-own-state>)
 
 ## 関連資料
 
 - [用語と命名](<naming.md>)
-- [Tool一覧と呼び出し](<tools.md>)
+- [Tool一覧](<tools.md>)
 - [通信プロトコル](<protocol.md>)

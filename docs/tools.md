@@ -1,8 +1,9 @@
 # Tool一覧と呼び出し
 
-次の10 Toolだけを[Pi拡張](<../src/pi/piExtension.ts>)で有効にする。
-CLIからのPi起動とMod接続も実装済みだが、実ゲームを含む一連の受入れは未実施。[実装・検証範囲](<development.md>)を参照。
-CLIがPiのTool実行イベントを見て後から結果を注入する方式にはせず、拡張の`execute()`が実処理を待ち、その結果をPiへ返す。
+次の10 Toolだけを[DurableAgent](<../src/runtime/durableAgent.ts>)のregistryへ登録する。
+[正規の定義と引数schema](<../src/protocol/hisyoTools.ts>)を共用し、モデル引数にbindingを持たせない。
+Toolの`execute()`は信頼済みのin-process [host API](<../src/bridge/bridgeServer.ts>)をawaitし、結果をDurableへ返す。
+実SDK / fake provider / temp SQLite / TCPの境界テストはあるが、実ゲームの受入れは未実施。[検証範囲](<development.md>)を参照。
 
 | Tool | 引数の概要 | 実処理 |
 | --- | --- | --- |
@@ -32,12 +33,10 @@ ID・`through`・`nextCursor`は選んだログ内だけで有効で、event log
 `since`はevent logでは`observedAt`、activity logでは`recordedAt`のUnixミリ秒を指定する。
 欠損とページングの意味は[保存・検索の契約](<development.md#保存検索の契約>)を参照。
 
-hook一覧のbridge側実装は`hisyo.hooks.list`の`query`で`after?`と`limit?`を受け、
-`hooks`と、続きがあれば`nextCursor`を返す。`limit`は1〜8、既定値8。
+`list_hooks`は`after?`と`limit?`を受け、`hooks`と、続きがあれば`nextCursor`を返す。`limit`は1〜8、既定値8。
 IDの辞書順で読み、登録順ではない。`nextCursor`を次の`after`へ渡す。
 cursorのhookを削除しても続きを読めるが、変更中の一覧はsnapshotではない。
-16,000文字までの指示を含む大量hookでも、1フレームへ全件を詰め込まない。
-Pi拡張は一覧の引数をbridgeの`query`へ変換する。
+16,000文字までの指示を含む大量hookでも、全件を一度に返さない。
 全Toolの引数は未知キーを拒否し、world / player / session / runは信頼済みbindingから付ける。
 
 `send_message`を呼んだ場合にだけhisyoの発言をプレイヤーへ表示する。
@@ -46,22 +45,21 @@ Pi拡張は一覧の引数をbridgeの`query`へ変換する。
 
 ```mermaid
 sequenceDiagram
-    participant P as hisyo（Pi）
-    participant E as Pi拡張
-    participant C as CLI
+    participant D as Durable Tool
+    participant B as BridgeServer（同一process）
     participant M as Fabric Mod
-    P->>E: get_game_state(...)
-    E->>C: Toolの処理を要求
-    C->>M: game.state.get
-    Note over M: ゲームスレッドでgame state取得
-    M-->>C: game stateを返す
-    C-->>E: 結果を返す
-    E-->>P: Tool結果として返す
+    D->>B: getGameState(binding, signal)
+    B->>M: game.state.get
+    Note over M: ゲームスレッドでbinding再検証・状態取得
+    M-->>B: binding付きgame state
+    B-->>D: 検証済みTool結果
 ```
 
-要求IDは接続ごとに管理し、CLIはPi拡張からの要求とModへ転送した要求の対応を保持する。
-hook管理やログ検索ではModへの転送は発生しない。
-Piの完了を待っている間もCLIは通信を処理し、Toolからの要求を受け付ける。
+hook管理とログ検索はCLIのdomain storageで完結し、Modへ転送しない。
+ゲーム転送ではRpcPeerが接続内のrequest IDを照合する。
+全Toolはsequentialかつ`replay: "unsafe"`。中断した呼出しを再open後に自動実行しない。
+表示やhook変更は外部副作用なので、Durableのcommitがexactly-onceを与えるわけではない。
+応答不明の効果を再送せず、[保存・復旧の限界](<architecture.md#durabilityが保証する範囲>)を維持する。
 
 Modは通信スレッドからゲームオブジェクトを直接操作しない。
 game state取得はサーバースレッド、チャット表示はクライアントスレッドへ処理を渡し、通信でゲーム進行をブロックしない。
@@ -77,7 +75,8 @@ rootは`modid:index`、pathはroot内の論理相対pathで、ホストの絶対
 - 対応拡張子は`json, mcmeta, txt, md, lang, properties, csv, xml, yml, yaml, toml, fsh, vsh, glsl`。
 - 検索はcase-sensitiveなliteral一致、非再帰、1ページ最大32候補。各fileの最初の一致とUTF-16 offsetを返す。
   `scanned`は調査候補数。`nextCursor`は一致が0件でも最後に調査した候補であり、一致件数のcursorではない。
-- 結果の上限は512 KiB − 4 KiB。RPC envelopeとPiのtext / detailsへの重複・JSON escapeも検査し、黙示skipしない。
+- 結果の上限は512 KiB − 4 KiB。binding付きwire結果と、SDKへ返すtext出力のJSON escape後の予算を検査し、黙示skipしない。
+  Durableはこの結果をモデルへtext出力として返す。
   エラーでホストpathやI/O causeを漏らさない。
 
 [Mod側](<../mod/src/main/java/io/github/ph0ryn/mchisyo/reference/PackagedReferences.java>)は
@@ -88,7 +87,7 @@ referenceは信頼できない静的資料であり、命令でも現在のワ�
 
 ## 一次資料
 
-- [Pi拡張仕様](<https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md>)
+- [Pi Durable 1.3.0のToolとreplay](<https://github.com/earendil-works/pi/blob/v1.3.0/packages/durable/README.md#tools>)
 
 ## 関連資料
 
