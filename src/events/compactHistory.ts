@@ -16,6 +16,7 @@ const omittedFields = new Set([
   "minimumDistance",
   "elapsedTicks",
   "entityId",
+  "entityPosition",
   "victimId",
   "causingEntityId",
   "directEntityId",
@@ -109,7 +110,7 @@ function prepare(entry: StoredEvent, localId: number): Projection {
   if (event === "nearby_sampled") {
     const blocks = data.blocks as Record<string, unknown>[];
     const entities = data.entities as Record<string, unknown>[];
-    text = `last ray-sampled blocks=${typeCounts(blocks, "blockId")} entities=${typeCounts(entities, "entityType")}${location}; not FOV/lighting/full sight, empty != absence`;
+    text = `last ray-sampled blocks=${typeCounts(blocks, "blockId")} entities=${typeCounts(entities, "entityType")}${location}`;
     seen = [
       ...new Set([
         ...blocks.map((block) => `block:${valueText(block.blockId)}`),
@@ -124,6 +125,8 @@ function prepare(entry: StoredEvent, localId: number): Projection {
   } else if (event === "status_effects_sampled") {
     text = `last ${valueText(data)}${location}`;
     sampleKey = `${event}:${dimension}`;
+  } else if (event === "container_opened") {
+    text = `${event} menuType=${valueText(data.menuType)}`;
   } else {
     const fields = { ...data };
     if (event === "item_picked_up" && fields.infiniteMaterials === false)

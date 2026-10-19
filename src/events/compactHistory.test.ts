@@ -418,7 +418,8 @@ test("shortens IDs and transitions, rounds only coordinates, and omits pickup de
   );
   expect(source.input).toContain("slot=6");
   expect(source.input).toContain("itemId=torch count=19->18");
-  expect(source.input).toContain("entityPosition=387.7,-18.1,0 infiniteMaterials=true");
+  expect(source.input).toContain("infiniteMaterials=true");
+  expect(source.input).not.toContain("entityPosition=");
   expect(source.input).toContain("level=5->6 progress=0.3456789->0.1234567 totalExperience=59->73");
   expect(source.input).not.toMatch(
     /beforeItemId|afterCount|remainingCount|infiniteMaterials=false|e1400\d/u,
@@ -430,6 +431,38 @@ test("shortens IDs and transitions, rounds only coordinates, and omits pickup de
   expect(source).toMatchObject({ after: 14000, through: 14006, sourceCount: 5 });
   expect(entries).toEqual(original);
   expect(compactHistory(14006, [row(15000)])!.input).toContain("e1 block_broken");
+});
+
+test.each([
+  ["item_picked_up", 3],
+  ["item_dropped", 2],
+])(
+  "omits entityPosition from %s while retaining item quantities and player location",
+  (event, count) => {
+    const source = compactHistory(0, [row(1, event)])!;
+    expect(source.input).not.toContain("entityPosition=");
+    expect(source.input).toContain(`${event} itemId=stone count=${count}`);
+    expect(source.input).toContain("@overworld:2,64,0");
+  },
+);
+
+test("omits visibility caveats while retaining nearby observations", () => {
+  const source = compactHistory(0, [row(1, "nearby_sampled")])!;
+  expect(source.input).toContain("nearby_sampled:overworld [1 samples");
+  expect(source.input).toContain("seen types=block:stone,entity:cow");
+  expect(source.input).toContain(
+    "last ray-sampled blocks=stone×1 entities=cow×1 @overworld:2,64,0",
+  );
+  expect(source.input).not.toMatch(/not FOV|lighting|full sight|empty != absence/u);
+});
+
+test("renders container opening as only its menu type", () => {
+  const entry = row(1, "container_opened");
+  const original = structuredClone(entry);
+  const source = compactHistory(0, [entry])!;
+  expect(source.input.split("\n").slice(2)).toEqual(["e1 container_opened menuType=generic_9x3"]);
+  expect(source).toMatchObject({ after: 0, through: 1, sourceCount: 1 });
+  expect(entry).toEqual(original);
 });
 
 test("filters only agreed samples and advancement notifications, retaining effects and progress", () => {
