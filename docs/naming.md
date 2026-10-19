@@ -53,7 +53,8 @@ event logからsummaryを作る処理は **summarize**。
 summary schedulerは同じCLI process内で周期・single-flight・取消を管理する部品で、別workerではない。
 summary inputの準備は決定的な選択・整形であり、モデル生成そのものではない。
 
-summarizeはmain runやTool権限を取得せず、Modelsへ直接Toolなしで要求する。
+summarizeはDurableAgentを経由せず、mainの起動・conversation・保存領域に依存しない単発API要求とする。
+固定指示と対象ログだけをModelsへ渡し、Tool・会話履歴・summary用sessionは持たない。
 pause中も周期・進行中処理を続け、退出・終了時は結果を無効にして取消す。
 認証はmainと同じSDK ownerとcredential storeを使う。
 
@@ -85,7 +86,8 @@ TypeScriptのfileはcamelCase、型・classはPascalCase、関数・変数はcam
 | Durable conversation・Tool・context | [durableAgent](<../src/runtime/durableAgent.ts>) |
 | scope別SQLiteと所有者lock | [durableStorage](<../src/runtime/durableStorage.ts>) |
 | 入力集約・永続admission・実行制御 | [runQueue](<../src/runtime/runQueue.ts>) / [runInbox](<../src/runtime/runInbox.ts>) / [runScheduler](<../src/runtime/runScheduler.ts>) |
-| summary周期・保存・入力加工 | [summaryScheduler](<../src/runtime/summaryScheduler.ts>) / [summaryStore](<../src/storage/summaryStore.ts>) / [summaryInput](<../src/events/summaryInput.ts>) |
+| summary周期・単発生成・保存・入力加工 | [summaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) / [summaryStore](<../src/storage/summaryStore.ts>) / [summaryInput](<../src/events/summaryInput.ts>) |
+| run / summary共通のusage記録 | [trackModelRequest](<../src/runtime/trackModelRequest.ts>) |
 | event / activity検索 | [logSearch](<../src/storage/logSearch.ts>) |
 | CLI事実の定義 | [activity](<../src/events/activity.ts>) |
 | hook保存と照合 | [hookStore](<../src/storage/hookStore.ts>) |

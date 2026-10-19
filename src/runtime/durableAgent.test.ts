@@ -322,25 +322,6 @@ test("context failure is fail-closed at provider dispatch, including the post-to
   expect(fixture.bridge.pendingRequests).toBe(0);
 });
 
-test("independent summary remains tool-free priority/low while main admission is paused", async () => {
-  const fixture = await setup(() => message([{ type: "text", text: "木を集めた。" }]));
-  fixture.bridge.currentSession.paused = true;
-  await expect(fixture.agent.run("paused", undefined, "paused")).resolves.toEqual({
-    status: "not_started",
-  });
-  await expect(fixture.agent.summarize("events", new AbortController().signal)).resolves.toBe(
-    "木を集めた。",
-  );
-  expect(fixture.calls).toHaveLength(1);
-  expect(getCurrentTools(fixture.calls[0]!.context.messages)).toEqual([]);
-  expect(fixture.calls[0]!.options).toMatchObject({
-    serviceTier: "priority",
-    reasoning: "low",
-    cacheRetention: "none",
-  });
-  expect(fixture.bridge.usage[0]!.source).toBe("summary");
-});
-
 test("scheduler domain documents commit while paused and survive close/reopen without a provider call", async () => {
   const fixture = await setup();
   const Inbox = defineDoc({
@@ -428,31 +409,6 @@ test("interrupted native side effects settle before close and are not replayed a
   expect(dispatches).toBe(1);
   const view = await fixture.agent.conversation.context(BACKGROUND_CONTEXT);
   expect(JSON.stringify(view.messages)).toContain("interrupted");
-});
-
-test("summary cancellation settles incurred usage and does not admit main-run tools", async () => {
-  const entered = deferred<void>();
-  const fixture = await setup(async (call) => {
-    entered.resolve();
-    await new Promise<void>((resolve) => {
-      call.options!.signal!.addEventListener("abort", () => resolve(), { once: true });
-    });
-    return { ...message(), stopReason: "aborted" };
-  });
-  const cancel = new AbortController();
-  const summary = fixture.agent.summarize("events", cancel.signal);
-  const rejected = expect(summary).rejects.toThrow();
-  await entered.promise;
-  cancel.abort();
-  await rejected;
-  expect(fixture.bridge.pendingRequests).toBe(0);
-  expect(fixture.bridge.usage).toHaveLength(1);
-  expect(fixture.bridge.usage[0]).toMatchObject({
-    source: "summary",
-    stopReason: "aborted",
-    input: 7,
-  });
-  expect(fixture.bridge.tools).toEqual([]);
 });
 
 test("invalidated native binding cannot execute late provider tool calls", async () => {

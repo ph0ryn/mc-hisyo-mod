@@ -25,7 +25,7 @@
 
 カウンターは0以上の安全な整数、未報告の項目は`null`とする。報告された`0`と、未報告の`null`を区別する。
 SDKの正規化済み`usage`は欠損を0で補うため使わず、[TokenUsageTracker](<../src/pi/tokenUsage.ts>)と
-[DurableAgent](<../src/runtime/durableAgent.ts>)の`onProviderStreamEvent`で、生のproviderイベントから必要な数値だけを保持する。
+mainとsummaryで共有する[trackModelRequest](<../src/runtime/trackModelRequest.ts>)の`onProviderStreamEvent`で、生のproviderイベントから必要な数値だけを保持する。
 文字数からの推計や、欠損した合計の補完は行わない。
 
 入力のキャッシュ計上方法はproviderの定義を維持する。OpenAIの`input_tokens` / `prompt_tokens`はキャッシュ分を含むため、
@@ -81,6 +81,7 @@ usageはCLIの事実であり、hook対象にはできない。
 
 [bridgeテスト](<../src/bridge/bridgeServer.test.ts>)は直接host API、取消後の所有権、要求scope、保存失敗を確認する。
 [DurableAgentテスト](<../src/runtime/durableAgent.test.ts>)は実SDK / fake provider / temp SQLiteと、実TCP bridgeを組み合わせた取消後の遅いusage保存を確認する。
+[summary runtimeテスト](<../src/runtime/summaryRuntime.test.ts>)は単発API生成と実TCP bridge / SQLiteで、切断後の元scopeへのusage保存と、終了時にモデル・DBを閉じる前の完了待ちを確認する。
 [storageテスト](<../src/storage/activityLog.test.ts>)はin-memory SQLiteで保存・検索・既存レコードとschema versionを確認する。
 [抽出テスト](<../src/pi/tokenUsage.test.ts>)は3種類のphysical API、欠損と明示0、累積counterと不正値を確認する。
 本体のモデルは固定OpenAIで、抽出処理の他API対応をモデル選択機能と混同しない。

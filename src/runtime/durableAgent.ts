@@ -9,7 +9,6 @@ import {
 } from "@earendil-works/pi-durable";
 import {
   getSupportedThinkingLevels,
-  hasApi,
   type Api,
   type AssistantMessage,
   type Context as ModelContext,
@@ -24,7 +23,6 @@ import { Check } from "typebox/value";
 import type { BridgeServer } from "../bridge/bridgeServer.js";
 import { hisyoSystemPrompt } from "../pi/hisyoPrompt.js";
 import { physicalModelApis } from "../pi/piPolicy.js";
-import { TokenUsageTracker } from "../pi/tokenUsage.js";
 import {
   sameRunBinding,
   sameSessionBinding,
@@ -35,15 +33,10 @@ import {
 import { GameStateSchema, type GameState } from "../protocol/gameState.js";
 import { referenceTools, validReferenceResult } from "../protocol/gameReferences.js";
 import { hisyoTools } from "../protocol/hisyoTools.js";
-import {
-  summaryContextBytes,
-  summaryInputBytes,
-  summarySystemPrompt,
-  validateSummaryText,
-} from "../protocol/summary.js";
-import type { TokenUsageData } from "../protocol/tokenUsage.js";
+import { summaryContextBytes } from "../protocol/summary.js";
 import { openDurableStorage } from "./durableStorage.js";
 import type { ModelAccess } from "./modelAccess.js";
+import { trackModelRequest } from "./trackModelRequest.js";
 
 /** Trusted in-process host boundary; it never exposes an agent TCP connection. */
 export type DurableBridge = Pick<
@@ -158,17 +151,15 @@ export async function startDurableAgent(options: DurableAgentOptions): Promise<D
   }
 }
 
-/** One world/player conversation, single-flight game effects, and independent tool-free summaries. */
+/** One world/player conversation and single-flight game effects. */
 export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
   readonly conversationPath: string;
   readonly #options: DurableAgentOptions;
   readonly #files: Awaited<ReturnType<typeof openDurableStorage>>;
-  readonly #stop = new AbortController();
   readonly #providerFlights = new Set<Promise<void>>();
   #harness: Harness | undefined;
   #conversation: Conversation | undefined;
   #flight: Flight | undefined;
-  #summaryFlight: Promise<string> | undefined;
   #aborting: Promise<void> | undefined;
   #retired = false;
   #closing = false;
@@ -337,13 +328,21 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
           content: `${summary ? `${summary}\n\n` : ""}CURRENT_GAME_STATE (background data, not a new request)\n${JSON.stringify(clock(state))}`,
           timestamp: Date.now(),
         });
-        response = await this.#completeTracked(
-          binding,
-          "run",
-          binding.runId,
-          model,
-          { ...input, messages },
-          { ...options, reasoning: "medium", maxRetries: 0 },
+        response = await trackModelRequest(
+          {
+            bridge: this.#options.bridge,
+            binding,
+            source: "run",
+            requestId: binding.runId,
+            model,
+            signal: options?.signal,
+          },
+          (observe) =>
+            this.#options.modelAccess.models.completeSimple(
+              model,
+              { ...input, messages },
+              { ...options, reasoning: "medium", maxRetries: 0, onProviderStreamEvent: observe },
+            ),
         );
       } catch {
         response = failedMessage(
@@ -379,59 +378,6 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
       this.#providerFlights.delete(job);
     });
     return stream;
-  }
-
-  async #completeTracked(
-    binding: SessionBinding,
-    source: "run" | "summary",
-    requestId: string,
-    model: Model<Api>,
-    input: ModelContext,
-    options: SimpleStreamOptions,
-  ): Promise<AssistantMessage> {
-    const bridge = this.#options.bridge;
-    const usage = new TokenUsageTracker(model.api);
-    bridge.beginModelRequest(binding, source, requestId);
-    let response: AssistantMessage | undefined;
-    try {
-      const tracked = {
-        ...options,
-        onProviderStreamEvent: (event: unknown) => {
-          usage.observe(event);
-        },
-      };
-      if (source === "summary") {
-        if (!hasApi(model, "openai-responses"))
-          throw new Error("Summary requires the pinned Responses API");
-        // serviceTier is a provider-specific option: streamSimple intentionally does not expose it.
-        response = await this.#options.modelAccess.models.complete(model, input, {
-          ...tracked,
-          reasoningEffort: "low",
-          serviceTier: "priority",
-        });
-      } else
-        response = await this.#options.modelAccess.models.completeSimple(model, input, tracked);
-      return response;
-    } finally {
-      try {
-        // A RunBinding also carries runId; usage deliberately accepts only the SessionBinding fields.
-        const { worldId, playerId, sessionId } = binding;
-        bridge.recordUsage({
-          worldId,
-          playerId,
-          sessionId,
-          source,
-          requestId,
-          provider: model.provider,
-          model: response?.responseModel ?? model.id,
-          api: model.api as TokenUsageData["api"],
-          stopReason: response?.stopReason ?? (options.signal?.aborted ? "aborted" : "error"),
-          ...usage.counts,
-        });
-      } finally {
-        bridge.finishModelRequest(binding, source, requestId);
-      }
-    }
   }
 
   run(
@@ -495,44 +441,6 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
     }
   }
 
-  summarize(input: string, signal: AbortSignal): Promise<string> {
-    if (this.#retired || this.#summaryFlight)
-      return Promise.reject(new Error("Summary is unavailable or busy"));
-    const combined = AbortSignal.any([signal, this.#stop.signal, AbortSignal.timeout(300_000)]);
-    const promise = this.#summarize(input, combined).finally(() => {
-      this.#summaryFlight = undefined;
-    });
-    this.#summaryFlight = promise;
-    return promise;
-  }
-  async #summarize(input: string, signal: AbortSignal): Promise<string> {
-    this.#requireSession();
-    signal.throwIfAborted();
-    if (!input.trim() || Buffer.byteLength(input) > summaryInputBytes)
-      throw new Error("Invalid summary input");
-    const response = await this.#completeTracked(
-      this.#options.session,
-      "summary",
-      randomUUID(),
-      this.#options.modelAccess.model,
-      {
-        systemPrompt: summarySystemPrompt,
-        messages: [{ role: "user", content: input, timestamp: Date.now() }],
-      },
-      { signal, reasoning: "low", maxTokens: 4096, cacheRetention: "none", maxRetries: 0 },
-    );
-    signal.throwIfAborted();
-    this.#requireSession();
-    if (response.stopReason !== "stop") throw new Error("Summary model completion failed");
-    const text = response.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n")
-      .trim();
-    validateSummaryText(text);
-    return text;
-  }
-
   /** Explicit cancellation/detach withdraws work; unlike close(), it is durable and terminal. */
   abort(): Promise<void> {
     if (this.#aborting) return this.#aborting;
@@ -564,7 +472,6 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
   };
   readonly #detached = (binding: SessionBinding) => {
     if (this.#closing || !sameSessionBinding(binding, this.#options.session)) return;
-    this.#stop.abort();
     void this.abort().catch((error: unknown) =>
       this.emit("fault", error instanceof Error ? error : new Error("Durable detach failed")),
     );
@@ -584,13 +491,11 @@ export class DurableAgent extends EventEmitter<{ fault: [error: Error] }> {
         : this.#files.storage.close(BACKGROUND_CONTEXT);
     this.#kernelClose = this.#aborting ? this.#aborting.then(closeKernel) : closeKernel();
     this.#options.bridge.invalidateRun("durable_agent_closed");
-    this.#stop.abort();
     return this.#shutdown;
   }
   async #close(): Promise<void> {
     await this.#kernelClose;
     await Promise.all(this.#providerFlights);
-    await this.#summaryFlight?.catch(() => {});
     await this.#flight?.promise?.catch(() => {});
     this.#options.bridge.off("runInvalidated", this.#invalidated);
     this.#options.bridge.off("detach", this.#detached);

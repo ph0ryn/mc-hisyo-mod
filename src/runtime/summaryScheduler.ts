@@ -5,7 +5,7 @@ import { ActivePlayClock } from "./activePlayClock.js";
 
 export interface SummarySchedulerOptions {
   bridge: Pick<BridgeServer, "on" | "off" | "readySession" | "summaries">;
-  /** The shared SDK credential owner refreshes without acquiring a main run. */
+  /** A stateless model call using shared credentials, independent of Durable startup. */
   summarize: (binding: SessionBinding, input: string, signal: AbortSignal) => Promise<string>;
   now?: () => number;
   wallNow?: () => number;

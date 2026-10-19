@@ -17,7 +17,6 @@ export interface RunAgent {
     signal?: AbortSignal,
     requestId?: string,
   ): Promise<{ status: "not_started" } | { status: "settled"; aborted: boolean }>;
-  summarize(input: string, signal: AbortSignal): Promise<string>;
   abort(): Promise<void>;
   close(): Promise<void>;
   on(event: "fault", handler: (error: Error) => void): unknown;
@@ -177,18 +176,6 @@ export class RunScheduler extends EventEmitter<{ fault: [error: Error] }> {
       this.#fail(asError(error));
       return false;
     }
-  }
-
-  async summarize(binding: SessionBinding, input: string, signal: AbortSignal): Promise<string> {
-    signal.throwIfAborted();
-    const session = this.#session;
-    if (!session || !this.#current(session) || !sameSessionBinding(session.binding, binding))
-      throw new Error("Summary runtime is not available");
-    await session.startup;
-    signal.throwIfAborted();
-    if (!this.#current(session) || !session.agent)
-      throw new Error("Summary runtime is not available");
-    return session.agent.summarize(input, signal);
   }
 
   #admit(session: SessionRuns, change: (queue: RunQueue) => void): Promise<void> {

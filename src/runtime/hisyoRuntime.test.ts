@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
-import { createModels, fauxAssistantMessage, fauxProvider, type Model } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  type Model,
+} from "@earendil-works/pi-ai";
 import { expect, test, vi } from "vite-plus/test";
 import type { BridgeServer } from "../bridge/bridgeServer.js";
 import { parseOptions } from "../cliOptions.js";
 import type { SessionBinding } from "../protocol/bridge.js";
+import { summarySystemPrompt } from "../protocol/summary.js";
 import { startHisyoRuntime, type HisyoRuntimePorts } from "./hisyoRuntime.js";
 
 const world: SessionBinding = { worldId: "w", playerId: "p", sessionId: "s" };
@@ -34,9 +40,6 @@ function fixture(args = ["--api-key-env", "KEY"]) {
   let readySession: { binding: SessionBinding } | undefined;
   const scheduler = Object.assign(new EventEmitter<{ fault: [error: Error] }>(), {
     poll: vi.fn((_binding: SessionBinding) => false),
-    summarize: vi.fn(
-      async (_binding: SessionBinding, _input: string, _signal: AbortSignal) => "summary",
-    ),
     close: vi.fn(async () => {
       order.push("scheduler");
     }),
@@ -320,6 +323,7 @@ test("summary reaches the shared provider without a main agent or conversation",
   provider.setResponses([
     (context) => {
       expect(context.messages).toEqual([
+        { role: "system", content: summarySystemPrompt, timestamp: 0 },
         { role: "user", content: "observations", timestamp: expect.any(Number) },
       ]);
       return fauxAssistantMessage("木を集めた。");

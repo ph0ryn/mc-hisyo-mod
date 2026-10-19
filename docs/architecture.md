@@ -12,8 +12,10 @@ flowchart LR
         B <--> R["RunScheduler / RunInbox"]
         R <--> D["DurableAgent / Harness"]
         D <-->|"型付きhost API"| B
-        S["SummaryScheduler"] --> D
+        S["SummaryScheduler"] --> G["generateSummary / 単発API"]
         D --> A["Models / credential adapter"]
+        G --> A
+        G -->|"usage host API"| B
         B --> L["event / activity / summary DB"]
         D --> Q["scope別Durable SQLite"]
     end
@@ -28,7 +30,9 @@ flowchart LR
 | [hisyoRuntime](<../src/runtime/hisyoRuntime.ts>) | 設定・認証・bridge・scheduler・timerの構成と終了順序 |
 | [RunScheduler](<../src/runtime/runScheduler.ts>) | pauseによる新規runの制限、単一実行、ゲーム接続の寿命、入力受付 |
 | [RunInbox](<../src/runtime/runInbox.ts>) | 集約済みの保留理由とdispatch予約をconversation内のdocumentへ保存 |
-| [DurableAgent](<../src/runtime/durableAgent.ts>) | Harness、conversation、10 Tool、毎要求のcontext、モデル呼出し、取消とclose |
+| [DurableAgent](<../src/runtime/durableAgent.ts>) | mainのHarness、conversation、10 Tool、毎要求のcontext、モデル呼出し、取消とclose |
+| [SummaryScheduler](<../src/runtime/summaryScheduler.ts>) / [generateSummary](<../src/runtime/generateSummary.ts>) | summaryの周期・single-flight・取消・保存と、履歴・Tool・session保存を持たない単発API要求 |
+| [trackModelRequest](<../src/runtime/trackModelRequest.ts>) | runとsummaryで共有するusage計測・記録と、provider完了までの要求所有権 |
 | [BridgeServer](<../src/bridge/bridgeServer.ts>) | game TCP認証、session / run binding、Toolの実処理、domain記録と結果検証 |
 | [modelAccess](<../src/runtime/modelAccess.ts>) | native OpenAI providerと固定モデル、選択した認証源だけを使うModels |
 | [PiCredentialStore](<../src/runtime/piCredentialStore.ts>) | 元の認証保存先を共有lockで読む・更新するSDK CredentialStore adapter |

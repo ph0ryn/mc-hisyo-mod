@@ -21,13 +21,14 @@ storage境界ではSIGKILLした子processのcommitとdead-owner lock回収を�
 
 | 境界 | 主な確認内容 |
 | --- | --- |
-| [DurableAgent tests](<../src/runtime/durableAgent.test.ts>) | 実Harnessとtemp SQLiteで再open、submission重複排除、保留generation、10 Tool、Tool後のcontext更新、fail-closed、unsafe Toolの非再送、独立summary、取消usage |
+| [DurableAgent tests](<../src/runtime/durableAgent.test.ts>) | 実Harnessとtemp SQLiteで再open、submission重複排除、保留generation、10 Tool、Tool後のcontext更新、fail-closed、unsafe Toolの非再送、取消usage |
 | [RunInbox tests](<../src/runtime/runInbox.test.ts>) | 受付済み同文チャットの順序、予約 / submit間の再open、安定request ID、clear、容量超過rollback |
 | [Durable storage tests](<../src/runtime/durableStorage.test.ts>) | scope別所有者とprivate file、実SIGKILL後のcommit復旧・dead PID lock回収、symlink拒否 |
 | [bridge tests](<../src/bridge/bridgeServer.test.ts>) | 実TCPのfake gameとSQLiteで認証、binding、直接host API、非同期受付ACK、記録、stale / native-first取消 |
 | [modelAccess tests](<../src/runtime/modelAccess.test.ts>) / [credential tests](<../src/runtime/piCredentialStore.test.ts>) | fake認証とfake fetchでPATH非依存、固定catalog、lock下のrotation、取消中の保存、秘密の非露出、fallback拒否 |
 | [scheduler tests](<../src/runtime/runScheduler.test.ts>) / [composition tests](<../src/runtime/hisyoRuntime.test.ts>) | 公開依存portと実Durableのdocumentを使い、single-flight、pause、受付、終了順序を確認 |
-| [summary tests](<../src/runtime/summaryScheduler.test.ts>) / [storage tests](<../src/storage/>) | 周期、取消、cursor、ページング、保存transaction、観測とCLI事実の分離 |
+| [summary API tests](<../src/runtime/generateSummary.test.ts>) / [summary runtime tests](<../src/runtime/summaryRuntime.test.ts>) | Tool・履歴なしの単発要求、Durable起動待ちからの独立、切断・終了後の遅いusage記録、共有認証ownerの終了順序 |
+| [summary scheduler tests](<../src/runtime/summaryScheduler.test.ts>) / [storage tests](<../src/storage/>) | 周期、取消、cursor、ページング、保存transaction、観測とCLI事実の分離 |
 | [Java tests](<../mod/src/test/java/>) | Minecraft runtimeを起動せず、共有fixture、DTO、snapshot差分、schema / referenceの契約を確認 |
 
 終了・再open試験は実際のSQLite保存を確認するが、stubの解決順を実native処理の完了と同一視しない。

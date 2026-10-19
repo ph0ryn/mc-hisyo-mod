@@ -35,8 +35,11 @@ CLIはrun requestの理由を実行依頼前にactivity logへ記録するが、
 
 通常モードでは、session接続中の経過1分ごとに[summaryScheduler](<../src/runtime/summaryScheduler.ts>)が未要約のevent logを古い順に処理する。pause中の時間も数える。
 CLIと同じプロセス内のschedulerであり、別worker threadや別CLIプロセスではない。
-runとは独立して時計・取消・single-flightを管理し、DurableAgentから同じModelsを使って直接Toolなしの要求を行う。
-mainのconversationやrun bindingを取得せず、summary生成をDurable taskとして保存するわけではない。
+runとは独立して時計・取消・single-flightを管理し、[generateSummary](<../src/runtime/generateSummary.ts>)から共有のModelsへ単発のAPI要求を行う。
+DurableAgentやRunSchedulerを経由せず、mainの起動完了・conversation・Durable保存領域に依存しない。
+渡すcontextは固定の要約指示と今回の対象ログだけで、Tool・会話履歴・前回のsummaryを含めない。
+summary用の会話sessionは作成・保存・復元せず、prompt cacheも`cacheRetention: none`とする。
+現在のgame SessionBindingはusageの帰属と結果の有効性のために使い、mainのrun bindingは取得しない。
 モデルはrunと同じ`openai/gpt-6-luna`、summaryの思考量は`reasoningEffort: low`とする。runの`medium`は変えない。
 Fastは`serviceTier: priority`で要求する。これは要求値であり、実providerでの提供tier・応答時間・料金を検証した結果ではない。
 別tier・別モデルへ自動fallbackしない。

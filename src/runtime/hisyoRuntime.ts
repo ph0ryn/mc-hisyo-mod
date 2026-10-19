@@ -6,13 +6,14 @@ import { resolveTrustedConfig, type ConfigInput } from "./hisyoConfig.js";
 import { RunScheduler, type RunSchedulerOptions } from "./runScheduler.js";
 import { SummaryScheduler, type SummarySchedulerOptions } from "./summaryScheduler.js";
 import { createModelAccess, type ModelAccess } from "./modelAccess.js";
+import { generateSummary } from "./generateSummary.js";
 
 export interface HisyoRuntimePorts extends Omit<ConfigInput, "homeDirectory"> {
   startBridge: typeof startBridgeRuntime;
   createModelAccess: typeof createModelAccess;
   createScheduler: (
     options: RunSchedulerOptions,
-  ) => Pick<RunScheduler, "poll" | "close" | "summarize"> &
+  ) => Pick<RunScheduler, "poll" | "close"> &
     Pick<EventEmitter<{ fault: [error: Error] }>, "on" | "off">;
   createSummaryScheduler: (
     options: SummarySchedulerOptions,
@@ -118,7 +119,8 @@ export async function startHisyoRuntime(
       scheduler.on("fault", onFault);
       summaryScheduler = ports.createSummaryScheduler({
         bridge: base.bridge,
-        summarize: (...args) => scheduler!.summarize(...args),
+        summarize: (...args) =>
+          generateSummary({ modelAccess: modelAccess!, bridge: base!.bridge }, ...args),
       });
       summaryScheduler.on("fault", onFault);
       signal.throwIfAborted();

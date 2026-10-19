@@ -108,7 +108,6 @@ class AgentStub extends EventEmitter<{ fault: [error: Error] }> implements RunAg
     this.pending.push(flight);
     return flight.promise;
   });
-  readonly summarize = vi.fn<RunAgent["summarize"]>(async () => "independent summary");
   readonly abort = vi.fn<RunAgent["abort"]>(async () => {
     for (const flight of this.pending) flight.resolve({ status: "settled", aborted: true });
   });
@@ -976,41 +975,6 @@ test("explicit native detach aborts the owner and clears both durable dispatch a
   expect(f.agent.close).toHaveBeenCalled();
   expect(f.bridge.invalidateRun).toHaveBeenLastCalledWith("game_detached");
   expect(await new RunInbox(f.agent.conversation, world).take()).toBeUndefined();
-  expect(f.faults).toEqual([]);
-});
-
-test("summary awaits owner startup and remains independent of paused main admission", async () => {
-  const f = await fixture({ ready: false });
-  const agent = await f.createAgent();
-  const startup = f.hold<RunAgent>(agent);
-  f.startAgent.mockImplementationOnce(() => startup.promise);
-  f.bridge.attach(world, true);
-  const controller = new AbortController();
-  const summary = f.scheduler.summarize(world, "observations", controller.signal);
-  await tick();
-  expect(agent.summarize).not.toHaveBeenCalled();
-  startup.resolve(agent);
-  await expect(summary).resolves.toBe("independent summary");
-  expect(agent.summarize).toHaveBeenCalledExactlyOnceWith("observations", controller.signal);
-  expect(agent.run).not.toHaveBeenCalled();
-  await expect(
-    f.scheduler.summarize({ ...world, sessionId: "stale" }, "late", controller.signal),
-  ).rejects.toThrow(/not available/);
-});
-
-test("summary canceled during startup never reaches the model owner", async () => {
-  const f = await fixture({ ready: false });
-  const agent = await f.createAgent();
-  const startup = f.hold<RunAgent>(agent);
-  f.startAgent.mockImplementationOnce(() => startup.promise);
-  f.bridge.attach(world, true);
-  const controller = new AbortController();
-  const summary = f.scheduler.summarize(world, "observations", controller.signal);
-  const rejected = expect(summary).rejects.toMatchObject({ name: "AbortError" });
-  controller.abort();
-  startup.resolve(agent);
-  await rejected;
-  expect(agent.summarize).not.toHaveBeenCalled();
   expect(f.faults).toEqual([]);
 });
 
