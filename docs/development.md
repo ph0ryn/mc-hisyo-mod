@@ -101,8 +101,18 @@ CLIは時刻付きの人向け診断ログを標準エラーへ出す。接続�
 
 実行用JARを、上記versionのFabric APIとともにFabricクライアントの`mods`へ配置する（sources JARではない）。
 ModはCLIを自動起動しない。上のCLIを先に起動してから、対応するclient Modでローカルsingleplayerへ入る。
-LAN公開・remote / dedicated serverは対象外。`/ai <message>`で入力し、`send_message`のliteral textだけをローカルHUDへ表示する。
+LAN公開・remote / dedicated serverは対象外。通常のゲーム内チャットを送るとDirectorへ入力する。`/ai`は使わない。
+通常のチャット送信・表示は維持し、`/`で始まるコマンドと受信メッセージはDirectorへ入力しない。
+`send_message`のliteral textだけをローカルHUDへ表示する。
 切断・起動失敗後は設定とCLIを確認して退出・再入場する。自動再接続・イベント再送はしない。
+
+チャット入力の実ゲーム確認は、通常モードのCLIとビルド後のModを使い、使い捨てのsingleplayerで行う。
+`--bridge-only`はチャット受付を持たないため、この確認には使わない。
+
+1. 接続完了後、識別用の短い通常チャットを送り、通常の表示とCLIの「Player messages」に同じ入力が1件だけ現れることを確認する。
+2. `/say`コマンドとAI返信の表示では、新しいプレイヤー入力が生じないことを確認する。
+3. LAN公開後とremote serverでは、通常チャットが維持され、Directorへの入力や未接続の警告が出ないことを確認する。
+4. CLI切断後も通常チャットは送信でき、singleplayerではDirectorが受け付けられない旨の警告が出ることを確認する。
 
 Modの既定接続先はJavaの`user.home`配下の`.mc-hisyo/connection.json`。
 変更時はFabric config directoryの`mc-hisyo.json`へ**絶対path**だけを指定する。

@@ -1,7 +1,6 @@
 package io.github.ph0ryn.mchisyo;
 
 import com.google.gson.JsonObject;
-import com.mojang.brigadier.arguments.StringArgumentType;
 import io.github.ph0ryn.mchisyo.observation.ObservedEvent;
 import io.github.ph0ryn.mchisyo.observation.ServerGameState;
 import io.github.ph0ryn.mchisyo.observation.ServerObservations;
@@ -16,10 +15,9 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
-import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.loader.api.FabricLoader;
@@ -69,12 +67,9 @@ final class DirectorClient {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, minecraft) -> { pendingJoin.retire(null); retire(active); seenServer = null; });
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> { pendingJoin.retire(server); Attempt a = active; if (a != null && a.server == server) retire(a); });
         ClientLifecycleEvents.CLIENT_STOPPING.register(ignored -> { stopping = true; pendingJoin.retire(null); retire(active); bootstrap.shutdownNow(); });
-        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registry) -> {
-            if (dispatcher.getRoot().getChild("ai") != null) throw new IllegalStateException("Client command /ai is already registered");
-            dispatcher.register(ClientCommandManager.literal("ai")
-                    .executes(context -> { feedback("Usage: /ai <message>"); return 0; })
-                    .then(ClientCommandManager.argument("message", StringArgumentType.greedyString())
-                            .executes(context -> submit(StringArgumentType.getString(context, "message")))));
+        ClientSendMessageEvents.CHAT.register(text -> {
+            IntegratedServer server = client.getSingleplayerServer();
+            if (client.isSingleplayer() && server != null && !server.isPublished()) submit(text);
         });
     }
     private static boolean localServerPlayer(ServerPlayer player) {
@@ -232,17 +227,16 @@ final class DirectorClient {
     private <T> CompletionStage<T> serverTask(Attempt a, Supplier<T> task) {
         return a.server.submit(() -> { requireServer(a); T value = task.get(); requireServer(a); return value; });
     }
-    private int submit(String text) {
+    private void submit(String text) {
         Attempt a = active;
-        if (!local(a) || a.session == null || !a.session.isReady() || client.isPaused()) { feedback("Director is not ready in this singleplayer world."); return 0; }
-        if (text.isBlank() || text.codePointCount(0, text.length()) > 16000) { feedback("Enter 1–16000 characters after /ai."); return 0; }
+        if (!local(a) || a.session == null || !a.session.isReady() || client.isPaused()) { feedback("Director is not ready in this singleplayer world."); return; }
+        if (text.isBlank() || text.codePointCount(0, text.length()) > 16000) { feedback("Enter a chat message of 1–16000 characters."); return; }
         try {
             requireClient(a);
             a.session.playerMessage(text).whenComplete((ignored, error) -> {
                 if (error != null) client.execute(() -> { if (local(a)) feedback("Director did not accept the message."); });
             });
-            return 1;
-        } catch (RuntimeException error) { feedback("Director did not accept the message."); return 0; }
+        } catch (RuntimeException error) { feedback("Director did not accept the message."); }
     }
     private void failed(Attempt a) { if (active == a) { retire(a); feedbackIfCurrentWorld(a, "Director unavailable. Check the CLI and settings, then rejoin."); } }
     private void feedbackIfCurrentWorld(Attempt a, String text) {
