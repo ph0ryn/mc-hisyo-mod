@@ -1,197 +1,424 @@
 import { EventEmitter } from "node:events";
-import { expect, test, vi } from "vite-plus/test";
+import { expect, onTestFinished, test, vi } from "vite-plus/test";
 import { SummaryScheduler, type SummarySchedulerOptions } from "./summaryScheduler.js";
 import type { AttachedSession } from "../bridge/bridgeServer.js";
 import type { SummarySource } from "../events/summaryInput.js";
+import type { SessionBinding } from "../protocol/bridge.js";
 
 const binding = { worldId: "world", playerId: "player", sessionId: "session" };
-const source: SummarySource = {
-  after: 0,
-  through: 10,
-  sourceSessionId: "older-session",
-  sourceCount: 10,
-  firstObservedAt: 1,
-  lastObservedAt: 100,
-  input: "observed block_broken ×3",
-};
-function fixture(paused = false) {
-  let now = 0;
+const scope = { worldId: "world", playerId: "player" };
+function fixture({ minutes = [120_000, 60_000, 0], wallNow = 180_000, paused = false } = {}) {
+  let nextId = 1;
+  const remaining: SummarySource[] = [];
+  const add = (minuteStart: number) => {
+    const id = nextId++;
+    const source: SummarySource = {
+      after: id - 1,
+      through: id,
+      sourceSessionId: "source-session",
+      sourceCount: 1,
+      firstObservedAt: minuteStart + 1,
+      lastObservedAt: minuteStart + 59_000,
+      input: `minute ${minuteStart}`,
+    };
+    remaining.push(source);
+    return source;
+  };
+  for (const minute of minutes) add(minute);
   const pending: {
+    binding: SessionBinding;
+    input: string;
     signal: AbortSignal;
     resolve: (text: string) => void;
     reject: (error: Error) => void;
   }[] = [];
   const bridge = Object.assign(new EventEmitter(), {
-    readySession: { binding, paused, supportedEvents: [], language: "ja_jp" } as AttachedSession,
+    readySession: {
+      binding,
+      paused,
+      supportedEvents: [],
+      language: "ja_jp",
+    } as AttachedSession | undefined,
     summaries: {
-      next: vi.fn<() => { source: SummarySource; backlog: boolean } | undefined>(() => ({
-        source,
-        backlog: false,
-      })),
-      save: vi.fn(),
+      next: vi.fn((_scope: typeof scope, now: number): { source: SummarySource } | undefined => {
+        const cutoff = Math.floor(now / 60_000) * 60_000;
+        const source = remaining
+          .filter((source) => source.lastObservedAt < cutoff)
+          .toSorted((a, b) => b.firstObservedAt - a.firstObservedAt)[0];
+        return source ? { source } : undefined;
+      }),
+      save: vi.fn(
+        (_scope: typeof scope, source: SummarySource, _text: string, _createdAt: number) => {
+          const index = remaining.indexOf(source);
+          if (index < 0) throw new Error("Source already consumed");
+          remaining.splice(index, 1);
+        },
+      ),
     },
   });
   const summarize = vi.fn(
-    (_binding: typeof binding, _input: string, signal: AbortSignal) =>
-      new Promise<string>((resolve, reject) => pending.push({ signal, resolve, reject })),
+    (binding: SessionBinding, input: string, signal: AbortSignal) =>
+      new Promise<string>((resolve, reject) =>
+        pending.push({ binding, input, signal, resolve, reject }),
+      ),
   );
   const summaryScheduler = new SummaryScheduler({
     bridge: bridge as unknown as SummarySchedulerOptions["bridge"],
     summarize,
-    now: () => now,
-    wallNow: () => 200,
+    wallNow: () => wallNow,
   });
   const fault = vi.fn();
   summaryScheduler.on("fault", fault);
+  onTestFinished(async () => {
+    const closing = summaryScheduler.close();
+    for (const request of pending) request.resolve("discarded during cleanup");
+    await closing;
+  });
   return {
     summaryScheduler,
     bridge,
     summarize,
     pending,
+    remaining,
     fault,
+    add,
     at: (value: number) => {
-      now = value;
+      wallNow = value;
     },
     pause: (paused: boolean) => {
-      // BridgeServer emits a structuredClone through currentSession, not its mutable internal state.
-      bridge.readySession = { ...bridge.readySession, paused };
+      // BridgeServer emits a clone instead of mutating the previously attached value.
+      bridge.readySession = { ...bridge.readySession!, paused };
       bridge.emit("status", bridge.readySession);
     },
-    settle: async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+    detach: () => {
+      const binding = bridge.readySession!.binding;
+      bridge.readySession = undefined;
+      bridge.emit("detach", binding);
     },
+    replace: (next: SessionBinding) => {
+      bridge.readySession = { binding: next, paused, supportedEvents: [], language: "ja_jp" };
+      bridge.emit("attach", bridge.readySession);
+    },
+    settle: () => new Promise<void>((resolve) => setImmediate(resolve)),
   };
 }
 
-test("one independent elapsed minute reserves one bounded prefix and stores its result", async () => {
+test("saved batches immediately drain the next source without another minute poll", async () => {
   const f = fixture();
-  f.at(59_999);
-  expect(f.summaryScheduler.poll(binding)).toBe(false);
-  f.bridge.emit("runRequested", {}); // Main/hook activity must not reset the summary clock.
-  f.at(60_000);
   expect(f.summaryScheduler.poll(binding)).toBe(true);
-  expect(f.bridge.summaries.next).toHaveBeenCalledWith({ worldId: "world", playerId: "player" });
-  expect(f.summarize).toHaveBeenCalledWith(binding, source.input, expect.any(AbortSignal));
-  f.pending[0]!.resolve("木を集めた。");
   await f.settle();
-  expect(f.bridge.summaries.save).toHaveBeenCalledExactlyOnceWith(
-    { worldId: "world", playerId: "player" },
-    source,
-    "木を集めた。",
-    200,
-  );
+  expect(f.pending.map((request) => request.input)).toEqual(["minute 120000"]);
+  expect(f.bridge.summaries.next).toHaveBeenCalledExactlyOnceWith(scope, 180_000);
+  for (const [index, minute] of [120_000, 60_000, 0].entries()) {
+    expect(f.pending[index]!.input).toBe(`minute ${minute}`);
+    f.pending[index]!.resolve(`summary ${minute}`);
+    await f.settle();
+  }
+  expect(f.pending.map((request) => request.input)).toEqual([
+    "minute 120000",
+    "minute 60000",
+    "minute 0",
+  ]);
+  expect(f.bridge.summaries.save.mock.calls.map((call) => call[2])).toEqual([
+    "summary 120000",
+    "summary 60000",
+    "summary 0",
+  ]);
+  expect(f.bridge.summaries.save.mock.calls.every((call) => call[3] === 180_000)).toBe(true);
+  expect(f.remaining).toEqual([]);
+  expect(f.bridge.summaries.next).toHaveBeenCalledTimes(4);
+  await f.settle();
+  expect(f.bridge.summaries.next).toHaveBeenCalledTimes(4);
   expect(f.fault).not.toHaveBeenCalled();
-  await f.summaryScheduler.close();
+});
+
+test("selection receives current wall time without waiting for an elapsed-minute gate", async () => {
+  const f = fixture({ minutes: [300_000], wallNow: 359_999 });
+  expect(f.summaryScheduler.poll(binding)).toBe(false);
+  await f.settle();
+  expect(f.bridge.summaries.next).toHaveBeenLastCalledWith(scope, 359_999);
+  expect(f.summarize).not.toHaveBeenCalled();
+  f.at(360_000);
+  expect(f.summaryScheduler.poll(binding)).toBe(true);
+  await f.settle();
+  expect(f.pending[0]!.input).toBe("minute 300000");
+  f.at(360_001);
+  f.pending[0]!.resolve("completed minute");
+  await f.settle();
+  expect(f.bridge.summaries.save.mock.calls[0]![3]).toBe(360_001);
+  expect(f.bridge.summaries.next).toHaveBeenLastCalledWith(scope, 360_001);
+});
+
+test("a newly completed minute wins after the current older request finishes", async () => {
+  const f = fixture();
+  f.summaryScheduler.poll(binding);
+  await f.settle();
+  f.pending[0]!.resolve("latest");
+  await f.settle();
+  expect(f.pending[1]!.input).toBe("minute 60000");
+  f.add(180_000);
+  f.at(240_000);
+  f.bridge.emit("runRequested", {});
+  for (let index = 0; index < 3; index++) expect(f.summaryScheduler.poll(binding)).toBe(false);
+  expect(f.pending[1]!.signal.aborted).toBe(false);
+  expect(f.bridge.summaries.next).toHaveBeenCalledTimes(2);
+  f.pending[1]!.resolve("older request completed");
+  await f.settle();
+  expect(f.pending[2]!.input).toBe("minute 180000");
+  expect(f.bridge.summaries.next).toHaveBeenLastCalledWith(scope, 240_000);
+  f.pending[2]!.resolve("new latest");
+  await f.settle();
+  expect(f.pending[3]!.input).toBe("minute 0");
+  f.pending[3]!.resolve("oldest");
+  await f.settle();
+  expect(f.remaining).toEqual([]);
+  expect(f.fault).not.toHaveBeenCalled();
 });
 
 test.each([false, true])(
-  "paused summarization keeps its cadence across startup and status changes; initiallyPaused=%s",
-  async (initiallyPaused) => {
-    const f = fixture(initiallyPaused);
-    f.at(30_000);
+  "pause never blocks or cancels the summary drain; initiallyPaused=%s",
+  async (paused) => {
+    const f = fixture({ minutes: [60_000, 0], paused });
+    expect(f.summaryScheduler.poll(binding)).toBe(true);
+    await f.settle();
     f.pause(true);
-    f.at(59_999);
-    expect(f.summaryScheduler.poll(binding)).toBe(false);
-    f.at(60_000);
-    expect(f.summaryScheduler.poll(binding)).toBe(true);
-    f.pending[0]!.resolve("first paused summary");
+    expect(f.pending[0]!.signal.aborted).toBe(false);
+    f.pending[0]!.resolve("first");
     await f.settle();
-    f.at(120_000);
-    expect(f.summaryScheduler.poll(binding)).toBe(true);
-    f.pending[1]!.resolve("second paused summary");
-    await f.settle();
-    f.at(150_000);
+    expect(f.pending[1]!.input).toBe("minute 0");
     f.pause(false);
-    f.at(160_000);
     f.pause(true);
-    f.at(179_999);
-    expect(f.summaryScheduler.poll(binding)).toBe(false);
-    f.at(180_000);
-    expect(f.summaryScheduler.poll(binding)).toBe(true);
-    f.pending[2]!.resolve("third paused summary");
+    expect(f.pending[1]!.signal.aborted).toBe(false);
+    f.pending[1]!.resolve("second");
     await f.settle();
-    expect(f.bridge.summaries.save.mock.calls.map((call) => call[2])).toEqual([
-      "first paused summary",
-      "second paused summary",
-      "third paused summary",
-    ]);
+    expect(f.bridge.summaries.save).toHaveBeenCalledTimes(2);
     expect(f.fault).not.toHaveBeenCalled();
-    await f.summaryScheduler.close();
   },
 );
 
-test.each([false, true])("an empty delta never calls the model; paused=%s", async (paused) => {
-  const f = fixture(paused);
-  f.bridge.summaries.next.mockReturnValue(undefined);
-  f.at(60_000);
+test.each([false, true])(
+  "an empty selection stays idle until the next external poll; paused=%s",
+  async (paused) => {
+    const f = fixture({ minutes: [], paused });
+    expect(f.summaryScheduler.poll(binding)).toBe(false);
+    await f.settle();
+    await f.settle();
+    expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+    expect(f.summarize).not.toHaveBeenCalled();
+    f.add(0);
+    expect(f.summaryScheduler.poll(binding)).toBe(true);
+    await f.settle();
+    expect(f.pending).toHaveLength(1);
+    f.pending[0]!.resolve("newly available work");
+    await f.settle();
+    expect(f.bridge.summaries.next).toHaveBeenCalledTimes(3);
+    expect(f.fault).not.toHaveBeenCalled();
+  },
+);
+
+test("stale or non-ready bindings never select or dispatch work", async () => {
+  const f = fixture();
+  expect(f.summaryScheduler.poll({ ...binding, sessionId: "stale" })).toBe(false);
+  f.bridge.readySession = undefined;
   expect(f.summaryScheduler.poll(binding)).toBe(false);
-  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+  await f.settle();
+  expect(f.bridge.summaries.next).not.toHaveBeenCalled();
   expect(f.summarize).not.toHaveBeenCalled();
-  await f.summaryScheduler.close();
 });
 
-test("delayed ticks never burst or overlap and pause preserves in-flight completion", async () => {
+test("readiness is checked again after selection and before every next dispatch", async () => {
   const f = fixture();
-  f.at(300_000);
+  const select = f.bridge.summaries.next.getMockImplementation()!;
+  f.bridge.summaries.next.mockImplementationOnce((...args) => {
+    const pending = select(...args);
+    f.bridge.readySession = undefined;
+    return pending;
+  });
+  f.summaryScheduler.poll(binding);
+  await f.settle();
+  expect(f.summarize).not.toHaveBeenCalled();
+  f.bridge.readySession = { binding, paused: false, supportedEvents: [], language: "ja_jp" };
   expect(f.summaryScheduler.poll(binding)).toBe(true);
-  f.at(600_000);
-  expect(f.summaryScheduler.poll(binding)).toBe(false);
+  await f.settle();
+  const save = f.bridge.summaries.save.getMockImplementation()!;
+  f.bridge.summaries.save.mockImplementationOnce((...args) => {
+    save(...args);
+    f.bridge.readySession = undefined;
+  });
+  f.pending[0]!.resolve("saved before readiness changed");
+  await f.settle();
   expect(f.pending).toHaveLength(1);
-  f.pause(true);
-  expect(f.pending[0]!.signal.aborted).toBe(false);
-  f.pause(false);
-  f.at(660_000);
-  expect(f.summaryScheduler.poll(binding)).toBe(false);
-  f.pending[0]!.resolve("completed");
-  await f.settle();
-  expect(f.bridge.summaries.save).toHaveBeenCalledTimes(1);
-  f.at(720_000);
-  expect(f.summaryScheduler.poll(binding)).toBe(true);
-  f.pending[1]!.resolve("fresh");
-  await f.settle();
-  expect(f.bridge.summaries.save).toHaveBeenCalledTimes(2);
-  await f.summaryScheduler.close();
+  expect(f.bridge.summaries.next).toHaveBeenCalledTimes(2);
+  expect(f.fault).not.toHaveBeenCalled();
 });
 
-test("detach and replacement invalidate the old prefix without flushing it", async () => {
+test.each(["resolve", "reject"] as const)(
+  "replacement wakes once only after the old cancelled request settles: %s",
+  async (settlement) => {
+    const f = fixture({ minutes: [0] });
+    f.summaryScheduler.poll(binding);
+    await f.settle();
+    f.detach();
+    const next = { ...binding, sessionId: "replacement" };
+    f.replace(next);
+    expect(f.pending[0]!.signal.aborted).toBe(true);
+    for (let index = 0; index < 3; index++) expect(f.summaryScheduler.poll(next)).toBe(false);
+    expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+    expect(f.pending).toHaveLength(1);
+    if (settlement === "resolve") f.pending[0]!.resolve("stale output");
+    else f.pending[0]!.reject(new Error("cancelled old provider"));
+    await f.settle();
+    expect(f.bridge.summaries.save).not.toHaveBeenCalled();
+    expect(f.pending).toHaveLength(2);
+    expect(f.pending[1]!.binding).toEqual(next);
+    expect(f.pending[1]!.signal.aborted).toBe(false);
+    f.pending[1]!.resolve("replacement output");
+    await f.settle();
+    expect(f.bridge.summaries.save).toHaveBeenCalledOnce();
+    expect(f.bridge.summaries.next).toHaveBeenCalledTimes(3);
+    await f.settle();
+    expect(f.bridge.summaries.next).toHaveBeenCalledTimes(3);
+    expect(f.fault).not.toHaveBeenCalled();
+  },
+);
+
+test("detach discards late output without flushing or restarting work", async () => {
   const f = fixture();
-  f.at(60_000);
   f.summaryScheduler.poll(binding);
-  f.bridge.emit("detach", binding);
-  const next = { ...binding, sessionId: "reconnected" };
-  f.bridge.readySession = { ...f.bridge.readySession, binding: next };
-  f.bridge.emit("attach", f.bridge.readySession);
-  f.pending[0]!.resolve("old");
   await f.settle();
+  f.detach();
+  f.pending[0]!.resolve("late output");
+  await f.settle();
+  expect(f.pending[0]!.signal.aborted).toBe(true);
   expect(f.bridge.summaries.save).not.toHaveBeenCalled();
-  f.at(120_000);
-  expect(f.summaryScheduler.poll(next)).toBe(true);
-  expect(f.bridge.summaries.next).toHaveBeenCalledTimes(2); // Persistence owns the unchanged cursor.
-  f.pending[1]!.resolve("resumed");
-  await f.settle();
-  expect(f.bridge.summaries.save).toHaveBeenCalledTimes(1);
-  await f.summaryScheduler.close();
+  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+  expect(f.summaryScheduler.poll(binding)).toBe(false);
+  expect(f.fault).not.toHaveBeenCalled();
 });
 
-test("failure reports once and never advances or silently retries the cursor", async () => {
+test.each(["generation", "save"] as const)(
+  "a %s failure faults once and stops the drain without retry",
+  async (stage) => {
+    const f = fixture();
+    const failure = new Error(`${stage} failed`);
+    if (stage === "save")
+      f.bridge.summaries.save.mockImplementationOnce(() => {
+        throw failure;
+      });
+    f.summaryScheduler.poll(binding);
+    await f.settle();
+    if (stage === "generation") f.pending[0]!.reject(failure);
+    else f.pending[0]!.resolve("cannot save");
+    await f.settle();
+    expect(f.fault).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(f.remaining).toHaveLength(3);
+    expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+    expect(f.summaryScheduler.poll(binding)).toBe(false);
+    expect(f.pending).toHaveLength(1);
+  },
+);
+
+test.each(["initial", "after save"] as const)(
+  "selection failure is fatal once: %s",
+  async (stage) => {
+    const f = fixture();
+    const failure = new Error("selection failed");
+    const fail = () => {
+      throw failure;
+    };
+    if (stage === "initial") f.bridge.summaries.next.mockImplementationOnce(fail);
+    f.summaryScheduler.poll(binding);
+    await f.settle();
+    if (stage === "after save") {
+      f.bridge.summaries.next.mockImplementationOnce(fail);
+      f.pending[0]!.resolve("saved");
+      await f.settle();
+    }
+    expect(f.fault).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(f.summaryScheduler.poll(binding)).toBe(false);
+    expect(f.bridge.summaries.save).toHaveBeenCalledTimes(stage === "initial" ? 0 : 1);
+  },
+);
+
+test("synchronous generation failure does not retain or restart a flight", async () => {
   const f = fixture();
-  f.at(60_000);
+  const failure = new Error("synchronous dispatch failure");
+  f.summarize.mockImplementationOnce(() => {
+    throw failure;
+  });
   f.summaryScheduler.poll(binding);
-  const failure = new Error("summary failed");
-  f.pending[0]!.reject(failure);
   await f.settle();
   expect(f.fault).toHaveBeenCalledExactlyOnceWith(failure);
-  expect(f.bridge.summaries.save).not.toHaveBeenCalled();
-  f.at(120_000);
   expect(f.summaryScheduler.poll(binding)).toBe(false);
-  await f.summaryScheduler.close();
+  expect(f.bridge.summaries.save).not.toHaveBeenCalled();
 });
 
-test("close invalidates synchronously, awaits pending work and is idempotent", async () => {
+test("selection can reenter poll and close without losing the published flight", async () => {
   const f = fixture();
-  f.at(60_000);
+  const select = f.bridge.summaries.next.getMockImplementation()!;
+  let closing!: Promise<void>;
+  let nestedPoll: boolean | undefined;
+  f.bridge.summaries.next.mockImplementationOnce((...args) => {
+    nestedPoll = f.summaryScheduler.poll(binding);
+    closing = f.summaryScheduler.close();
+    return select(...args);
+  });
   f.summaryScheduler.poll(binding);
+  expect(nestedPoll).toBe(false);
+  expect(f.summaryScheduler.close()).toBe(closing);
+  await closing;
+  expect(f.summarize).not.toHaveBeenCalled();
+  expect(f.bridge.summaries.save).not.toHaveBeenCalled();
+  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+});
+
+test("close during synchronous generation entry still awaits provider settlement", async () => {
+  const f = fixture();
+  const generate = f.summarize.getMockImplementation()!;
+  let closing!: Promise<void>;
+  let closed = false;
+  f.summarize.mockImplementationOnce((...args) => {
+    const result = generate(...args);
+    closing = f.summaryScheduler.close();
+    void closing.then(() => {
+      closed = true;
+    });
+    return result;
+  });
+  f.summaryScheduler.poll(binding);
+  await f.settle();
+  expect(f.pending[0]!.signal.aborted).toBe(true);
+  expect(closed).toBe(false);
+  expect(f.summaryScheduler.close()).toBe(closing);
+  f.pending[0]!.resolve("late completion");
+  await closing;
+  expect(closed).toBe(true);
+  expect(f.bridge.summaries.save).not.toHaveBeenCalled();
+  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+});
+
+test("close during save prevents the next selection", async () => {
+  const f = fixture();
+  const save = f.bridge.summaries.save.getMockImplementation()!;
+  let closing!: Promise<void>;
+  f.bridge.summaries.save.mockImplementationOnce((...args) => {
+    save(...args);
+    closing = f.summaryScheduler.close();
+  });
+  f.summaryScheduler.poll(binding);
+  await f.settle();
+  f.pending[0]!.resolve("saved before close");
+  await f.settle();
+  await closing;
+  expect(f.bridge.summaries.save).toHaveBeenCalledOnce();
+  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+  expect(f.remaining).toHaveLength(2);
+});
+
+test("close aborts synchronously, awaits late work, removes listeners, and is idempotent", async () => {
+  const f = fixture();
+  f.summaryScheduler.poll(binding);
+  await f.settle();
   let closed = false;
   const closing = f.summaryScheduler.close();
   void closing.then(() => {
@@ -201,9 +428,12 @@ test("close invalidates synchronously, awaits pending work and is idempotent", a
   expect(f.pending[0]!.signal.aborted).toBe(true);
   await f.settle();
   expect(closed).toBe(false);
-  f.pending[0]!.resolve("late");
+  f.pending[0]!.resolve("late output");
   await closing;
+  expect(closed).toBe(true);
   expect(f.bridge.summaries.save).not.toHaveBeenCalled();
+  expect(f.bridge.summaries.next).toHaveBeenCalledOnce();
+  expect(f.summaryScheduler.poll(binding)).toBe(false);
   expect(f.bridge.listenerCount("attach")).toBe(0);
   expect(f.bridge.listenerCount("status")).toBe(0);
   expect(f.bridge.listenerCount("detach")).toBe(0);

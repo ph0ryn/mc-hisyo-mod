@@ -9,6 +9,9 @@ export interface SummarySource {
   firstObservedAt: number;
   lastObservedAt: number;
   input: string;
+  /** Present together for minute batches; absent on legacy contiguous sources. */
+  minuteStart?: number;
+  eventIds?: number[];
 }
 
 const omittedFields = new Set([
@@ -85,6 +88,7 @@ interface Projection {
   key: string;
   sampleKey?: string;
   seen: string[];
+  separated?: boolean;
 }
 
 function typeCounts(items: readonly Record<string, unknown>[], field: string): string {
@@ -179,6 +183,7 @@ function stackMirrors(entries: readonly Projection[]) {
     if (
       scope !== previousScope ||
       entry.missingSequencesBefore ||
+      projection.separated ||
       event === "container_opened" ||
       event === "container_closed"
     ) {
@@ -257,6 +262,7 @@ function project(entries: readonly Projection[]): string {
   let separate = false;
   for (const original of entries) {
     const entry = original.entry;
+    if (original.separated) separate = true;
     if (entry.missingSequencesBefore) {
       gaps.push(
         `e${original.localId}: missing seq ${entry.missingSequencesBefore.from}..${entry.missingSequencesBefore.to}`,
@@ -313,6 +319,7 @@ function project(entries: readonly Projection[]): string {
 export function prepareSummaryInput(
   after: number,
   entries: readonly StoredEvent[],
+  options: { separateIdGaps?: boolean } = {},
 ): SummarySource | undefined {
   if (!entries.length) return;
   const first = entries[0]!;
@@ -326,6 +333,9 @@ export function prepareSummaryInput(
     if (entry.observation.sessionId !== first.observation.sessionId) break;
     // Input-local source-row labels; real IDs remain in cursor metadata.
     const projection = prepare(entry, included.length + 1);
+    // Minute/coverage filtering can hide semantic barriers from the arrival log.
+    if (options.separateIdGaps && included.length && entry.id !== previous + 1)
+      projection.separated = true;
     const candidate = [...included, projection];
     const from = Math.min(minTime, entry.observation.observedAt);
     const to = Math.max(maxTime, entry.observation.observedAt);

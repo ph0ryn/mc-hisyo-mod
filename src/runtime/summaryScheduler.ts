@@ -1,23 +1,20 @@
 import { EventEmitter } from "node:events";
 import type { AttachedSession, BridgeServer } from "../bridge/bridgeServer.js";
+import type { SummarySource } from "../events/summaryInput.js";
 import { sameSessionBinding, type SessionBinding } from "../protocol/bridge.js";
-import { ActivePlayClock } from "./activePlayClock.js";
 
 export interface SummarySchedulerOptions {
   bridge: Pick<BridgeServer, "on" | "off" | "readySession" | "summaries">;
   /** A stateless model call using shared credentials, independent of Durable startup. */
   summarize: (binding: SessionBinding, input: string, signal: AbortSignal) => Promise<string>;
-  now?: () => number;
   wallNow?: () => number;
 }
 
-/** A separate elapsed-time cadence while attached, including pauses; runs never reset it. */
+/** Drain the newest eligible minute first, including while main admission is paused. */
 export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
   readonly #bridge: SummarySchedulerOptions["bridge"];
   readonly #summarize: SummarySchedulerOptions["summarize"];
-  readonly #now: () => number;
   readonly #wallNow: () => number;
-  #clock = new ActivePlayClock();
   #session: AttachedSession | undefined;
   #epoch = 0;
   #failed = false;
@@ -29,7 +26,6 @@ export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
     super();
     this.#bridge = options.bridge;
     this.#summarize = options.summarize;
-    this.#now = options.now ?? (() => performance.now());
     this.#wallNow = options.wallNow ?? Date.now;
     this.#bridge.on("attach", this.#attach);
     this.#bridge.on("detach", this.#detach);
@@ -39,8 +35,6 @@ export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
   readonly #attach = (session: AttachedSession): void => {
     this.#invalidate();
     this.#session = session;
-    this.#clock = new ActivePlayClock();
-    this.#clock.setPlaying(true, this.#now());
   };
   readonly #detach = (binding: SessionBinding): void => {
     if (!this.#session || !sameSessionBinding(binding, this.#session.binding)) return;
@@ -53,23 +47,37 @@ export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
     this.#flight?.controller.abort();
   }
 
+  #current(binding: SessionBinding, epoch: number): boolean {
+    const ready = this.#bridge.readySession;
+    return (
+      !this.#closed &&
+      !this.#failed &&
+      epoch === this.#epoch &&
+      this.#session !== undefined &&
+      sameSessionBinding(binding, this.#session.binding) &&
+      ready !== undefined &&
+      sameSessionBinding(binding, ready.binding)
+    );
+  }
+
   poll(binding: SessionBinding): boolean {
-    const session = this.#session;
-    if (this.#closed || this.#failed || !session || !sameSessionBinding(binding, session.binding))
-      return false;
-    const due = this.#clock.poll(this.#now());
-    if (!due || this.#flight) return false;
-    const scope = { worldId: binding.worldId, playerId: binding.playerId };
-    const pending = this.#bridge.summaries.next(scope);
-    if (!pending) return false;
-    const { source } = pending;
     const epoch = this.#epoch;
+    if (this.#flight || !this.#current(binding, epoch)) return false;
+    const scope = { worldId: binding.worldId, playerId: binding.playerId };
     const controller = new AbortController();
-    const promise = (async () => {
+    let source: SummarySource | undefined;
+    let selectionFailure: Error | undefined;
+    // Publish the promise before selection or generation can synchronously reenter close/poll.
+    const promise = Promise.resolve().then(async () => {
       try {
-        const summary = await this.#summarize(binding, source.input, controller.signal);
-        if (this.#closed || epoch !== this.#epoch || controller.signal.aborted) return;
-        this.#bridge.summaries.save(scope, source, summary, this.#wallNow());
+        if (selectionFailure) throw selectionFailure;
+        while (source && this.#current(binding, epoch)) {
+          const summary = await this.#summarize(binding, source.input, controller.signal);
+          if (!this.#current(binding, epoch) || controller.signal.aborted) return;
+          this.#bridge.summaries.save(scope, source, summary, this.#wallNow());
+          if (!this.#current(binding, epoch)) return;
+          source = this.#bridge.summaries.next(scope, this.#wallNow())?.source;
+        }
       } catch (error) {
         if (!this.#closed && epoch === this.#epoch && !controller.signal.aborted) {
           this.#failed = true;
@@ -77,10 +85,17 @@ export class SummaryScheduler extends EventEmitter<{ fault: [error: Error] }> {
         }
       } finally {
         this.#flight = undefined;
+        // A replacement waits for old provider/usage settlement, then gets one fresh selection.
+        if (epoch !== this.#epoch && this.#session) this.poll(this.#session.binding);
       }
-    })();
+    });
     this.#flight = { controller, promise };
-    return true;
+    try {
+      source = this.#bridge.summaries.next(scope, this.#wallNow())?.source;
+    } catch (error) {
+      selectionFailure = error instanceof Error ? error : new Error("Summarization failed");
+    }
+    return source !== undefined;
   }
 
   close(): Promise<void> {

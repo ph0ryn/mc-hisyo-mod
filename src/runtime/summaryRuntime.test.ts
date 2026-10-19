@@ -5,6 +5,7 @@ import {
   fauxProvider,
   type AssistantMessage,
   type SimpleStreamOptions,
+  type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
@@ -70,7 +71,11 @@ async function fixture(
     authContext: { env: async () => undefined, fileExists: async () => false },
   });
   models.setProvider(provider.provider);
-  const respond = async (_context: unknown, options: SimpleStreamOptions | undefined) => {
+  const calls: string[] = [];
+  const respond = async (context: TranscriptContext, options: SimpleStreamOptions | undefined) => {
+    const input = context.messages.at(-1)!.content;
+    if (typeof input !== "string") throw new Error("Expected text-only summary input");
+    calls.push(input);
     const response = await reply(options);
     await options?.onProviderStreamEvent?.(
       {
@@ -81,7 +86,7 @@ async function fixture(
     );
     return response;
   };
-  provider.setResponses([respond, respond]);
+  provider.setResponses(Array.from({ length: 12 }, () => respond));
   const order: string[] = [];
   const modelAccess = {
     models,
@@ -136,7 +141,7 @@ async function fixture(
       },
     }),
     createScheduler: (options) => new RunScheduler({ ...options, startAgent }),
-    createSummaryScheduler: (options) => new SummaryScheduler({ ...options, now: () => now }),
+    createSummaryScheduler: (options) => new SummaryScheduler({ ...options, wallNow: () => now }),
     everySecond: (callback) => {
       sample = callback;
       return () => {};
@@ -156,6 +161,19 @@ async function fixture(
   await once(socket, "connect");
   const game = new RpcPeer(socket);
   await game.call("bridge.hello", { protocolVersion: 2, role: "game", token });
+  const sequences = new Map<string, number>();
+  const append = (binding: SessionBinding, observedAt: number, blockId = "minecraft:stone") => {
+    const seq = (sequences.get(binding.sessionId) ?? 0) + 1;
+    sequences.set(binding.sessionId, seq);
+    eventLog.append({
+      ...observations.find((observation) => observation.event === "block_broken")!,
+      ...binding,
+      seq,
+      observedAt,
+      position: [0, 64, 0],
+      data: { blockId, position: [0, 64, 0] },
+    });
+  };
   const attach = async (worldId: string, playerId: string) => {
     const binding = (await game.call("game.attach", {
       worldId,
@@ -166,12 +184,7 @@ async function fixture(
     })) as SessionBinding;
     scopes.push(binding);
     await game.call("game.ready", binding);
-    eventLog.append({
-      ...observations.find((observation) => observation.event === "block_broken")!,
-      ...binding,
-      seq: 1,
-      position: [0, 64, 0],
-    });
+    append(binding, 1_000);
     return binding;
   };
   const pending: ReturnType<typeof deferred>[] = [];
@@ -191,6 +204,8 @@ async function fixture(
     game,
     binding,
     attach,
+    append,
+    calls,
     summaries,
     provider,
     modelAccess,
@@ -219,7 +234,7 @@ test("paused summary saves while Durable startup is unresolved", async () => {
   f.at(60_000);
   await tick();
   expect(f.provider.state.callCount).toBe(1);
-  expect(f.summaries.cursor(scope(f.binding))).toBe(1);
+  expect(f.summaries.next(scope(f.binding), 60_000)).toBeUndefined();
   expect(f.summaries.context(scope(f.binding))).toContain("石を採掘した。");
   expect(f.usage()[0]!.activity.data).toMatchObject({ source: "summary", input: 7 });
   expect(f.ports.createModelAccess).toHaveBeenCalledOnce();
@@ -251,18 +266,75 @@ test("replacement discards old output but retains its late usage until provider 
   expect(f.usage()).toEqual([]);
   release.resolve();
   await tick();
-  expect(f.summaries.cursor(scope(f.binding))).toBe(0);
-  expect(f.usage()).toHaveLength(1);
-  expect(f.usage()[0]!.activity).toMatchObject({
+  expect(f.summaries.context(scope(f.binding))).toBe("");
+  const oldUsage = f.usage().filter(({ activity }) => activity.sessionId === f.binding.sessionId);
+  expect(oldUsage).toHaveLength(1);
+  expect(oldUsage[0]!.activity).toMatchObject({
     ...f.binding,
     data: { source: "summary", input: 7 },
   });
-  f.at(180_000);
-  await tick();
+  // Replacement starts as soon as the retained old flight settles, without another timer tick.
   expect(f.provider.state.callCount).toBe(2);
-  expect(f.summaries.cursor(scope(next))).toBeGreaterThan(0);
+  expect(f.summaries.next(scope(next), 120_000)).toBeUndefined();
   expect(f.summaries.context(scope(next))).toContain("new output");
-  expect(f.summaries.cursor(scope(f.binding))).toBe(0);
+  expect(f.summaries.context(scope(f.binding))).toBe("");
+  expect(f.onFault).not.toHaveBeenCalled();
+});
+
+test("latest minute, idle reverse-minute backfill, then new latest priority use one API flight", async () => {
+  const backfillEntered = deferred();
+  let release!: ReturnType<typeof deferred>;
+  let backfillSignal!: AbortSignal;
+  let active = 0;
+  let peak = 0;
+  let requests = 0;
+  const f = await fixture(async (options) => {
+    active++;
+    peak = Math.max(peak, active);
+    try {
+      if (++requests === 2) {
+        backfillSignal = options!.signal!;
+        backfillEntered.resolve();
+        await release.promise;
+      }
+      return fauxAssistantMessage("saved minute");
+    } finally {
+      active--;
+    }
+  });
+  release = f.hold();
+  f.append(f.binding, 61_000, "minecraft:dirt");
+  f.append(f.binding, 121_000, "minecraft:diamond_ore");
+  f.at(180_000);
+  await backfillEntered.promise;
+  expect(f.calls).toHaveLength(2);
+  expect(f.calls[0]).toContain("blockId=diamond_ore");
+  expect(f.calls[1]).toContain("blockId=dirt");
+
+  f.append(f.binding, 181_000, "minecraft:gold_ore");
+  f.at(240_000);
+  expect(backfillSignal.aborted).toBe(false);
+  expect(f.calls).toHaveLength(2);
+  release.resolve();
+  await tick();
+  expect(f.calls).toHaveLength(4);
+  expect(f.calls[2]).toContain("blockId=gold_ore");
+  expect(f.calls[3]).toContain("blockId=stone");
+  expect(peak).toBe(1);
+  expect(f.summaries.next(scope(f.binding), 240_000)).toBeUndefined();
+
+  f.at(300_000); // No eligible work: do not call the API or self-pump.
+  await tick();
+  expect(f.calls).toHaveLength(4);
+  f.append(f.binding, 300_001, "minecraft:iron_ore");
+  f.at(359_999);
+  await tick();
+  expect(f.calls).toHaveLength(4);
+  f.at(360_000);
+  await tick();
+  expect(f.calls).toHaveLength(5);
+  expect(f.calls[4]).toContain("blockId=iron_ore");
+  expect(f.usage()).toHaveLength(5);
   expect(f.onFault).not.toHaveBeenCalled();
 });
 

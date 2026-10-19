@@ -559,6 +559,28 @@ test("lossy display formatting never broadens identical-observation grouping", (
   expect(source.input).not.toMatch(/hand=|identical observations/u);
 });
 
+test("minute-filtered ID gaps preserve action and stack-mirror barriers", () => {
+  const repeated = prepareSummaryInput(0, [row(1), row(3)], { separateIdGaps: true })!;
+  expect(repeated.input.match(/block_broken/gu)).toHaveLength(2);
+  expect(repeated.input).not.toContain("identical observations");
+  const inventory = prepareSummaryInput(
+    0,
+    [
+      stackRow(1, "container_slot_changed", {
+        menuId: 1,
+        containerId: 2,
+        slot: 9,
+        containerSlot: 40,
+        playerInventory: true,
+      }),
+      stackRow(3, "inventory_slot_changed", { slot: 40 }),
+    ],
+    { separateIdGaps: true },
+  )!;
+  expect(inventory.input).toContain("container_slot_changed");
+  expect(inventory.input).toContain("inventory_slot_changed");
+});
+
 test("timestamp range uses all included rows, not arrival order", () => {
   const source = prepareSummaryInput(0, [
     row(1, "health_changed", { observedAt: 1000 }),

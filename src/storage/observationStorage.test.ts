@@ -102,7 +102,6 @@ test("independent persisted activities, HUD speech and hooks never enter observa
     expect(activities.search(scope).through).toBe(3);
     const before = rawDb.prepare("SELECT * FROM events").all();
     summaries.save(scope, source, "観測した操作を記録した。", 200);
-    expect(summaries.cursor(scope)).toBe(entry.id);
     expect(summaries.next(scope)).toBeUndefined();
     expect(rawDb.prepare("SELECT * FROM events").all()).toEqual(before);
     expect(activities.search(scope).events).toHaveLength(3);

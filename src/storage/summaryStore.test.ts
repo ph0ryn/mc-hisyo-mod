@@ -43,7 +43,8 @@ function fixture() {
     summaries,
     append,
     next: (now = 600_000) => summaries.next(scope, now)?.source,
-    save: (source: SummarySource, text = "石を採掘した。") => summaries.save(scope, source, text, 900_000),
+    save: (source: SummarySource, text = "石を採掘した。") =>
+      summaries.save(scope, source, text, 900_000),
     reopen: () => new SummaryStore(log, db),
   };
 }
@@ -126,7 +127,11 @@ test("500-row, input-byte and source-session caps leave the rest of the same min
   expect(second).toMatchObject({ minuteStart: 60_000, sourceCount: 1, eventIds: [502] });
   f.save(second);
   const third = f.next(120_000)!;
-  expect(third).toMatchObject({ minuteStart: 60_000, sourceCount: 1, sourceSessionId: "second-session" });
+  expect(third).toMatchObject({
+    minuteStart: 60_000,
+    sourceCount: 1,
+    sourceSessionId: "second-session",
+  });
   f.save(third);
   expect(f.next(120_000)?.minuteStart).toBe(0);
 
@@ -146,7 +151,10 @@ test("bounded raw transport pages can be combined without including a later minu
     f.append(61_000, "nearby_sampled", {
       data: {
         ...nearby.data,
-        blocks: Array.from({ length: 729 }, (_, n) => ({ blockId: "minecraft:stone", position: [n, 64, 0] })),
+        blocks: Array.from({ length: 729 }, (_, n) => ({
+          blockId: "minecraft:stone",
+          position: [n, 64, 0],
+        })),
       },
     });
   f.append(120_000);
@@ -163,7 +171,9 @@ test("summary text and coverage commit together; invalid or failed inserts do no
   const before = f.raw.prepare("SELECT * FROM events").all();
   for (const text of [" ", "あ".repeat(401), `bad${String.fromCharCode(0)}text`])
     expect(() => f.save(source, text)).toThrow();
-  f.db.exec("CREATE TRIGGER fail_summary BEFORE INSERT ON summaries BEGIN SELECT RAISE(ABORT, 'storage failure'); END");
+  f.db.exec(
+    "CREATE TRIGGER fail_summary BEFORE INSERT ON summaries BEGIN SELECT RAISE(ABORT, 'storage failure'); END",
+  );
   expect(() => f.save(source)).toThrow("storage failure");
   expect(f.next()).toEqual(source);
   expect(f.db.prepare("SELECT COUNT(*) AS count FROM summaries").get()!.count).toBe(0);
@@ -172,15 +182,22 @@ test("summary text and coverage commit together; invalid or failed inserts do no
   expect(f.next()).toBeUndefined();
   expect(() => f.save(source)).toThrow(/overlap|stale/i);
   expect(f.raw.prepare("SELECT * FROM events").all()).toEqual(before);
-  expect(JSON.parse(f.db.prepare("SELECT source_json FROM summaries").get()!.source_json as string)).toEqual(source);
+  expect(
+    JSON.parse(f.db.prepare("SELECT source_json FROM summaries").get()!.source_json as string),
+  ).toEqual(source);
 });
 
 test("legacy v1 range summaries remain valid coverage without migration or rewriting", () => {
   const f = fixture();
   for (const time of [1_000, 61_000, 121_000]) f.append(time);
   const legacy: SummarySource = {
-    after: 0, through: 2, sourceSessionId: sample.sessionId, sourceCount: 2,
-    firstObservedAt: 1_000, lastObservedAt: 61_000, input: "legacy raw projection",
+    after: 0,
+    through: 2,
+    sourceSessionId: sample.sessionId,
+    sourceCount: 2,
+    firstObservedAt: 1_000,
+    lastObservedAt: 61_000,
+    input: "legacy raw projection",
   };
   f.save(legacy, "legacy summary");
   const before = f.db.prepare("SELECT * FROM summaries").get();
@@ -194,8 +211,13 @@ test("legacy v1 range summaries remain valid coverage without migration or rewri
 });
 
 test.each([
-  ["model", "other-model"], ["requested_tier", "default"], ["prompt_version", 2],
-  ["created_at", -1], ["source_json", "{}"], ["source_through", 99], ["summary", " "],
+  ["model", "other-model"],
+  ["requested_tier", "default"],
+  ["prompt_version", 2],
+  ["created_at", -1],
+  ["source_json", "{}"],
+  ["source_through", 99],
+  ["summary", " "],
 ])("invalid stored %s fails closed before selection and context", (column, value) => {
   const f = fixture();
   f.append(1_000);
@@ -207,8 +229,11 @@ test.each([
 
 test("invalid explicit coverage metadata cannot consume or hide source rows", () => {
   for (const changes of [
-    { eventIds: [1, 1] }, { eventIds: [0] }, { eventIds: [2] },
-    { minuteStart: 1 }, { minuteStart: undefined }, { sourceCount: 2 },
+    { eventIds: [1, 1] },
+    { eventIds: [0] },
+    { eventIds: [2] },
+    { minuteStart: 1 },
+    { sourceCount: 2 },
   ]) {
     const f = fixture();
     f.append(1_000);
@@ -216,6 +241,11 @@ test("invalid explicit coverage metadata cannot consume or hide source rows", ()
     expect(() => f.save({ ...source, ...changes })).toThrow(/source/i);
     expect(f.next()).toEqual(source);
   }
+  const f = fixture();
+  f.append(1_000);
+  const partial = f.next()!;
+  delete partial.minuteStart;
+  expect(() => f.save(partial)).toThrow(/source/i);
 });
 
 test("main context uses target time rather than backfill insertion order and never includes source input", () => {
@@ -255,7 +285,11 @@ test("filtered projections still advance exact coverage and preserve raw storage
   const f = fixture();
   f.append(5_000, "structures_sampled");
   f.append(900, "status_effects_sampled", {
-    data: { ...observations.find((row) => row.event === "status_effects_sampled")!.data, effects: [], effectsTruncated: false },
+    data: {
+      ...observations.find((row) => row.event === "status_effects_sampled")!.data,
+      effects: [],
+      effectsTruncated: false,
+    },
   });
   const first = f.next()!;
   expect(first).toMatchObject({ firstObservedAt: 900, lastObservedAt: 5_000, eventIds: [1, 2] });

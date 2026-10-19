@@ -11,6 +11,8 @@ export interface EventSearch {
   event?: string;
   filter?: EventFilter;
   since?: number;
+  /** Internal exclusive event-time bound for completed summary windows. */
+  until?: number;
   after?: number | undefined;
   through?: number;
   limit?: number;
@@ -64,6 +66,11 @@ export function searchLog<Entry extends { id: number }>(
     validateCounter("since timestamp", options.since);
     clauses.push(`${storage.timestamp} >= ?`);
     params.push(options.since);
+  }
+  if (options.until !== undefined) {
+    validateCounter("until timestamp", options.until);
+    clauses.push(`${storage.timestamp} < ?`);
+    params.push(options.until);
   }
   if (options.event !== undefined) {
     clauses.push("event = ?");
