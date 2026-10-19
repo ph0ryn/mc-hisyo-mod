@@ -5,7 +5,7 @@
 [ServerObservations](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerObservations.java>)は、
 統合サーバーのcallback・Mixin・tick snapshotから32種類のイベントを作る。
 [定義](<../src/protocol/gameEvent.ts>)にはpayload schema、観測の確度、filter対象のscalarフィールドを宣言する。
-[client](<../mod/src/client/java/io/github/ph0ryn/mchisyo/DirectorClient.java>)への一度だけの登録とTCP送信は接続済み。
+[HisyoClient](<../mod/src/client/java/io/github/ph0ryn/mchisyo/HisyoClient.java>)への一度だけの登録とTCP送信は接続済み。
 実ゲームでの発火、native Mixin適用、配送の受入確認は未実施。
 
 観測対象は、ブロック破壊、inventory slot・体力・空腹・経験値・手持ち・位置の変化、
@@ -56,13 +56,12 @@ var observations = ServerObservations.register(isScopedPlayer, sink); // 最小�
 - 周辺sampleは20 ticksごと、block半径4（最大729座標）、entity半径16（遮蔽判定前の最大64候補、65件目で打切り）。
   snapshotと同じ[loaded-only遮蔽判定](<gameState.md#nearby>)を使い、`visibility: "unobstructed"`を付ける。
   壁裏・床下・プレイヤーから不可視のentityを除く。FOV・明るさ・近い順・完全な視認の保証ではない。
-  旧履歴のmarkerなしsampleは参照時にblock/entity配列を伏せ、coverageを不明として返す。元のDBは変更しない。
 - 包含構造物はloaded chunkのbounded metadataだけで、coverageは常に不完全。locate・生成・遠方座標探索をしない。
 - 天候はraw rain / thunder、半日phaseはraw day time由来で、明るさや体感の天候ではない。
 - advancementは元のawardを一度だけ呼び、その成功と前後の完了状態を観測する。進捗の再演や過去分の再送はしない。
   レシピ解放用の`<namespace>:recipes/…`もcriterion・完了を除外せず、他の観測と同じ1秒バッチで通知・記録する。
-  `hasDisplay`はnativeのdisplay metadataの有無を表し、実際のtoast表示の証拠ではない。旧履歴では欠け得る。
-  表示を持つ実績の完了だけが[hookなしでAIを起動する](<scheduling.md#aiを起動する入口>)。レシピを含むcriterionや内部進捗は履歴に残す。
+  `hasDisplay`は必須で、nativeのdisplay metadataの有無を表す。実際のtoast表示の証拠ではない。
+  表示を持つ実績の完了だけが[hookなしでrunを予約する](<scheduling.md#runを予約する入口>)。レシピを含むcriterionや内部進捗もevent logに残す。
 - 設置は成功したnative placement経路。拾得はitem entityから消費された個数で、inventory net増加とは限らない。
   dropはentity追加が`true`だった場合。grid / furnaceはnativeがcreditした結果個数で、全recipeやmodded経路を保証しない。
 - block / item useはserverへ到達した試行で、全packetや成功操作の全件ではない。callbackは常に`PASS`。
@@ -79,19 +78,19 @@ Chest / Ender Chest位置は実際にクリックしたblockから取り、取�
 本物の初回JOINはready predicateより前に不変metadataをcaptureし、同じserver / player identityが保たれた場合だけ、
 検証済み`game.ready` ACK後・baseline開始前に一度だけ送る。送信直後にもownerを再検証する。
 ready前のrespawn等で元のplayer identityが消えた場合は破棄し、後着snapshotからJOINを捏造しない。
-CLI attach / detachの内部履歴はnative JOIN / LEAVEの代用ではない。接続前・終端・切断中のcoverageはunknownのまま。
+CLI attach / detachのactivity logはnative JOIN / LEAVEの代用ではない。接続前・終端・切断中のcoverageはunknownのまま。
 
 ## ゲームを起動しない検証
 
-[共有fixture](<../src/protocol/fixtures/observerEvents.json>)を
+[共有fixture](<../src/protocol/fixtures/gameEvents.json>)を
 [TypeScriptテスト](<../src/protocol/gameEvent.test.ts>)と
-[JUnitテスト](<../mod/src/test/java/io/github/ph0ryn/mchisyo/observation/ObserverTest.java>)の両方で読む。
+[JUnitテスト](<../mod/src/test/java/io/github/ph0ryn/mchisyo/observation/ObservationsTest.java>)の両方で読む。
 Java側はsnapshot差分、プレイヤー別baseline、sample、reset、不変DTO、明示nullを検証する。
 
 `mod`ディレクトリで実行する。
 
 ```bash
-./gradlew test --tests '*ObserverTest'
+./gradlew test --tests '*ObservationsTest'
 ```
 
 依存がcache済みなら`--offline`を追加できる。通常の`test` / `check` / `build`もこのJUnitテストを実行する。

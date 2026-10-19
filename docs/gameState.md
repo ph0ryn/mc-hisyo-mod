@@ -1,8 +1,8 @@
-# 現在状態のsnapshot
+# game state
 
-[状態schema](<../src/protocol/gameSnapshot.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
+[状態schema](<../src/protocol/gameState.ts>)と[bridge要求schema](<../src/protocol/bridge.ts>)を実装済み。
 現在のunit suiteは実TCPの接続境界を検証しない。
-[Pi拡張](<../src/pi/directorBridge.ts>)のcontext注入は実装済み。
+[Pi拡張](<../src/pi/piExtension.ts>)のcontext注入は実装済み。
 [Mod producer](<../mod/src/main/java/io/github/ph0ryn/mchisyo/observation/ServerGameState.java>)と接続済み。
 以下は実装契約であり、ゲーム内の動作実績ではない。
 
@@ -16,7 +16,7 @@
 空の`state: {}`で成功扱いにしない。[取消の順序](<protocol.md#native側が先にrunを無効化した場合>)を参照。
 応答のawait後にもbindingを再検証する。schemaは形式の検証であり、Modが報告した値の真正性や実世界との一致を証明するものではない。
 
-完全なJSON例は[共有fixture](<../src/protocol/fixtures/gameSnapshot.json>)を参照。
+完全なJSON例は[共有fixture](<../src/protocol/fixtures/gameState.json>)を参照。
 
 ## 必須field
 
@@ -76,7 +76,7 @@ biomeもchunk取得の待機や生成を伴わない経路を使い、取得で�
 上限件数の配列・上限長の文字列・大きな数値について、多バイト文字とJSON escapeを含む応答をテストする。
 同梱の`RpcPeer`が生成する短い10進数字列のrequest IDで、最大長のbindingを含めても1 MiB frameへ収まることを確認する。
 blockのstate propertyやblock entityのNBTは含めない。これは保守的な幾何sampleで、実際に見たことの証明ではない。
-未知の情報をどうプレイヤーへ伝えるかは、[Directorの方針](<concept.md>)と区別して扱う。
+未知の情報をどうプレイヤーへ伝えるかは、[hisyoの方針](<concept.md>)と区別して扱う。
 
 ### 実ゲームでの遮蔽回帰確認（手動）
 
@@ -104,7 +104,7 @@ snapshotも同じproducerを使う。
 専用data directoryの最新sampleを読み、`observed_at`が更新されたことと、次の期待値を確認する。
 
 ```sh
-sqlite3 -readonly "$DATA/history.sqlite" \
+sqlite3 -readonly "${DATA:?}/eventLog.sqlite" \
   "SELECT observed_at, observation_json FROM events WHERE event='nearby_sampled' ORDER BY id DESC LIMIT 1;"
 ```
 
