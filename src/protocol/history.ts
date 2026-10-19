@@ -5,8 +5,9 @@ import { WorldBindingSchema, RunBindingSchema } from "./bridge.js";
 export const summaryPromptBytes = 12_000;
 export const summaryTextBytes = 1_200;
 export const historyContextBytes = 6_000;
-export const summarySystemPrompt = `これはMinecraftのプレイヤーのイベントログです。その期間中の主な活動の流れと、得られた成果・進捗・重要な変化を、事実に忠実に文章化してください。
-出力は行動履歴の大筋を把握するために使用されるため、厳密な座標は不要です。アイテム・ブロックなどのIDは入力のまま残してください。`;
+export const summarySystemPrompt = `These are Minecraft player event logs. Describe the main flow of activities during this period, the results and progress achieved, and any important changes, staying faithful to the facts.
+The output is used to understand the broad course of activities, so precise coordinates are unnecessary. Preserve item, block, and other IDs exactly as they appear in the input.
+Describe what happened; omit statements about what was not observed or recorded.`;
 export const summaryInputBytes = summaryPromptBytes - Buffer.byteLength(summarySystemPrompt);
 
 const strict = { additionalProperties: false } as const;

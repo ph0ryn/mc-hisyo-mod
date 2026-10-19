@@ -5,6 +5,7 @@ import { Check } from "typebox/value";
 import { expect, test, vi } from "vite-plus/test";
 import { staleRunErrorCode, type RunBinding } from "../protocol/bridge.js";
 import snapshot from "../protocol/fixtures/gameSnapshot.json" with { type: "json" };
+import { summarySystemPrompt } from "../protocol/history.js";
 import type { RpcParams } from "../protocol/jsonRpc.js";
 import { RpcError } from "../transport/rpcPeer.js";
 import directorBridge from "./directorBridge.js";
@@ -154,6 +155,7 @@ test("independent memory requests Fast via priority with low reasoning and no to
   });
   expect(h.complete).toHaveBeenCalledOnce();
   expect(h.complete.mock.calls[0]![1]).toMatchObject({
+    systemPrompt: summarySystemPrompt,
     messages: [{ role: "user", content: summaryRequest.input }],
   });
   expect(h.complete.mock.calls[0]![1]).not.toHaveProperty("tools");
