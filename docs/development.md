@@ -24,7 +24,6 @@ storage境界ではSIGKILLした子processのcommitとdead-owner lock回収を�
 | [DurableAgent tests](<../src/runtime/durableAgent.test.ts>) | 実Harnessとtemp SQLiteで再open、submission重複排除、保留generation、10 Tool、Tool後のcontext更新、fail-closed、unsafe Toolの非再送、独立summary、取消usage |
 | [RunInbox tests](<../src/runtime/runInbox.test.ts>) | 受付済み同文チャットの順序、予約 / submit間の再open、安定request ID、clear、容量超過rollback |
 | [Durable storage tests](<../src/runtime/durableStorage.test.ts>) | scope別所有者とprivate file、実SIGKILL後のcommit復旧・dead PID lock回収、symlink拒否 |
-| [built CLI smoke](<../scripts/cliSmoke.test.mjs>) | PATHに実行基盤がなくてもhelp・起動・SIGTERM cleanupが動き、秘密を出さず不正flagを拒否。実ゲーム・モデル要求はなし |
 | [bridge tests](<../src/bridge/bridgeServer.test.ts>) | 実TCPのfake gameとSQLiteで認証、binding、直接host API、非同期受付ACK、記録、stale / native-first取消 |
 | [modelAccess tests](<../src/runtime/modelAccess.test.ts>) / [credential tests](<../src/runtime/piCredentialStore.test.ts>) | fake認証とfake fetchでPATH非依存、固定catalog、lock下のrotation、取消中の保存、秘密の非露出、fallback拒否 |
 | [scheduler tests](<../src/runtime/runScheduler.test.ts>) / [composition tests](<../src/runtime/hisyoRuntime.test.ts>) | 公開依存portと実Durableのdocumentを使い、single-flight、pause、受付、終了順序を確認 |
@@ -45,7 +44,7 @@ pnpm run verify
 pnpm run build:mod
 ```
 
-`verify`はcheck・ESM build・Vitest・built CLI smokeを実行する。Fabric buildはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
+`verify`はcheck・ESM build・Vitestを実行する。Fabric buildはゲーム起動やEULA同意を行わず、既存ワールドを使わない。
 依存が配置済みなら、`./node_modules/.bin/vp check`、`./node_modules/.bin/vp pack`、`./node_modules/.bin/vp test`を直接使える。
 Vite+はプロジェクトローカル版を使い、[設定](<../vite.config.ts>)で型検査付きlint、Vitest、ESM buildを管理する。
 テストは対象実装の隣へ置く。
